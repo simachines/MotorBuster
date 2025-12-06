@@ -2,8 +2,7 @@
 
 **Fedit 2.0** is a specialized Digital Audio Workstation (DAW) designed for **Force Feedback** sequencing. Instead of creating audio, it allows you to sequence haptic effects (vibrations, forces, textures) and play them back in real-time on any DirectInput/XInput compatible device (Gamepads, Steering Wheels, Flight Sticks).
 
-![Fedit Screenshot](https://via.placeholder.com/800x450?text=Fedit+DAW+Screenshot)
-*(Replace with actual screenshot)*
+<img width="1895" height="1188" alt="image" src="https://github.com/user-attachments/assets/43e7f935-1c6e-44d4-b459-97b9709e49a3" />
 
 ## 🚀 Features
 
