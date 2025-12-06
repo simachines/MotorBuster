@@ -1,0 +1,60 @@
+# Fedit 2.0 - Haptic DAW Sequencer
+
+**Fedit 2.0** is a specialized Digital Audio Workstation (DAW) designed for **Force Feedback** sequencing. Instead of creating audio, it allows you to sequence haptic effects (vibrations, forces, textures) and play them back in real-time on any DirectInput/XInput compatible device (Gamepads, Steering Wheels, Flight Sticks).
+
+![Fedit Screenshot](https://via.placeholder.com/800x450?text=Fedit+DAW+Screenshot)
+*(Replace with actual screenshot)*
+
+## 🚀 Features
+
+*   **Haptic Sequencing**: arrange haptic clips on a timeline just like audio.
+*   **Real-Time Playback**: Feel the effects instantly as the playhead moves.
+*   **Rich Effect Library**:
+    *   **Sine**: Smooth periodic vibrations.
+    *   **Constant**: Steady force/pressure.
+    *   **Ramp**: Linear force gradients.
+    *   **Sawtooth**: Sharp, rhythmic textures.
+*   **Full Editing**:
+    *   **Drag & Drop** from palette.
+    *   **Resize** clips by dragging edges.
+    *   **Move** clips across tracks and time.
+*   **Project Management**: Save and Load your haptic compositions (`.fedit` JSON files).
+*   **Broad Hardware Support**: Built on SDL2, supporting most game controllers.
+
+## 🛠️ Installation & Build
+
+Fedit is built with Python and Dear PyGui.
+
+### Prerequisites
+*   Python 3.12+
+*   `pip install -r requirements.txt` (see dependencies below)
+
+### Dependencies
+```bash
+pip install dearpygui pysdl2
+```
+*Note: You also need the SDL2 DLLs. The build script handles this for the standalone version.*
+
+### Building Standalone (Windows)
+To create a portable `.exe`:
+
+1.  Clone the repository.
+2.  Run the build script:
+    ```bash
+    python build_native.py
+    ```
+3.  The executable will be in `dist/Fedit.exe`.
+
+## 🎮 Usage
+
+1.  **Connect Controller**: Plug in your Gamepad or Haptic Device.
+2.  **Launch**: Run `Fedit.exe`.
+3.  **Connect**: Click **Scan** and then **Connect** in the top bar to initialize your device.
+4.  **Compose**:
+    *   Drag effects from the left palette to the timeline.
+    *   Drag clip edges to change duration.
+    *   Click a clip to edit Intensity/Frequency in the Inspector.
+5.  **Play**: Hit the **Play** button to feel your sequence!
+
+## 📄 License
+MIT License. Free to use and modify.
