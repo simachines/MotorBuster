@@ -37,7 +37,8 @@ class Track:
 
 class FeditSequencer:
     def __init__(self):
-        self.tracks = [Track(name="Master Force"), Track(name="Rumble A"), Track(name="Rumble B"), Track(name="Aux")]
+        # Default tracks renamed to "1", "2"...
+        self.tracks = [Track(name=f"{i+1}") for i in range(4)]
         self.is_playing = False
         self.current_time = 0.0
         self.last_tick = 0.0
@@ -71,6 +72,7 @@ class FeditNativeApp:
     def __init__(self):
         self.sequencer = FeditSequencer()
         self.log_items = []
+        self.renaming_track_idx = -1
         
         dpg.create_context()
         self.setup_ui()
@@ -100,7 +102,6 @@ class FeditNativeApp:
             dpg.set_value("device_combo", "No Devices Found")
 
     def connect_device_by_name(self, name):
-         # Logic to parse name/index and connect
          try:
              idx = int(name.split("#")[-1].replace(")", ""))
              if engine.connect_device(idx):
@@ -129,22 +130,64 @@ class FeditNativeApp:
             for t in self.sequencer.tracks:
                 for c in t.clips: c.active_effect_id = -1
 
+    def get_canvas_relative_pos(self, global_mouse_pos):
+        # Helper to get coords relative to timeline content
+        try:
+             # Rely on node_pos vs scroll.
+             c_min = dpg.get_item_rect_min("timeline_canvas")
+             return global_mouse_pos[0] - c_min[0], global_mouse_pos[1] - c_min[1]
+        except:
+             return 0,0
+
     def update_loop(self):
-        # Handle Resize
-        # dpg.set_item_width("timeline_group", dpg.get_viewport_width() - 250)
+        # Mouse logic for Dragging Clips vs Scrubbing
+        if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
+             mpos = dpg.get_mouse_pos(local=False)
+             rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+             
+             # If we are dragging a clip
+             if self.sequencer.drag_clip:
+                  # Calculate new time/track
+                  new_px = rel_x - self.sequencer.drag_offset
+                  new_t = max(0.0, new_px / self.sequencer.zoom_x)
+                  
+                  track_h = 80
+                  new_track_idx = int(rel_y // track_h)
+                  
+                  # Update clip
+                  clip = self.sequencer.drag_clip
+                  clip.start_time = new_t
+                  
+                  # Move track if changed
+                  if 0 <= new_track_idx < len(self.sequencer.tracks):
+                      if clip.track_index != new_track_idx:
+                          # Remove from old
+                          old_track = self.sequencer.tracks[clip.track_index]
+                          if clip in old_track.clips:
+                              old_track.clips.remove(clip)
+                          # Add to new
+                          clip.track_index = new_track_idx
+                          self.sequencer.tracks[new_track_idx].clips.append(clip)
+                          
+             # Else if hovering canvas (and not dragging clip)
+             elif dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip:
+                 # Scrubbing
+                 new_t = max(0.0, rel_x / self.sequencer.zoom_x)
+                 self.sequencer.current_time = new_t
+
+        else:
+            # Mouse Up - Release Drag
+            if self.sequencer.drag_clip:
+                self.sequencer.drag_clip = None
         
         if self.sequencer.is_playing:
             now = time.time()
             dt = now - self.sequencer.last_tick
             self.sequencer.last_tick = now
             self.sequencer.current_time += dt
+            if self.sequencer.is_playing: self.process_sequencer_logic()
             
-            # Loop (e.g. at 30s) or Stop? Let's just run.
-            dpg.set_value("time_display", f"{self.sequencer.current_time:.2f}s")
-            
-            # Trigger Effects
-            self.process_sequencer_logic()
-            
+        dpg.set_value("time_display", f"{self.sequencer.current_time:.2f}s")
         self.render_timeline()
 
     def process_sequencer_logic(self):
@@ -157,71 +200,136 @@ class FeditNativeApp:
                     # Should be playing
                     if clip.active_effect_id == -1:
                         # Start it
-                        # Map type to engine call
                         if clip.type == "Sine":
-                           # Create Sine
                            eid = engine.start_effect_sine(clip.frequency, clip.magnitude, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                         elif clip.type == "Constant":
                            eid = engine.start_effect_constant(clip.magnitude, int(clip.duration * 1000))
                            clip.active_effect_id = eid
-                        # Add frequency sweep logic later?
                 else:
                     # Should stop
                     if clip.active_effect_id != -1:
-                        # engine.stop_effect(clip.active_effect_id) # Need targeted stop
                         clip.active_effect_id = -1
                         pass
 
     # --- Rendering ---
     def render_timeline(self):
-        # Clear canvas
         dpg.delete_item("timeline_canvas", children_only=True, slot=2)
         
-        # Draw Background
-        # Tracks
         y_offset = 0
         track_height = 80
+        total_w = 3000
         
         for i, track in enumerate(self.sequencer.tracks):
-             # Draw lane
-             dpg.draw_rectangle([0, y_offset], [2000, y_offset + track_height], color=(30, 30, 35), fill=(30, 30, 35), parent="timeline_canvas")
-             dpg.draw_line([0, y_offset + track_height], [2000, y_offset+track_height], color=(50, 50, 50), parent="timeline_canvas")
+             bg_col = (40, 40, 45) if i % 2 == 0 else (35, 35, 40)
+             dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
+             dpg.draw_line([0, y_offset + track_height], [total_w, y_offset+track_height], color=(60, 60, 60), parent="timeline_canvas")
+             dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
              
-             # Draw Clips
              for clip in track.clips:
                  x_start = clip.start_time * self.sequencer.zoom_x
                  width = clip.duration * self.sequencer.zoom_x
                  
-                 color = (100, 150, 255) if clip != self.sequencer.selected_clip else (255, 200, 100)
-                 
-                 if clip == self.sequencer.selected_clip:
-                      dpg.draw_rectangle([x_start, y_offset + 5], [x_start + width, y_offset + track_height - 5], color=(255, 255, 255), thickness=2, parent="timeline_canvas")
+                 base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
+                 if clip.type == "Constant": base_col = (100, 255, 100)
+                 if clip.type == "Ramp": base_col = (255, 255, 100)
+                 if clip.type == "Sawtooth": base_col = (255, 150, 50)
 
-                 dpg.draw_rectangle([x_start, y_offset + 5], [x_start + width, y_offset + track_height - 5], color=color, fill=(color[0], color[1], color[2], 100), parent="timeline_canvas")
-                 dpg.draw_text([x_start + 5, y_offset + 10], clip.type, size=14, parent="timeline_canvas")
+                 border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
+                 
+                 dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
+                 dpg.draw_text([x_start + 5, y_offset + 25], clip.type, size=13, parent="timeline_canvas")
 
              y_offset += track_height
-             
-        # Playhead
+        
         px = self.sequencer.current_time * self.sequencer.zoom_x
         dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
 
+    def delete_selected_clip(self):
+        if self.sequencer.selected_clip:
+            self.sequencer.delete_clip(self.sequencer.selected_clip)
+            self.sequencer.selected_clip = None
+            dpg.hide_item("btn_delete")
+
+    def on_drop_receive(self, sender, app_data):
+        print(f"DEBUG DROP: Sender={sender}, Data={app_data}")
+        self.handle_drop(app_data, sender) # Pass sender to debug
+
+    def handle_drop(self, effect_type, sender="Unknown"):
+        if not isinstance(effect_type, str): return
+        
+        mpos = dpg.get_mouse_pos(local=False)
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+        track_h = 80
+        track_idx = int(rel_y // track_h)
+        
+        self.log(f"Drop [{sender}]: {effect_type} at {int(rel_x)},{int(rel_y)} -> Tk {track_idx+1}")
+        
+        if 0 <= track_idx < len(self.sequencer.tracks):
+             time_s = max(0.0, rel_x / self.sequencer.zoom_x)
+             clip = self.sequencer.add_clip(track_idx, effect_type, time_s)
+             self.sequencer.selected_clip = clip
+             self.log(f"Created Clip: {time_s:.2f}s")
+        else:
+             self.log(f"Drop Skipped: Invalid Track {track_idx}")
+
     def canvas_click(self, sender, app_data):
-        # Very basic hit testing for example
-        mpos = dpg.get_mouse_pos(local=False) # Global coordinates? Need relative to canvas...
-        # DPG mouse handling on canvas is tricky without an item handler. 
-        # For this MVP, we rely on the Inspector to modify selected stuff or just 'Add' buttons.
-        pass
+        mpos = dpg.get_mouse_pos(local=False)
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+        track_h = 80
+        track_idx = int(rel_y // track_h)
+        time_s = rel_x / self.sequencer.zoom_x
+        
+        mouse_btn = app_data[0]
+        
+        if mouse_btn == 1:
+            if 0 <= track_idx < len(self.sequencer.tracks):
+                self.renaming_track_idx = track_idx
+                if dpg.does_item_exist("win_track_opts"): dpg.delete_item("win_track_opts")
+                
+                with dpg.window(tag="win_track_opts", label=f"Track {track_idx+1} Options", width=300, height=120, modal=True, show=True):
+                    dpg.add_input_text(tag="input_rename", default_value=self.sequencer.tracks[track_idx].name)
+                    def do_rename(s, a, u):
+                        name = dpg.get_value("input_rename")
+                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                            self.sequencer.tracks[self.renaming_track_idx].name = name
+                        dpg.delete_item("win_track_opts")
+                    def do_delete(s, a, u):
+                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                            del self.sequencer.tracks[self.renaming_track_idx]
+                            self.sequencer.selected_clip = None 
+                        dpg.delete_item("win_track_opts")
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Rename", callback=do_rename)
+                        dpg.add_button(label="Delete Track", callback=do_delete)
+                        dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_track_opts"))
+            return
 
-    def on_drop_effect(self, sender, app_data, user_data):
-        # user_data is track index
-        effect_type = app_data
-        # Add at 0 or current cursor?
-        self.sequencer.add_clip(user_data, effect_type, start_time=self.sequencer.current_time)
-
+        found = False
+        if 0 <= track_idx < len(self.sequencer.tracks):
+             clip = self.sequencer.get_clip_at(track_idx, time_s)
+             if clip:
+                 self.sequencer.selected_clip = clip
+                 dpg.set_value("insp_start", clip.start_time)
+                 dpg.set_value("insp_dur", clip.duration)
+                 dpg.set_value("insp_mag", clip.magnitude)
+                 dpg.set_value("insp_freq", clip.frequency)
+                 dpg.show_item("btn_delete")
+                 found = True
+                 
+                 self.sequencer.drag_clip = clip
+                 clip_px = clip.start_time * self.sequencer.zoom_x
+                 self.sequencer.drag_offset = rel_x - clip_px
+        
+        if not found:
+             self.sequencer.selected_clip = None
+             dpg.hide_item("btn_delete")
+             self.sequencer.current_time = max(0.0, time_s)
+             self.log(f"Seek to {self.sequencer.current_time:.2f}s")
+             
     def update_selected_clip(self, sender, app_data, user_data):
-        # Update param from inspector
         if not self.sequencer.selected_clip: return
         param = user_data
         if param == "freq": self.sequencer.selected_clip.frequency = app_data
@@ -233,7 +341,7 @@ class FeditNativeApp:
     def make_drag_source(self, label, type):
         with dpg.group():
              dpg.add_button(label=label, width=100)
-             with dpg.drag_payload(drag_data=type, payload_type="EFFECT"):
+             with dpg.drag_payload(drag_data=type): # Removed payload_type for compatibility
                  dpg.add_text(f"Effect: {label}")
 
     def setup_ui(self):
@@ -244,6 +352,10 @@ class FeditNativeApp:
         dpg.bind_theme(global_theme)
 
         with dpg.window(tag="Main"):
+            # Set Main as a fallback drop target without payload type check
+            try: dpg.set_item_drop_callback("Main", self.on_drop_receive)
+            except: pass
+
             # Top Bar
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=10)
@@ -282,27 +394,28 @@ class FeditNativeApp:
                         dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
 
                     # Col 2: Timeline
-                    with dpg.group():
-                         # Drop Target Container
+                    with dpg.group(tag="timeline_group"):
+                         # Scroll Window
                          with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True):
-                             with dpg.group(tag="timeline_group"):
                                  with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
                                      pass 
-                             
-                             # Drop Target
-                             with dpg.drag_payload(parent="timeline_group", drag_data="ignore", payload_type="EFFECT"):
-                                 pass 
-                                 
-                             with dpg.item_handler_registry(tag="timeline_click_handler"):
+                                     
+                         # EXPLICIT TARGET to handle drop visualization and acceptance
+                         with dpg.drag_drop_target(parent="timeline_scroll"):
+                             dpg.add_text("Drop to Add Clip")
+                         
+                         with dpg.item_handler_registry(tag="timeline_click_handler"):
                                  dpg.add_item_clicked_handler(callback=self.canvas_click)
                              
-                             dpg.bind_item_handler_registry("timeline_canvas", "timeline_click_handler")
+                         dpg.bind_item_handler_registry("timeline_canvas", "timeline_click_handler")
                              
-                             # Enable Drop on the Group
-                             dpg.set_item_drop_callback("timeline_group", self.on_drop_receive)
+                         # Enable Drop
+                         try:
+                             dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
+                         except Exception as e: print(f"Init Warning: {e}")
 
                     # Col 3: Inspector
-                    with dpg.child_window(height=-1):
+                    with dpg.child_window(tag="inspector_win", height=-1):
                         dpg.add_text("Inspector")
                         dpg.add_separator()
                         dpg.add_input_float(label="Start (s)", tag="insp_start", callback=self.update_selected_clip, user_data="start")
@@ -316,112 +429,17 @@ class FeditNativeApp:
                         dpg.add_text("Log")
                         dpg.add_listbox(tag="log_list", num_items=10, width=-1)
 
-    def delete_selected_clip(self):
-        if self.sequencer.selected_clip:
-            self.sequencer.delete_clip(self.sequencer.selected_clip)
-            self.sequencer.selected_clip = None
-            dpg.hide_item("btn_delete")
-
-    def on_drop_receive(self, sender, app_data):
-        self.handle_drop(app_data)
-
-    def handle_drop(self, effect_type):
-        # Calculate where we dropped
-        # dpg.get_mouse_pos is global. 
-        # dpg.get_item_pos("timeline_canvas") is relative to window
-        mpos = dpg.get_mouse_pos(local=False) # Global
-        cpos = dpg.get_item_pos("timeline_canvas") # Global pos of canvas
-        
-        rel_x = mpos[0] - cpos[0] + dpg.get_x_scroll("timeline_scroll")
-        rel_y = mpos[1] - cpos[1] + dpg.get_y_scroll("timeline_scroll")
-        
-        # Determine Track
-        track_h = 80
-        track_idx = int(rel_y // track_h)
-        if 0 <= track_idx < len(self.sequencer.tracks):
-            # Time
-            time_s = max(0.0, rel_x / self.sequencer.zoom_x)
-            self.sequencer.add_clip(track_idx, effect_type, time_s)
-            self.log(f"Added {effect_type} to Track {track_idx} at {time_s:.2f}s")
-
-    def canvas_click(self, sender, app_data):
-        # app_data is (button, ...)
-        # We need mouse pos again
-        mpos = dpg.get_mouse_pos(local=False)
-        cpos = dpg.get_item_pos("timeline_canvas") 
-        rel_x = mpos[0] - cpos[0] + dpg.get_x_scroll("timeline_scroll")
-        rel_y = mpos[1] - cpos[1] + dpg.get_y_scroll("timeline_scroll")
-        
-        # Hit Test Clips
-        track_h = 80
-        track_idx = int(rel_y // track_h)
-        time_s = rel_x / self.sequencer.zoom_x
-        
-        found = False
-        if 0 <= track_idx < len(self.sequencer.tracks):
-             clip = self.sequencer.get_clip_at(track_idx, time_s)
-             if clip:
-                 self.sequencer.selected_clip = clip
-                 # Update Inspector
-                 dpg.set_value("insp_start", clip.start_time)
-                 dpg.set_value("insp_dur", clip.duration)
-                 dpg.set_value("insp_mag", clip.magnitude)
-                 dpg.set_value("insp_freq", clip.frequency)
-                 dpg.show_item("btn_delete")
-                 found = True
-        
-        if not found:
-            self.sequencer.selected_clip = None
-            dpg.hide_item("btn_delete")
-            # Seek if clicking emptiness?
-            self.sequencer.current_time = max(0.0, time_s)
-            self.log(f"Seek to {self.sequencer.current_time:.2f}s")
-    
-    # --- Rendering ---
-    def render_timeline(self):
-        dpg.delete_item("timeline_canvas", children_only=True, slot=2)
-        
-        # Grid/Background
-        y_offset = 0
-        track_height = 80
-        total_w = 3000
-        
-        for i, track in enumerate(self.sequencer.tracks):
-             # Alternating background
-             bg_col = (40, 40, 45) if i % 2 == 0 else (35, 35, 40)
-             dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
-             dpg.draw_line([0, y_offset + track_height], [total_w, y_offset+track_height], color=(60, 60, 60), parent="timeline_canvas")
-             dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
-             
-             for clip in track.clips:
-                 x_start = clip.start_time * self.sequencer.zoom_x
-                 width = clip.duration * self.sequencer.zoom_x
-                 
-                 # Colors
-                 base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
-                 if clip.type == "Constant": base_col = (100, 255, 100)
-                 
-                 border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
-                 
-                 dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
-                 dpg.draw_text([x_start + 5, y_offset + 25], clip.type, size=13, parent="timeline_canvas")
-
-             y_offset += track_height
-        
-        # Playhead
-        px = self.sequencer.current_time * self.sequencer.zoom_x
-        dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
+        # DIAGNOSTIC DROP BINDINGS
+        try:
+            dpg.set_item_drop_callback("Main", self.on_drop_receive)
+            dpg.set_item_drop_callback("inspector_win", self.on_drop_receive)
+        except Exception as e: print(f"Main Drop Bind Error: {e}")
 
     def run(self):
         dpg.create_viewport(title='Fedit DAW 2.0', width=1280, height=800)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("Main", True)
-        
-        # Setup Drop Callback on the WINDOW or GROUP
-        # Trick: drag_payload goes on source. dnd_drop_target is strictly a widget wrapper.
-        # But we can't wrap the canvas easily if it's a drawlist? 
-        # Actually we can wrap the GROUP.
         
         self.scan_devices()
 
