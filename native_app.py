@@ -398,11 +398,11 @@ class FeditNativeApp:
                          # Scroll Window
                          with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True):
                                  with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
-                                     pass 
-                                     
+                                    pass
+
                          # EXPLICIT TARGET to handle drop visualization and acceptance
-                         with dpg.drag_drop_target(parent="timeline_scroll"):
-                             dpg.add_text("Drop to Add Clip")
+                         # Removed invalid widget call. Relying on Main Window callback.
+                         dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
                          
                          with dpg.item_handler_registry(tag="timeline_click_handler"):
                                  dpg.add_item_clicked_handler(callback=self.canvas_click)
@@ -411,6 +411,8 @@ class FeditNativeApp:
                              
                          # Enable Drop
                          try:
+                             # We set the callback on the Main window at the end of setup_ui
+                             # But we can also try the child window one last time as a backup
                              dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
                          except Exception as e: print(f"Init Warning: {e}")
 
@@ -429,10 +431,9 @@ class FeditNativeApp:
                         dpg.add_text("Log")
                         dpg.add_listbox(tag="log_list", num_items=10, width=-1)
 
-        # DIAGNOSTIC DROP BINDINGS
+        # FINAL BINDING
         try:
             dpg.set_item_drop_callback("Main", self.on_drop_receive)
-            dpg.set_item_drop_callback("inspector_win", self.on_drop_receive)
         except Exception as e: print(f"Main Drop Bind Error: {e}")
 
     def run(self):
