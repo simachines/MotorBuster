@@ -268,6 +268,39 @@ class HapticController:
             sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
         return new_id
         
+    def start_effect_ramp(self, start_mag: int, end_mag: int, duration_ms: int):
+        if not self.haptic: return -1
+
+        effect = sdl2.SDL_HapticEffect()
+        effect.type = sdl2.SDL_HAPTIC_RAMP
+        effect.ramp.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.ramp.length = duration_ms
+        effect.ramp.start = start_mag
+        effect.ramp.end = end_mag
+        
+        new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
+        if new_id != -1:
+            sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+        return new_id
+
+    def start_effect_sawtooth(self, magnitude: int, period: int, duration_ms: int):
+        if not self.haptic: return -1
+
+        effect = sdl2.SDL_HapticEffect()
+        effect.type = sdl2.SDL_HAPTIC_SAWTOOTHUP
+        effect.periodic.type = sdl2.SDL_HAPTIC_SAWTOOTHUP
+        effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.periodic.period = period
+        effect.periodic.magnitude = magnitude
+        effect.periodic.length = duration_ms
+        effect.periodic.attack_length = 50
+        effect.periodic.fade_length = 50
+        
+        new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
+        if new_id != -1:
+            sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+        return new_id
+        
     def stop_effect(self, effect_id: int = -1):
         if not self.haptic: return
         

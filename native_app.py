@@ -4,6 +4,7 @@ import os
 import time
 from dataclasses import dataclass, field
 import uuid
+import json
 
 # Fix for finding modules in .dependencies when running locally or frozen
 if getattr(sys, 'frozen', False):
@@ -27,6 +28,23 @@ class Clip:
     magnitude: int = 10000
     frequency: int = 10
     active_effect_id: int = -1 # Runtime ID
+    
+    def to_dict(self):
+        return {
+            "id": self.id, "type": self.type, "start_time": self.start_time,
+            "duration": self.duration, "track_index": self.track_index,
+            "magnitude": self.magnitude, "frequency": self.frequency
+        }
+    
+    @staticmethod
+    def from_dict(d):
+        c = Clip(
+            id=d.get("id", str(uuid.uuid4())), type=d.get("type", "Sine"),
+            start_time=d.get("start_time", 0.0), duration=d.get("duration", 1.0),
+            track_index=d.get("track_index", 0),
+            magnitude=d.get("magnitude", 10000), frequency=d.get("frequency", 10)
+        )
+        return c
 
 @dataclass
 class Track:
@@ -34,6 +52,18 @@ class Track:
     name: str = "Track"
     gain: int = 100
     clips: list[Clip] = field(default_factory=list)
+    
+    def to_dict(self):
+        return {
+            "id": self.id, "name": self.name, "gain": self.gain,
+            "clips": [c.to_dict() for c in self.clips]
+        }
+    
+    @staticmethod
+    def from_dict(d):
+        t = Track(id=d.get("id", str(uuid.uuid4())), name=d.get("name", "Track"), gain=d.get("gain", 100))
+        t.clips = [Clip.from_dict(cd) for cd in d.get("clips", [])]
+        return t
 
 class FeditSequencer:
     def __init__(self):
@@ -43,9 +73,22 @@ class FeditSequencer:
         self.current_time = 0.0
         self.last_tick = 0.0
         self.zoom_x = 50.0 # Pixels per second
+        # Selection State
         self.selected_clip: Clip = None
         self.drag_clip: Clip = None
         self.drag_offset: float = 0.0
+        # Resize State
+        self.resize_clip: Clip = None
+        self.resize_edge: str = None # "left" or "right"
+        self.resize_initial_time: float = 0.0
+        self.resize_initial_dur: float = 0.0
+        
+    def to_dict(self):
+        return {"tracks": [t.to_dict() for t in self.tracks]}
+        
+    def load_from_dict(self, d):
+        self.tracks = [Track.from_dict(td) for td in d.get("tracks", [])]
+        self.selected_clip = None
 
     def add_clip(self, track_idx, type, start_time):
         clip = Clip(type=type, start_time=start_time, track_index=track_idx)
@@ -89,6 +132,41 @@ class FeditNativeApp:
         if len(self.log_items) > 50: self.log_items.pop(0)
         if dpg.does_item_exist("log_list"):
             dpg.configure_item("log_list", items=self.log_items)
+            
+    # --- Project Management ---
+    def save_project_to_file(self, path):
+        data = self.sequencer.to_dict()
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+            self.log(f"Project Saved: {os.path.basename(path)}")
+        except Exception as e:
+            self.log(f"Save Failed: {e}")
+
+    def load_project_from_file(self, path):
+        try:
+            if not os.path.exists(path):
+                self.log("File not found.")
+                return
+            with open(path, "r") as f:
+                data = json.load(f)
+            self.sequencer.load_from_dict(data)
+            self.log(f"Loaded: {os.path.basename(path)}")
+        except Exception as e:
+            self.log(f"Load Failed: {e}")
+
+    def action_save_file(self, sender, app_data):
+        # app_data['file_path_name'] is the full path
+        path = app_data.get('file_path_name')
+        if path:
+             # Ensure extension
+             if not path.endswith(".fedit"): path += ".fedit"
+             self.save_project_to_file(path)
+
+    def action_load_file(self, sender, app_data):
+        path = app_data.get('file_path_name')
+        if path:
+             self.load_project_from_file(path)
 
     def scan_devices(self):
         self.log("Scanning devices...")
@@ -140,13 +218,28 @@ class FeditNativeApp:
              return 0,0
 
     def update_loop(self):
-        # Mouse logic for Dragging Clips vs Scrubbing
+        # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
         if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
              mpos = dpg.get_mouse_pos(local=False)
              rel_x, rel_y = self.get_canvas_relative_pos(mpos)
              
-             # If we are dragging a clip
-             if self.sequencer.drag_clip:
+             # 1. RESIZING logic
+             if self.sequencer.resize_clip:
+                 clip = self.sequencer.resize_clip
+                 cur_mouse_t = rel_x / self.sequencer.zoom_x
+                 
+                 if self.sequencer.resize_edge == "right":
+                     new_dur = max(0.1, cur_mouse_t - clip.start_time)
+                     clip.duration = new_dur
+                 elif self.sequencer.resize_edge == "left":
+                     # Limit: cannot pull start past end
+                     old_end = self.sequencer.resize_initial_time + self.sequencer.resize_initial_dur
+                     new_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
+                     clip.start_time = new_start
+                     clip.duration = old_end - new_start
+
+             # 2. DRAGGING logic
+             elif self.sequencer.drag_clip:
                   # Calculate new time/track
                   new_px = rel_x - self.sequencer.drag_offset
                   new_t = max(0.0, new_px / self.sequencer.zoom_x)
@@ -169,16 +262,18 @@ class FeditNativeApp:
                           clip.track_index = new_track_idx
                           self.sequencer.tracks[new_track_idx].clips.append(clip)
                           
-             # Else if hovering canvas (and not dragging clip)
-             elif dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip:
+             # 3. SCRUBBING logic (if hovering canvas and not interacting)
+             elif dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip and not self.sequencer.resize_clip:
                  # Scrubbing
                  new_t = max(0.0, rel_x / self.sequencer.zoom_x)
                  self.sequencer.current_time = new_t
 
         else:
-            # Mouse Up - Release Drag
+            # Mouse Up - Release Drag/Resize
             if self.sequencer.drag_clip:
                 self.sequencer.drag_clip = None
+            if self.sequencer.resize_clip:
+                self.sequencer.resize_clip = None
         
         if self.sequencer.is_playing:
             now = time.time()
@@ -205,6 +300,15 @@ class FeditNativeApp:
                            clip.active_effect_id = eid
                         elif clip.type == "Constant":
                            eid = engine.start_effect_constant(clip.magnitude, int(clip.duration * 1000))
+                           clip.active_effect_id = eid
+                        elif clip.type == "Ramp":
+                           # Ramp up from 0 to Magnitude
+                           eid = engine.start_effect_ramp(0, clip.magnitude, int(clip.duration * 1000))
+                           clip.active_effect_id = eid
+                        elif clip.type == "Sawtooth":
+                           # Period based on frequency
+                           period = int(1000 / max(1, clip.frequency))
+                           eid = engine.start_effect_sawtooth(clip.magnitude, period, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                 else:
                     # Should stop
@@ -319,9 +423,25 @@ class FeditNativeApp:
                  dpg.show_item("btn_delete")
                  found = True
                  
-                 self.sequencer.drag_clip = clip
-                 clip_px = clip.start_time * self.sequencer.zoom_x
-                 self.sequencer.drag_offset = rel_x - clip_px
+                 # Check Edges for resizing
+                 clip_px_start = clip.start_time * self.sequencer.zoom_x
+                 clip_px_end = (clip.start_time + clip.duration) * self.sequencer.zoom_x
+                 threshold = 10.0
+                 
+                 if abs(rel_x - clip_px_end) < threshold:
+                     self.sequencer.resize_clip = clip
+                     self.sequencer.resize_edge = "right"
+                     self.sequencer.resize_initial_dur = clip.duration
+                     self.sequencer.resize_initial_time = clip.start_time
+                 elif abs(rel_x - clip_px_start) < threshold:
+                     self.sequencer.resize_clip = clip
+                     self.sequencer.resize_edge = "left"
+                     self.sequencer.resize_initial_dur = clip.duration
+                     self.sequencer.resize_initial_time = clip.start_time
+                 else:
+                     # Normal Drag
+                     self.sequencer.drag_clip = clip
+                     self.sequencer.drag_offset = rel_x - clip_px_start
         
         if not found:
              self.sequencer.selected_clip = None
@@ -350,6 +470,20 @@ class FeditNativeApp:
                 dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (20, 20, 25))
                 dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 0)
         dpg.bind_theme(global_theme)
+        
+        # File Dialogs
+        dpg.add_file_dialog(
+            directory_selector=False, show=False, callback=self.action_save_file, tag="dlg_save",
+            width=700, height=400, default_filename="project.fedit", label="Save Project As..."
+        )
+        dpg.add_file_extension(".fedit", color=(255, 255, 255, 255), parent="dlg_save")
+        
+        dpg.add_file_dialog(
+            directory_selector=False, show=False, callback=self.action_load_file, tag="dlg_load",
+            width=700, height=400, label="Open Project File..."
+        )
+        dpg.add_file_extension(".fedit", color=(255, 255, 255, 255), parent="dlg_load")
+        dpg.add_file_extension(".*", parent="dlg_load")
 
         with dpg.window(tag="Main"):
             # Set Main as a fallback drop target without payload type check
@@ -360,6 +494,9 @@ class FeditNativeApp:
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=10)
                 dpg.add_text("Fedit DAW", color=(100, 200, 255))
+                dpg.add_spacer(width=20)
+                dpg.add_button(label="SAVE", callback=lambda: dpg.show_item("dlg_save"))
+                dpg.add_button(label="LOAD", callback=lambda: dpg.show_item("dlg_load"))
                 dpg.add_spacer(width=20)
                 dpg.add_combo(tag="device_combo", width=250)
                 dpg.add_button(label="Scan", callback=self.scan_devices)
