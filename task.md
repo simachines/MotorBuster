@@ -1,0 +1,63 @@
+# Fedit DAW 2.0 Task List
+
+- [x] **Data Model (Tracks/Clips)**
+    - [x] Data Model (Tracks/Clips)
+    - [x] Playback Loop
+    - [x] Effect Triggering
+- [x] **UI Implementation (Dear PyGui)**
+    - [x] Main Layout (Palette, Timeline, Inspector)
+    - [x] Basic Rendering
+    - [x] **Palette -> Timeline Drop**
+    - [x] **Playhead Scrubbing**
+    - [x] **Track Numbers**
+    - [x] **Track Renaming**
+    - [x] **Delete Tracks**
+    - [x] **Clip Dragging (Move Clips on Timeline)**
+        - [x] Drag to move time
+        - [x] Drag to change track
+        - [x] Drag edges to resize
+    - [x] **Playback Verification**
+- [x] **Effect Types**
+    - [x] Sine, Constant
+    - [x] Ramp, Sawtooth (Engine support enabled)
+    - [ ] Frequency Sweep (Linear Chirp)
+- [x] **Project Management**
+    - [x] **Save/Load Projects**
+        - [x] JSON Serialization
+        - [x] Native File Dialogs (Save As / Open)
+
+# Phase 2: Refinement & Advanced Features
+
+- [ ] **Waveform & Rendering Optimization**
+    - [x] Fix Waveform Aliasing ("Garbled visuals" > 10Hz)
+    - [x] Implement Smart Zoom (Mouse Wheel, 10x steps, Time Base Display)
+    - [x] Add Grid Lines (10 divisions per scroll/zoom level)
+    - [x] Allow entering Time Base via keyboard
+- [ ] **Engine & Playback Improvements**
+    - [x] **Frequency Sweep Fixes**:
+        - [x] Verify/Fix Hardware Sweep (Wheel compatibility)
+        - [x] Implement Software Sweep fallback (10x update rate) if hardware fails
+    - [ ] **Gapless Playback**: Eliminate delay between adjacent clips
+    - [ ] Increase Max Frequency to 5000Hz (Done in UI, checking Engine limits)
+- [/] **Inspector & UI Interaction (The "Big Overhaul")** (IN PROGRESS)
+    - [ ] **Selection Logic**:
+        - [ ] Click empty space -> Deselect & Hide Inspector
+        - [ ] "Delete" key shortcut to remove selected clip
+    - [ ] **Inspector Features**:
+        - [ ] **Locking**: Checkbox to keep Inspector open/locked to a clip
+        - [ ] **Multiple Windows**:
+            - [ ] Double-click clip -> Open new "Locked" Inspector below current
+            - [ ] Right-click clip -> Open separate Floating Inspector window
+        - [ ] **Clip Renaming**:
+            - [ ] Auto-name clips (Sine 1, Sine 2...)
+            - [ ] Allow custom renaming in Inspector
+        - [ ] **Controls**:
+            - [ ] Inputs with +/- buttons
+            - [ ] Double-click to type value (Int only)
+            - [ ] Magnitude: 0-100% (mapped to 0-32767)
+            - [ ] Labels: "HZ Start" / "HZ End"
+- [ ] **UX Polish**
+    - [ ] **Drag & Drop**: Highlight *only* the target track (not whole window)
+    - [ ] **Context Menus**:
+        - [ ] Right-click clip -> options to Delete Clip / Rename Track (?)
+
