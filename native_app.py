@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 import uuid
 import json
+import math
 
 # Fix for finding modules in .dependencies when running locally or frozen
 if getattr(sys, 'frozen', False):
@@ -27,22 +28,26 @@ class Clip:
     # Parameters
     magnitude: int = 10000
     frequency: int = 10
+    frequency_end: int = 10 # For Sweep
     active_effect_id: int = -1 # Runtime ID
     
     def to_dict(self):
         return {
             "id": self.id, "type": self.type, "start_time": self.start_time,
             "duration": self.duration, "track_index": self.track_index,
-            "magnitude": self.magnitude, "frequency": self.frequency
+            "magnitude": self.magnitude, "frequency": self.frequency,
+            "frequency_end": self.frequency_end
         }
     
     @staticmethod
     def from_dict(d):
+        freq = d.get("frequency", 10)
         c = Clip(
             id=d.get("id", str(uuid.uuid4())), type=d.get("type", "Sine"),
             start_time=d.get("start_time", 0.0), duration=d.get("duration", 1.0),
             track_index=d.get("track_index", 0),
-            magnitude=d.get("magnitude", 10000), frequency=d.get("frequency", 10)
+            magnitude=d.get("magnitude", 10000), frequency=freq,
+            frequency_end=d.get("frequency_end", freq) # Default to start freq if missing
         )
         return c
 
@@ -126,6 +131,136 @@ class FeditNativeApp:
             engine.init_sdl()
         except Exception as e:
             self.log(f"SDL Init Error: {e}")
+
+    # --- Clip helpers ---
+    def _snap_to_edges(self, track: Track, clip: Clip, candidate_time: float, snap_px: float = 8.0) -> float:
+        """Snap a time position to the nearest edge of neighboring clips within a pixel threshold."""
+        threshold_s = snap_px / max(1.0, self.sequencer.zoom_x)
+        best_time = candidate_time
+        best_delta = threshold_s
+
+        for other in track.clips:
+            if other is clip:
+                continue
+            for edge in (other.start_time, other.start_time + other.duration):
+                delta = abs(edge - candidate_time)
+                if delta < best_delta:
+                    best_delta = delta
+                    best_time = edge
+
+        return best_time
+
+    def _avoid_overlap_on_drag(self, track: Track, clip: Clip, candidate_start: float) -> float:
+        """Shift the dragged clip so it no longer overlaps neighbors, preserving duration."""
+        start = max(0.0, candidate_start)
+        end = start + clip.duration
+
+        # Iterate until stable to avoid overlaps
+        for _ in range(10):
+            adjusted = False
+            for other in track.clips:
+                if other is clip:
+                    continue
+                o_start = other.start_time
+                o_end = other.start_time + other.duration
+                overlaps = not (end <= o_start or start >= o_end)
+                if overlaps:
+                    # Decide direction based on where we came from
+                    if start >= o_start:
+                        start = o_end
+                    else:
+                        start = max(0.0, o_start - clip.duration)
+                    end = start + clip.duration
+                    adjusted = True
+                    break
+            if not adjusted:
+                break
+
+        return start
+
+    def _limit_right_resize(self, track: Track, clip: Clip, desired_dur: float) -> float:
+        """Clamp right-edge resize so it does not pass the next clip and snaps to near edges."""
+        next_start = None
+        for other in track.clips:
+            if other is clip:
+                continue
+            if other.start_time >= clip.start_time:
+                if next_start is None or other.start_time < next_start:
+                    next_start = other.start_time
+
+        desired_end = clip.start_time + desired_dur
+        if next_start is not None:
+            desired_end = min(desired_end, next_start)
+
+        desired_end = self._snap_to_edges(track, clip, desired_end)
+        if next_start is not None and desired_end > next_start:
+            desired_end = next_start
+
+        return max(0.1, desired_end - clip.start_time)
+
+    def _limit_left_resize(self, track: Track, clip: Clip, desired_start: float, fixed_end: float) -> float:
+        """Clamp left-edge resize so it does not pass the previous clip and snaps to near edges."""
+        prev_end = None
+        for other in track.clips:
+            if other is clip:
+                continue
+            o_end = other.start_time + other.duration
+            if o_end <= fixed_end:
+                if prev_end is None or o_end > prev_end:
+                    prev_end = o_end
+
+        candidate = max(0.0, desired_start)
+        candidate = self._snap_to_edges(track, clip, candidate)
+
+        if prev_end is not None and candidate < prev_end:
+            candidate = prev_end
+
+        # Prevent inversion
+        if candidate > fixed_end - 0.1:
+            candidate = max(0.0, fixed_end - 0.1)
+
+        return candidate
+
+    # --- Waveform helpers ---
+    def _wave_amplitude(self, clip: Clip, t: float) -> float:
+        """Return signed amplitude at time t (seconds) for display purposes."""
+        mag = clip.magnitude
+        if clip.type == "Constant":
+            return mag
+        if clip.type == "Ramp":
+            return mag * max(0.0, min(1.0, t / max(clip.duration, 1e-6)))
+        if clip.type == "Sawtooth":
+            period = 1.0 / max(1.0, clip.frequency)
+            phase = (t / period) % 1.0
+            return mag * (2 * phase - 1)  # -mag .. +mag
+        # Default: Sine
+        omega = 2 * math.pi * clip.frequency
+        return mag * math.sin(omega * t)
+
+    def _clip_wave_points(self, clip: Clip, x_start: float, width: float, y_top: float, y_bottom: float, samples: int = 80):
+        """Compute polyline points representing the clip waveform within the clip bounds."""
+        points = []
+        y_mid = (y_top + y_bottom) / 2.0
+        amp_span = (y_bottom - y_top) * 0.45  # leave padding
+        mag_max = max(1.0, abs(clip.magnitude))
+
+        # Increase sampling with frequency and width to avoid aliasing/flat lines
+        samples = max(
+            samples,
+            int(width / 3),
+            int(clip.frequency * clip.duration * 120)
+        )
+        samples = min(samples, 800)
+
+        for i in range(samples + 1):
+            frac = i / max(1, samples)
+            t = frac * clip.duration
+            amp = self._wave_amplitude(clip, t)
+            norm = max(-1.0, min(1.0, amp / mag_max))
+            x = x_start + frac * width
+            y = y_mid - norm * amp_span
+            points.append([x, y])
+        return points
 
     def log(self, message):
         self.log_items.append(message)
@@ -226,15 +361,17 @@ class FeditNativeApp:
              # 1. RESIZING logic
              if self.sequencer.resize_clip:
                  clip = self.sequencer.resize_clip
+                 track = self.sequencer.tracks[clip.track_index]
                  cur_mouse_t = rel_x / self.sequencer.zoom_x
                  
                  if self.sequencer.resize_edge == "right":
-                     new_dur = max(0.1, cur_mouse_t - clip.start_time)
-                     clip.duration = new_dur
+                     desired_dur = max(0.1, cur_mouse_t - clip.start_time)
+                     clip.duration = self._limit_right_resize(track, clip, desired_dur)
                  elif self.sequencer.resize_edge == "left":
                      # Limit: cannot pull start past end
                      old_end = self.sequencer.resize_initial_time + self.sequencer.resize_initial_dur
-                     new_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
+                     desired_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
+                     new_start = self._limit_left_resize(track, clip, desired_start, old_end)
                      clip.start_time = new_start
                      clip.duration = old_end - new_start
 
@@ -261,6 +398,11 @@ class FeditNativeApp:
                           # Add to new
                           clip.track_index = new_track_idx
                           self.sequencer.tracks[new_track_idx].clips.append(clip)
+                          
+                      # Snap to nearby clip edges and prevent overlaps on the active track
+                      active_track = self.sequencer.tracks[clip.track_index]
+                      snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
+                      clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
                           
              # 3. SCRUBBING logic (if hovering canvas and not interacting)
              elif dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip and not self.sequencer.resize_clip:
@@ -296,7 +438,12 @@ class FeditNativeApp:
                     if clip.active_effect_id == -1:
                         # Start it
                         if clip.type == "Sine":
-                           eid = engine.start_effect_sine(clip.frequency, clip.magnitude, int(clip.duration * 1000))
+                           if clip.frequency != clip.frequency_end:
+                               # Sweep (Chirp)
+                               eid = engine.start_effect_sweep(clip.frequency, clip.frequency_end, int(clip.duration * 1000), clip.magnitude)
+                           else:
+                               # Standard Sine
+                               eid = engine.start_effect_sine(clip.frequency, clip.magnitude, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                         elif clip.type == "Constant":
                            eid = engine.start_effect_constant(clip.magnitude, int(clip.duration * 1000))
@@ -343,6 +490,17 @@ class FeditNativeApp:
                  
                  dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
                  dpg.draw_text([x_start + 5, y_offset + 25], clip.type, size=13, parent="timeline_canvas")
+
+                 # Waveform preview
+                 wave_points = self._clip_wave_points(
+                     clip,
+                     x_start + 4,
+                     max(4.0, width - 8),
+                     y_offset + 28,
+                     y_offset + track_height - 12,
+                     samples= max(20, int(width / 6))
+                 )
+                 dpg.draw_polyline(wave_points, color=(240, 240, 240, 220), thickness=2, parent="timeline_canvas")
 
              y_offset += track_height
         
@@ -420,6 +578,12 @@ class FeditNativeApp:
                  dpg.set_value("insp_dur", clip.duration)
                  dpg.set_value("insp_mag", clip.magnitude)
                  dpg.set_value("insp_freq", clip.frequency)
+                 dpg.set_value("insp_freq_end", clip.frequency_end)
+                 
+                 # Show/Hide End Freq based on type
+                 if clip.type == "Sine": dpg.show_item("insp_freq_end")
+                 else: dpg.hide_item("insp_freq_end")
+                 
                  dpg.show_item("btn_delete")
                  found = True
                  
@@ -453,6 +617,7 @@ class FeditNativeApp:
         if not self.sequencer.selected_clip: return
         param = user_data
         if param == "freq": self.sequencer.selected_clip.frequency = app_data
+        elif param == "freq_end": self.sequencer.selected_clip.frequency_end = app_data
         elif param == "mag": self.sequencer.selected_clip.magnitude = app_data
         elif param == "dur": self.sequencer.selected_clip.duration = app_data
         elif param == "start": self.sequencer.selected_clip.start_time = app_data
@@ -561,6 +726,7 @@ class FeditNativeApp:
                         dpg.add_input_float(label="Duration (s)", tag="insp_dur", callback=self.update_selected_clip, user_data="dur")
                         dpg.add_slider_int(label="Magnitude", tag="insp_mag", max_value=32000, callback=self.update_selected_clip, user_data="mag")
                         dpg.add_slider_int(label="Frequency", tag="insp_freq", max_value=100, callback=self.update_selected_clip, user_data="freq")
+                        dpg.add_slider_int(label="End Freq (Sine)", tag="insp_freq_end", max_value=100, callback=self.update_selected_clip, user_data="freq_end", show=False)
                         
                         dpg.add_separator()
                         dpg.add_button(label="DELETE CLIP", callback=self.delete_selected_clip, width=-1, show=False, tag="btn_delete")

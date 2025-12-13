@@ -133,16 +133,15 @@ class HapticController:
 
         sdl2.SDL_HapticRunEffect(self.haptic, self.effect_id, 1)
 
-    def play_sweep(self, start_freq: float, end_freq: float, duration_ms: int, magnitude: int = 10000):
+    def start_effect_sweep(self, start_freq: float, end_freq: float, duration_ms: int, magnitude: int = 10000):
         """Generates and plays a linear frequency sweep using Custom Force. Fallback to Sine if unsupported."""
-        if not self.haptic: return
+        if not self.haptic: return -1
 
         # Check Capability
         caps = sdl2.SDL_HapticQuery(self.haptic)
         if not (caps & sdl2.SDL_HAPTIC_CUSTOM):
             logger.warning("SDL_HAPTIC_CUSTOM not supported. Falling back to SINE.")
-            self.play_sine_fallback(duration_ms, magnitude)
-            return
+            return self.start_effect_sine(start_freq, magnitude, duration_ms)
 
         # 1. Generate Buffer
         import math
@@ -161,7 +160,9 @@ class HapticController:
 
         if not self.play_custom(samples, duration_ms):
             logger.warning("Custom Effect Failed. Falling back to SINE.")
-            self.play_sine_fallback(duration_ms, magnitude)
+            return self.start_effect_sine(start_freq, magnitude, duration_ms)
+            
+        return self.effect_id
 
     def play_custom(self, samples: list, length_ms: int):
         if not self.haptic: return False
