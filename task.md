@@ -29,20 +29,43 @@
 # Phase 2: Refinement & Advanced Features
 
 - [ ] **Waveform & Rendering Optimization**
-    - [x] Fix Waveform Aliasing ("Garbled visuals" > 10Hz)
+    - [x] Fix Waveform Aliasing ("Garbled visuals" > 10Hz) (Analytical Peak Detection)
+        - [x] Implement Analytical Peak Detection (If period < pixel step, draw full max/min)
     - [x] Implement Smart Zoom (Mouse Wheel, 10x steps, Time Base Display)
-    - [x] Add Grid Lines (10 divisions per scroll/zoom level)
-    - [x] Allow entering Time Base via keyboard
+        - [x] **Zoom to Cursor**: Calculate scroll offset to keep time under mouse static
+        - [x] **Fix Vertical Scroll**: Disable scrollbar if content fits
+        - [x] Prevent native scroll when Zooming
+    - [x] Add Grid Lines (1-2-5 stepping)
+        - [x] Remove text labels from grid lines
+        - [ ] Add units to Time Base display (s, ms, us)
+        - [x] Fix grid density transitions (1-2-5 step)
+    - [ ] Allow entering Time Base via keyboard
 - [ ] **Engine & Playback Improvements**
-    - [x] **Frequency Sweep Fixes**:
-        - [x] Verify/Fix Hardware Sweep (Wheel compatibility)
-        - [x] Implement Software Sweep fallback (10x update rate) if hardware fails
+    - [ ] **Frequency Sweep Fixes**:
+        - [ ] Verify/Fix Hardware Sweep (Wheel compatibility) (Implemented Software Fallback)
+        - [ ] Implement Software Sweep fallback (10x update rate) if hardware fails (Implemented)
     - [ ] **Gapless Playback**: Eliminate delay between adjacent clips
-    - [ ] Increase Max Frequency to 5000Hz (Done in UI, checking Engine limits)
-- [/] **Inspector & UI Interaction (The "Big Overhaul")** (IN PROGRESS)
+    - [ ] Increase Max Frequency to 5000Hz (Implemented)
+- [ ] **Inspector & UI Interaction (The "Big Overhaul")**
     - [ ] **Selection Logic**:
-        - [ ] Click empty space -> Deselect & Hide Inspector
-        - [ ] "Delete" key shortcut to remove selected clip
+        - [x] **Separate Seek vs Select**: Left-click on clip should SELECT only. Click on ruler/empty should SEEK.
+        - [x] Click empty space -> Deselect & Hide Inspector
+        - [ ] "Delete" key shortcut to remove selected clip (Implemented)
+    - [ ] **Inspector Features**:
+        - [ ] **Locking**: Checkbox to keep Inspector open/locked to a clip (Implemented)
+        - [ ] **Multiple Windows**:
+            - [ ] Double-click clip -> Open new "Locked" Inspector below current
+            - [ ] Right-click clip -> Open separate Floating Inspector window
+        - [ ] **Clip Renaming**:
+            - [ ] Auto-name clips (Sine 1, Sine 2...)
+            - [ ] Allow custom renaming in Inspector
+        - [ ] **Controls**:
+            - [ ] Inputs with +/- buttons (Implemented)
+            - [ ] Double-click to type value (Int only) (Implemented)
+            - [ ] Magnitude: 0-100% (mapped to 0-32767) (Implemented)
+            - [ ] Labels: "HZ Start" / "HZ End" (Implemented)
+- [ ] **UX Polish**
+    - [ ] **Drag & Drop**: Highlight *only* the target track (not whole window) (Implemented)
     - [ ] **Inspector Features**:
         - [ ] **Locking**: Checkbox to keep Inspector open/locked to a clip
         - [ ] **Multiple Windows**:
