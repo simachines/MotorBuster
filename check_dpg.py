@@ -1,5 +1,8 @@
 import dearpygui.dearpygui as dpg
 
-with open('dpg_dump.txt', 'w') as f:
-    f.write("DROP: " + str([m for m in dir(dpg) if "drop" in m.lower()]) + "\n")
-    f.write("DRAG: " + str([m for m in dir(dpg) if "drag" in m.lower()]) + "\n")
+attrs = dir(dpg)
+cursor_attrs = [a for a in attrs if 'cursor' in a.lower()]
+print("Cursor attributes:", cursor_attrs)
+
+mouse_attrs = [a for a in attrs if 'mouse' in a.lower()]
+print("Mouse attributes:", mouse_attrs)
