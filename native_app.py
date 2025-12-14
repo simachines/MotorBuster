@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import uuid
 import json
 import math
+import ctypes
 
 # Fix for finding modules in .dependencies when running locally or frozen
 if getattr(sys, 'frozen', False):
@@ -132,6 +133,13 @@ class FeditNativeApp:
             engine.init_sdl()
         except Exception as e:
             self.log(f"SDL Init Error: {e}")
+
+        # Statistics
+        self.stats_peak = 0.0
+        self.stats_min = 0.0
+        self.stats_sum = 0.0
+        self.stats_count = 0
+
 
     # --- Clip helpers ---
     def _snap_to_edges(self, track: Track, clip: Clip, candidate_time: float, snap_px: float = 8.0) -> float:
@@ -315,12 +323,63 @@ class FeditNativeApp:
         else:
             dpg.set_value("device_combo", "No Devices Found")
 
+    def _get_torque_for_device(self, name: str) -> float:
+        """Returns known max torque (Nm) for common devices base name."""
+        name_lower = name.lower()
+        # Lookup Table
+        db = {
+            "simucube 2 ultimate": 32.0,
+            "simucube 2 pro": 25.0,
+            "simucube 2 sport": 17.0,
+            "fanatec dd2": 25.0,
+            "fanatec dd1": 20.0,
+            "fanatec csl dd": 8.0,
+            "fanatec gt dd pro": 8.0,
+            "moza r21": 21.0,
+            "moza r16": 16.0,
+            "moza r12": 12.0,
+            "moza r9": 9.0,
+            "moza r5": 5.5,
+            "logitech g pro": 11.0,
+            "thrustmaster t818": 10.0,
+            "vrs directforce pro": 20.0,
+            "simagic alpha ultimate": 23.0,
+            "simagic alpha": 15.0,
+            "simagic alpha mini": 10.0,
+            "asetek invicta": 27.0,
+            "asetek forte": 18.0,
+            "asetek la prima": 12.0,
+            "conspit ares platinum": 20.0,
+            "conspit ares apex": 8.0,
+            "conspit ares": 20.0,
+        }
+        
+        # Substring match - Find Longest Match
+        best_val = 0.0
+        max_len = 0
+        
+        for key, val in db.items():
+            if key in name_lower:
+                if len(key) > max_len:
+                    max_len = len(key)
+                    best_val = val
+                    
+        return best_val
+
     def connect_device_by_name(self, name):
          try:
              idx = int(name.split("#")[-1].replace(")", ""))
              if engine.connect_device(idx):
                  dpg.set_value("status_text", "Status: Connected")
                  dpg.configure_item("status_text", color=(0, 255, 0))
+                 
+                 # Auto-Detect Torque
+                 detected_torque = self._get_torque_for_device(name)
+                 if detected_torque > 0.0:
+                     if dpg.does_item_exist("input_max_torque"):
+                         dpg.set_value("input_max_torque", detected_torque)
+                         self.log(f"Auto-Detected Torque: {detected_torque} Nm")
+                 
          except: pass
 
     def connect_callback(self):
@@ -333,7 +392,7 @@ class FeditNativeApp:
     # --- Torque Telemetry ---
     def calculate_current_force(self):
         """Calculates theoretical total force output at current time."""
-        if not self.sequencer.is_playing: return 0.0
+        if not self.sequencer.is_playing: return 0.0, False
         
         total_force = 0.0
         cur_t = self.sequencer.current_time
@@ -347,10 +406,23 @@ class FeditNativeApp:
                      amp = self._wave_amplitude(clip, rel_t)
                      total_force += amp
         
-        # Clamp to max range 32767 usually
-        # Normalize to -100 to 100 for display
-        normalized = (total_force / 32767.0) * 100.0
-        return max(-100.0, min(100.0, normalized))
+        # Apply Global Gain (from UI if available, else 1.0)
+        gain = 1.0
+        if dpg.does_item_exist("slider_gain"):
+             gain = dpg.get_value("slider_gain") / 100.0
+        
+        normalized = (total_force * gain / 32767.0) * 100.0
+        
+        # Check if we are "active" (i.e. inside any clip)
+        is_active = False
+        for t in self.sequencer.tracks:
+            for clip in t.clips:
+                 if clip.start_time <= cur_t < (clip.start_time + clip.duration):
+                     is_active = True
+                     break
+            if is_active: break
+
+        return max(-100.0, min(100.0, normalized)), is_active
 
     # --- Transport Logic ---
     def toggle_play(self):
@@ -358,6 +430,18 @@ class FeditNativeApp:
         self.sequencer.last_tick = time.time()
         label = "Stop" if self.sequencer.is_playing else "Play"
         dpg.configure_item("btn_play", label=label)
+        
+        if self.sequencer.is_playing:
+             # Reset Stats
+             self.stats_peak = 0.0
+             self.stats_min = 9999.0 # Start high
+             self.stats_sum = 0.0
+             self.stats_count = 0
+             # Clear text
+             if dpg.does_item_exist("txt_peak"): dpg.set_value("txt_peak", "Peak: --")
+             if dpg.does_item_exist("txt_avg"): dpg.set_value("txt_avg", "Avg: --")
+             if dpg.does_item_exist("txt_min"): dpg.set_value("txt_min", "Min: --")
+
         
         if not self.sequencer.is_playing:
             # Stop all
@@ -483,23 +567,56 @@ class FeditNativeApp:
             self.sequencer.last_tick = now
             self.sequencer.current_time += dt
             
-            # Loop Logic
-            if dpg.get_value("chk_loop"):
-                 max_end = 0.0
-                 has_clips = False
-                 for t in self.sequencer.tracks:
-                     for c in t.clips:
-                         max_end = max(max_end, c.start_time + c.duration)
-                         has_clips = True
-                 
-                 if has_clips and self.sequencer.current_time > max_end + 0.5: # 0.5s buffer
-                     self.action_restart()
+            # Auto-Stop / Loop Logic
+            max_end = 0.0
+            has_clips = False
+            for t in self.sequencer.tracks:
+                for c in t.clips:
+                    max_end = max(max_end, c.start_time + c.duration)
+                    has_clips = True
+            
+            if has_clips:
+                if dpg.get_value("chk_loop"):
+                    # Loop Mode: Restart after buffer
+                    if self.sequencer.current_time > max_end + 0.5: # 0.5s buffer
+                        self.action_restart()
+                else:
+                    # Normal Mode: Stop exactly at end
+                    if self.sequencer.current_time >= max_end:
+                        self.sequencer.current_time = max_end
+                        self.toggle_play() # Force Stop
 
             if self.sequencer.is_playing: self.process_sequencer_logic()
             
             # Update Telemetry
-            force = self.calculate_current_force()
+            force, is_active = self.calculate_current_force()
             dpg.set_value("force_gauge", force)
+
+            # Update Torque Monitor
+            # Default to 8.0 Nm if not set (could make this a variable later accessible via UI)
+            max_torque = dpg.get_value("input_max_torque") if dpg.does_item_exist("input_max_torque") else 8.0
+            
+            # force is -100 to 100
+            current_nm = (force / 100.0) * max_torque
+            dpg.set_value("txt_torque_val", f"{current_nm:.2f} Nm")
+            dpg.set_value("bar_torque", (abs(current_nm)/max_torque) if max_torque > 0 else 0)
+
+            # Statistics Update
+            # Only update stats if we are actively playing a clip (not just silence)
+            if self.sequencer.is_playing and is_active:
+                abs_val = abs(current_nm)
+                self.stats_peak = max(self.stats_peak, abs_val)
+                self.stats_min = min(self.stats_min, abs_val)
+                self.stats_sum += abs_val
+                self.stats_count += 1
+                
+                avg = self.stats_sum / max(1, self.stats_count)
+                
+                dpg.set_value("txt_peak", f"Peak: {self.stats_peak:.2f} Nm")
+                dpg.set_value("txt_avg", f"Avg: {avg:.2f} Nm")
+                dpg.set_value("txt_min", f"Min: {self.stats_min:.2f} Nm")
+
+
             
         dpg.set_value("time_display", f"{self.sequencer.current_time:.2f}s")
         self.render_timeline()
@@ -515,32 +632,40 @@ class FeditNativeApp:
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
         
+        # Apply Global Gain
+        gain = 1.0
+        if dpg.does_item_exist("slider_gain"):
+             gain = dpg.get_value("slider_gain") / 100.0
+             
         for t in self.sequencer.tracks:
             for clip in t.clips:
                 # Check if inside
                 if clip.start_time <= cur_t < (clip.start_time + clip.duration):
                     # Should be playing
                     if clip.active_effect_id == -1:
+                        
+                        eff_mag = int(clip.magnitude * gain)
+                        
                         # Start it
                         if clip.type == "Sine":
                            if clip.frequency != clip.frequency_end:
                                # Sweep (Chirp)
-                               eid = engine.start_effect_sweep(clip.frequency, clip.frequency_end, int(clip.duration * 1000), clip.magnitude)
+                               eid = engine.start_effect_sweep(clip.frequency, clip.frequency_end, int(clip.duration * 1000), eff_mag)
                            else:
                                # Standard Sine
-                               eid = engine.start_effect_sine(clip.frequency, clip.magnitude, int(clip.duration * 1000))
+                               eid = engine.start_effect_sine(clip.frequency, eff_mag, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                         elif clip.type == "Constant":
-                           eid = engine.start_effect_constant(clip.magnitude, int(clip.duration * 1000))
+                           eid = engine.start_effect_constant(eff_mag, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                         elif clip.type == "Ramp":
                            # Ramp up from 0 to Magnitude
-                           eid = engine.start_effect_ramp(0, clip.magnitude, int(clip.duration * 1000))
+                           eid = engine.start_effect_ramp(0, eff_mag, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                         elif clip.type == "Sawtooth":
                            # Period based on frequency
                            period = int(1000 / max(1, clip.frequency))
-                           eid = engine.start_effect_sawtooth(clip.magnitude, period, int(clip.duration * 1000))
+                           eid = engine.start_effect_sawtooth(eff_mag, period, int(clip.duration * 1000))
                            clip.active_effect_id = eid
                 else:
                     # Should stop
@@ -813,6 +938,35 @@ class FeditNativeApp:
                     dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
+                with dpg.menu(label="View"):
+                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+
+            # Torque Monitor Window (Initially Hidden or Shown)
+            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=True):
+                 dpg.add_text("Real-time Torque", color=(150, 255, 150))
+                 dpg.add_text("0.00 Nm", tag="txt_torque_val") # Standard size for now to avoid crash
+                 # We'll stick to standard text for now, maybe add a progress bar.
+                 dpg.add_progress_bar(tag="bar_torque", width=-1, height=20)
+                 
+                 dpg.add_spacer(height=5)
+                 with dpg.group(horizontal=True):
+                     dpg.add_text("Peak: --", tag="txt_peak", color=(255, 100, 100))
+                     dpg.add_spacer(width=10)
+                     dpg.add_text("Avg: --", tag="txt_avg", color=(100, 200, 255))
+                     dpg.add_spacer(width=10)
+                     dpg.add_text("Min: --", tag="txt_min", color=(200, 200, 200))
+
+                 dpg.add_separator()
+                 dpg.add_text("Settings:")
+
+                 with dpg.group(horizontal=True):
+                     dpg.add_text("Base Torque (Ref):")
+                     dpg.add_input_float(tag="input_max_torque", default_value=8.0, width=100, step=0.5)
+                     
+                 with dpg.group(horizontal=True):
+                     dpg.add_text("Master Gain (%):  ")
+                     dpg.add_slider_int(tag="slider_gain", default_value=100, min_value=0, max_value=100, width=100)
+
             
             # Set Main as a fallback drop target without payload type check
             try: dpg.set_item_drop_callback("Main", self.on_drop_receive)
