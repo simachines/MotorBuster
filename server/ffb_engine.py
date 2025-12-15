@@ -242,18 +242,68 @@ class HapticController:
         effect.periodic.period = int(1000 / max(1, freq))
         effect.periodic.magnitude = magnitude
         effect.periodic.length = duration_ms
-        effect.periodic.attack_length = 100
-        effect.periodic.fade_length = 100
-        
-        # Upload
-        # Note: Ideally we manage a pool of effects. 
-        # For this Native MVP, let's just create a new one every time (SDL handles ID limits, usually 16-32)
-        # We need to recycle IDs in a real robust engine.
+        effect.periodic.attack_length = 50
+        effect.periodic.fade_length = 50
         
         new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
         if new_id != -1:
             sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
         return new_id
+
+    def update_effect_sine(self, effect_id: int, freq: int, magnitude: int, duration_ms: int):
+        """Updates parameters of an active sine effect."""
+        if not self.haptic or effect_id == -1: return
+
+        effect = sdl2.SDL_HapticEffect()
+        effect.type = sdl2.SDL_HAPTIC_SINE
+        effect.periodic.type = sdl2.SDL_HAPTIC_SINE
+        effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.periodic.period = int(1000 / max(1, freq))
+        effect.periodic.magnitude = magnitude
+        effect.periodic.length = duration_ms # Update length remaining? Or total? 
+        # SDL docs imply update essentially replaces parameters. 
+        # If we are continuing playback, ensure duration handles play time correctly or use Infinite.
+        
+        if sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect)) < 0:
+            logger.warning(f"Update failed: {sdl2.SDL_GetError()}")
+
+    def update_effect_constant(self, effect_id: int, magnitude: int, duration_ms: int):
+        if not self.haptic or effect_id == -1: return
+        
+        effect = sdl2.SDL_HapticEffect()
+        effect.type = sdl2.SDL_HAPTIC_CONSTANT
+        effect.constant.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.constant.length = duration_ms
+        effect.constant.level = magnitude
+        
+        sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect))
+
+    def update_effect_ramp(self, effect_id: int, start_mag: int, end_mag: int, duration_ms: int):
+        if not self.haptic or effect_id == -1: return
+
+        effect = sdl2.SDL_HapticEffect()
+        effect.type = sdl2.SDL_HAPTIC_RAMP
+        effect.ramp.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.ramp.length = duration_ms
+        effect.ramp.start = start_mag
+        effect.ramp.end = end_mag
+        
+        sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect))
+
+    def update_effect_sawtooth(self, effect_id: int, magnitude: int, period: int, duration_ms: int):
+        if not self.haptic or effect_id == -1: return
+
+        effect = sdl2.SDL_HapticEffect()
+        effect.type = sdl2.SDL_HAPTIC_SAWTOOTHUP
+        effect.periodic.type = sdl2.SDL_HAPTIC_SAWTOOTHUP
+        effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.periodic.period = period
+        effect.periodic.magnitude = magnitude
+        effect.periodic.length = duration_ms
+        effect.periodic.attack_length = 50
+        effect.periodic.fade_length = 50
+        
+        sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect))
 
     def start_effect_constant(self, magnitude: int, duration_ms: int):
         if not self.haptic: return -1

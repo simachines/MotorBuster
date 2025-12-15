@@ -115,12 +115,20 @@ class FeditSequencer:
                 return clip
         return None
 
+    def get_clip_at_precise(self, track_idx, time_s):
+        # Half-open interval [start, end) logic for playback to avoid overlap
+        for clip in self.tracks[track_idx].clips:
+            if clip.start_time <= time_s < clip.start_time + clip.duration:
+                return clip
+        return None
+
 # --- Application ---
 class FeditNativeApp:
     def __init__(self):
         self.sequencer = FeditSequencer()
         self.log_items = []
         self.renaming_track_idx = -1
+        self.drag_target_track_idx = -1 # For visual highlight
         
         dpg.create_context()
         self.setup_ui()
@@ -131,6 +139,9 @@ class FeditNativeApp:
             engine.init_sdl()
         except Exception as e:
             self.log(f"SDL Init Error: {e}")
+            
+        # Playback State: { track_index: {'effect_id': -1, 'clip_id': None} }
+        self.track_states = {}
 
     # --- Clip helpers ---
     def _snap_to_edges(self, track: Track, clip: Clip, candidate_time: float, snap_px: float = 8.0) -> float:
@@ -237,29 +248,57 @@ class FeditNativeApp:
         omega = 2 * math.pi * clip.frequency
         return mag * math.sin(omega * t)
 
-    def _clip_wave_points(self, clip: Clip, x_start: float, width: float, y_top: float, y_bottom: float, samples: int = 80):
-        """Compute polyline points representing the clip waveform within the clip bounds."""
+    def _clip_wave_points(self, clip: Clip, x_start: float, width: float, y_top: float, y_bottom: float, samples: int = 0):
+        # Precise Peak-Detection for Aliasing
         points = []
         y_mid = (y_top + y_bottom) / 2.0
-        amp_span = (y_bottom - y_top) * 0.45  # leave padding
+        amp_span = (y_bottom - y_top) * 0.45 
         mag_max = max(1.0, abs(clip.magnitude))
 
-        # Increase sampling with frequency and width to avoid aliasing/flat lines
-        samples = max(
-            samples,
-            int(width / 3),
-            int(clip.frequency * clip.duration * 120)
-        )
-        samples = min(samples, 800)
+        if width <= 0: return []
+        
+        pixels = int(width)
+        step_t = clip.duration / max(1, pixels)
+        
+        # Hard limit
+        if pixels > 5000: pixels = 5000; step_t = clip.duration / pixels
 
-        for i in range(samples + 1):
-            frac = i / max(1, samples)
-            t = frac * clip.duration
-            amp = self._wave_amplitude(clip, t)
-            norm = max(-1.0, min(1.0, amp / mag_max))
-            x = x_start + frac * width
-            y = y_mid - norm * amp_span
-            points.append([x, y])
+        freq = clip.frequency
+        is_aliasing = False
+        if freq > 0 and (1.0/freq) < step_t * 2.5:
+             is_aliasing = True
+
+        for i in range(pixels):
+            t0 = i * step_t
+            t1 = (i + 1) * step_t
+            
+            local_min = 0.0
+            local_max = 0.0
+
+            if is_aliasing:
+                # Aliasing: Draw full height
+                local_min = -1.0
+                local_max = 1.0
+            else:
+                # Sub-pixel sampling: Check 10 points to catch peaks accurately
+                # This prevents "pre-aliasing" noise where we miss the sine peak indtermittently
+                local_min = 1.0 # Init inverted
+                local_max = -1.0
+                
+                # Check 8 internal points + edges
+                for k in range(8):
+                    ft = t0 + (t1 - t0) * (k / 7.0)
+                    val = self._wave_amplitude(clip, ft) / mag_max
+                    if val < local_min: local_min = val
+                    if val > local_max: local_max = val
+
+            y_l = y_mid - max(-1.0, min(1.0, local_min)) * amp_span
+            y_h = y_mid - max(-1.0, min(1.0, local_max)) * amp_span
+            
+            x = x_start + i
+            points.append([x, y_l])
+            points.append([x, y_h])
+            
         return points
 
     def log(self, message):
@@ -352,13 +391,48 @@ class FeditNativeApp:
         except:
              return 0,0
 
+    def get_clip_at_pos(self, rel_x, rel_y):
+        track_h = 80
+        track_idx = int(rel_y // track_h)
+        click_time = max(0.0, rel_x / self.sequencer.zoom_x)
+        
+        if 0 <= track_idx < len(self.sequencer.tracks):
+             for clip in self.sequencer.tracks[track_idx].clips:
+                 if clip.start_time <= click_time < (clip.start_time + clip.duration):
+                     return clip
+        return None
+
     def update_loop(self):
+        # Track Target for Drop/Drag
+        mpos = dpg.get_mouse_pos(local=False)
+        rx, ry = self.get_canvas_relative_pos(mpos)
+        mpos = dpg.get_mouse_pos(local=False)
+        rx, ry = self.get_canvas_relative_pos(mpos)
+        self.drag_target_track_idx = int(ry // 80)
+        
+        # KEYBOARD SHORTCUTS
+        if dpg.is_key_pressed(dpg.mvKey_Delete):
+            # Check if we are focused on timeline or canvas to avoid deleting while typing
+            # Using simple hover check for now as focus might be tricky
+            if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_focused("timeline_scroll"):
+                 self.delete_selected_clip()
+
+        # DOUBLE CLICK CHECK (Open Inspector)
+        if dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
+             m_pos = dpg.get_mouse_pos(local=False)
+             rx, ry = self.get_canvas_relative_pos(m_pos)
+             d_clip = self.get_clip_at_pos(rx, ry)
+             if d_clip:
+                 self.sequencer.selected_clip = d_clip
+                 self.show_floating_inspector()
+
+        # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
         # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
         if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
              mpos = dpg.get_mouse_pos(local=False)
              rel_x, rel_y = self.get_canvas_relative_pos(mpos)
              
-             # 1. RESIZING logic
+             # 1. CONTINUE RESIZING
              if self.sequencer.resize_clip:
                  clip = self.sequencer.resize_clip
                  track = self.sequencer.tracks[clip.track_index]
@@ -374,8 +448,11 @@ class FeditNativeApp:
                      new_start = self._limit_left_resize(track, clip, desired_start, old_end)
                      clip.start_time = new_start
                      clip.duration = old_end - new_start
+                     
+                 # Update UI while resizing
+                 self.update_inspector_ui()
 
-             # 2. DRAGGING logic
+             # 2. CONTINUE DRAGGING
              elif self.sequencer.drag_clip:
                   # Calculate new time/track
                   new_px = rel_x - self.sequencer.drag_offset
@@ -403,12 +480,51 @@ class FeditNativeApp:
                       active_track = self.sequencer.tracks[clip.track_index]
                       snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
                       clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
+                  
+                  self.update_inspector_ui()
                           
-             # 3. SCRUBBING logic (if hovering canvas and not interacting)
-             elif dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip and not self.sequencer.resize_clip:
-                 # Scrubbing
-                 new_t = max(0.0, rel_x / self.sequencer.zoom_x)
-                 self.sequencer.current_time = new_t
+             # 3. INITIALIZE INTERACTION (Select / Init Drag / Init Resize / Seek)
+             elif dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
+                 # Check if over a clip
+                 hover_clip = self.get_clip_at_pos(rel_x, rel_y)
+                 
+                 if hover_clip:
+                     # HIT CLIP -> Select & Init Drag/Resize
+                     self.sequencer.selected_clip = hover_clip
+                     self.update_inspector_ui()
+                     # dpg.configure_item("chk_insp_lock", default_value=True) # REMOVED: Don't force lock
+                     
+                     
+                     # Check Edges for Resize
+                     clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
+                     clip_px_end = (hover_clip.start_time + hover_clip.duration) * self.sequencer.zoom_x
+                     edge_threshold = 8.0
+                     
+                     if abs(rel_x - clip_px_start) < edge_threshold:
+                         self.sequencer.resize_clip = hover_clip
+                         self.sequencer.resize_edge = "left"
+                         self.sequencer.resize_initial_dur = hover_clip.duration
+                         self.sequencer.resize_initial_time = hover_clip.start_time
+                     elif abs(rel_x - clip_px_end) < edge_threshold:
+                         self.sequencer.resize_clip = hover_clip
+                         self.sequencer.resize_edge = "right"
+                         self.sequencer.resize_initial_dur = hover_clip.duration
+                         self.sequencer.resize_initial_time = hover_clip.start_time
+                     else:
+                         # Init Drag
+                         self.sequencer.drag_clip = hover_clip
+                         self.sequencer.drag_offset = rel_x - clip_px_start
+                         
+                 else:
+                     # HIT EMPTY -> Seek & Deselect
+                     new_t = max(0.0, rel_x / self.sequencer.zoom_x)
+                     self.sequencer.current_time = new_t
+                     
+                     # Deselect if not locked
+                     is_locked = dpg.get_value("chk_insp_lock") if dpg.does_item_exist("chk_insp_lock") else False
+                     if not is_locked:
+                         self.sequencer.selected_clip = None
+                         self.update_inspector_ui()
 
         else:
             # Mouse Up - Release Drag/Resize
@@ -430,49 +546,182 @@ class FeditNativeApp:
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
         
-        for t in self.sequencer.tracks:
-            for clip in t.clips:
-                # Check if inside
-                if clip.start_time <= cur_t < (clip.start_time + clip.duration):
-                    # Should be playing
-                    if clip.active_effect_id == -1:
-                        # Start it
-                        if clip.type == "Sine":
-                           if clip.frequency != clip.frequency_end:
-                               # Sweep (Chirp)
-                               eid = engine.start_effect_sweep(clip.frequency, clip.frequency_end, int(clip.duration * 1000), clip.magnitude)
-                           else:
-                               # Standard Sine
-                               eid = engine.start_effect_sine(clip.frequency, clip.magnitude, int(clip.duration * 1000))
-                           clip.active_effect_id = eid
-                        elif clip.type == "Constant":
-                           eid = engine.start_effect_constant(clip.magnitude, int(clip.duration * 1000))
-                           clip.active_effect_id = eid
-                        elif clip.type == "Ramp":
-                           # Ramp up from 0 to Magnitude
-                           eid = engine.start_effect_ramp(0, clip.magnitude, int(clip.duration * 1000))
-                           clip.active_effect_id = eid
-                        elif clip.type == "Sawtooth":
-                           # Period based on frequency
-                           period = int(1000 / max(1, clip.frequency))
-                           eid = engine.start_effect_sawtooth(clip.magnitude, period, int(clip.duration * 1000))
-                           clip.active_effect_id = eid
-                else:
-                    # Should stop
-                    if clip.active_effect_id != -1:
-                        clip.active_effect_id = -1
-                        pass
+        # Iterate Tracks (not clips) to manage monophonic channel state
+        for t_idx, track in enumerate(self.sequencer.tracks):
+            if t_idx not in self.track_states:
+                self.track_states[t_idx] = {'effect_id': -1, 'clip_id': None, 'clip_type': None}
+            
+            state = self.track_states[t_idx]
+            prev_cid = state['clip_id']
+            eff_id = state['effect_id']
+            prev_ctype = state['clip_type']
+            
+            # Find current logical clip
+            current_clip = self.get_clip_at_precise(t_idx, cur_t)
+            curr_cid = current_clip.id if current_clip else None
+            
+            # Helper to update active effect with new clip
+            def start_new_effect():
+                if not current_clip: return -1
+                dur_ms = int(current_clip.duration * 1000)
+                new_id = -1
+                if current_clip.type == "Sine":
+                    new_id = engine.start_effect_sine(current_clip.frequency, current_clip.magnitude, dur_ms)
+                elif current_clip.type == "Constant":
+                    new_id = engine.start_effect_constant(current_clip.magnitude, dur_ms)
+                elif current_clip.type == "Ramp":
+                    new_id = engine.start_effect_ramp(0, current_clip.magnitude, dur_ms)
+                elif current_clip.type == "Sawtooth":
+                    per = int(1000 / max(1, current_clip.frequency))
+                    new_id = engine.start_effect_sawtooth(current_clip.magnitude, per, dur_ms)
+                return new_id
+
+            # State Machine
+            if curr_cid == prev_cid:
+                # CONTINUATION (Same clip still playing)
+                if current_clip and eff_id != -1:
+                    # Update parameters if needed (Software Sweep)
+                    remaining_ms = int((current_clip.duration - (cur_t - current_clip.start_time)) * 1000)
+                    if remaining_ms < 0: remaining_ms = 0 # Safety
+                    
+                    if current_clip.type == "Sine":
+                        # Sweep Logic
+                        if current_clip.frequency != current_clip.frequency_end:
+                             progress = (cur_t - current_clip.start_time) / current_clip.duration
+                             progress = max(0.0, min(1.0, progress))
+                             current_freq = int(current_clip.frequency + (current_clip.frequency_end - current_clip.frequency) * progress)
+                             current_freq = max(1, current_freq)
+                             engine.update_effect_sine(eff_id, current_freq, current_clip.magnitude, remaining_ms)
+                             
+                elif current_clip and eff_id == -1:
+                    # Recovery: Should be playing but isn't
+                    eff_id = start_new_effect()
+                    state['effect_id'] = eff_id
+                    
+            else:
+                # TRANSITION (Clip Changed or Ended/Started)
+                
+                # Try Transfer (Reuse Effect)
+                transferred = False
+                if eff_id != -1 and current_clip and prev_ctype == current_clip.type:
+                     # Reuse Effect ID by Updating
+                     dur_ms = int(current_clip.duration * 1000)
+                     transferred = True
+                     
+                     if current_clip.type == "Sine":
+                         engine.update_effect_sine(eff_id, current_clip.frequency, current_clip.magnitude, dur_ms)
+                     elif current_clip.type == "Constant":
+                         engine.update_effect_constant(eff_id, current_clip.magnitude, dur_ms)
+                     elif current_clip.type == "Ramp":
+                         engine.update_effect_ramp(eff_id, 0, current_clip.magnitude, dur_ms)
+                     elif current_clip.type == "Sawtooth":
+                         per = int(1000 / max(1, current_clip.frequency))
+                         engine.update_effect_sawtooth(eff_id, current_clip.magnitude, per, dur_ms)
+                     else:
+                         transferred = False
+                
+                if not transferred:
+                    # Stop Old
+                    if eff_id != -1:
+                        engine.stop_effect(eff_id)
+                        eff_id = -1
+                    
+                    # Start New
+                    if current_clip:
+                        eff_id = start_new_effect()
+                
+                # Save State
+                state['effect_id'] = eff_id
+                state['clip_id'] = curr_cid
+                state['clip_type'] = current_clip.type if current_clip else None
 
     # --- Rendering ---
+    def render_grid(self, total_w, total_h):
+        """Draws vertical grid lines and time labels based on current zoom."""
+        # Calculate grid spacing (time)
+        # We want approx 10 divisions per screen or readable intervals
+        # Let's try 1s, 0.1s, 0.01s based on zoom
+        
+        # Determine strict power of 10 spacing
+        # If pixels_per_sec (zoom_x) is 50:
+        # 1s = 50px (Too small? No)
+        # If zoom is 500: 1s = 500px, 0.1s = 50px
+        
+        # Base spacing in pixels we want is roughly 100px
+        target_px = 100.0
+        # Ideal time step
+        ideal_dt = target_px / max(0.1, self.sequencer.zoom_x)
+        
+        # Snap to 1, 2, 5
+        power = math.floor(math.log10(ideal_dt))
+        base = 10 ** power
+        
+        # Candidates: 1*base, 2*base, 5*base, 10*base
+        candidates = [base, 2*base, 5*base, 10*base]
+        # Pick closest
+        grid_time = base
+        min_dist = 999999.0
+        for c in candidates:
+             dist = abs(c - ideal_dt)
+             if dist < min_dist:
+                 min_dist = dist
+                 grid_time = c
+        
+        # Update Time Base Display input
+        if dpg.does_item_exist("input_timebase"):
+             # Avoid infinite loop if user is typing
+             if not dpg.is_item_active("input_timebase"):
+                 dpg.set_value("input_timebase", grid_time)
+        
+        # Draw Lines
+        start_t = 0.0
+        # For optimization, we could start from scroll position, but we don't track scroll X easily yet.
+        # Just draw visible range? We blindly draw 3000px width for now.
+        
+        x = 0
+        t = 0.0
+        while x < total_w:
+            x = t * self.sequencer.zoom_x
+            if x > total_w: break
+            
+            color = (60, 60, 60, 100)
+            thickness = 1
+            
+            # Major lines every 10 steps?
+            # if i % 10 == 0: color = (80,80,80,150)
+            
+            dpg.draw_line([x, 0], [x, total_h], color=color, thickness=thickness, parent="timeline_canvas")
+            # dpg.draw_text([x + 2, 0], f"{t:.2g}s", size=10, color=(150, 150, 150), parent="timeline_canvas") # User requested removal
+            
+            t += grid_time
+
     def render_timeline(self):
         dpg.delete_item("timeline_canvas", children_only=True, slot=2)
         
         y_offset = 0
         track_height = 80
-        total_w = 3000
+        total_w = max(3000, int(self.sequencer.zoom_x * 60)) # Dynamic width
+        # Ensure canvas is large enough
+        total_h = len(self.sequencer.tracks) * track_height
+        dpg.configure_item("timeline_canvas", width=total_w, height=total_h) 
+        # Setting height ensures that if we zoom out, canvas shrinks, scrollbar disappears.
+        
+        # Render Grid Background
+        self.render_grid(total_w, total_h)
         
         for i, track in enumerate(self.sequencer.tracks):
-             bg_col = (40, 40, 45) if i % 2 == 0 else (35, 35, 40)
+             # Highlight if target
+             is_target = (i == self.drag_target_track_idx) 
+             # Simplify: Just check if valid index and dragging/dropping might happen.
+             # Actually, just always highlight current hover track slightly? 
+             # User said "highlight only the target track (not whole window)" during drag and drop.
+             
+             bg_col = (40, 40, 45, 50) if i % 2 == 0 else (35, 35, 40, 50)
+             if i == self.drag_target_track_idx:
+                 bg_col = (60, 60, 80, 100) # Highlight
+
+             # Draw track lane bg (transparent to show grid potentially, or grid on top?)
+             # Grid is drawn first, so BG must be transparent.
              dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
              dpg.draw_line([0, y_offset + track_height], [total_w, y_offset+track_height], color=(60, 60, 60), parent="timeline_canvas")
              dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
@@ -511,7 +760,7 @@ class FeditNativeApp:
         if self.sequencer.selected_clip:
             self.sequencer.delete_clip(self.sequencer.selected_clip)
             self.sequencer.selected_clip = None
-            dpg.hide_item("btn_delete")
+            self.update_inspector_ui()
 
     def on_drop_receive(self, sender, app_data):
         print(f"DEBUG DROP: Sender={sender}, Data={app_data}")
@@ -537,6 +786,7 @@ class FeditNativeApp:
              self.log(f"Drop Skipped: Invalid Track {track_idx}")
 
     def canvas_click(self, sender, app_data):
+        mouse_btn = app_data[0] # [0]=button, [1]=tag
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
@@ -544,14 +794,30 @@ class FeditNativeApp:
         track_idx = int(rel_y // track_h)
         time_s = rel_x / self.sequencer.zoom_x
         
-        mouse_btn = app_data[0]
-        
         if mouse_btn == 1:
-            if 0 <= track_idx < len(self.sequencer.tracks):
+            # RIGHT CLICK: Context Menu
+            # Check if clicked on a clip
+            clip = self.get_clip_at_pos(rel_x, rel_y)
+            
+            if clip:
+                # CLIP CONTEXT MENU
+                if dpg.does_item_exist("win_clip_opts"): dpg.delete_item("win_clip_opts")
+                self.sequencer.selected_clip = clip # Auto-select on right click
+                
+                with dpg.window(tag="win_clip_opts", label="Clip Options", width=200, height=100, modal=True, show=True, pos=mpos):
+                    dpg.add_text(f"Clip: {clip.type}")
+                    def do_del_clip(s, a, u):
+                        self.delete_selected_clip()
+                        dpg.delete_item("win_clip_opts")
+                    dpg.add_button(label="Delete", callback=do_del_clip)
+                    dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_clip_opts"))
+            
+            elif 0 <= track_idx < len(self.sequencer.tracks):
+                # TRACK CONTEXT MENU
                 self.renaming_track_idx = track_idx
                 if dpg.does_item_exist("win_track_opts"): dpg.delete_item("win_track_opts")
                 
-                with dpg.window(tag="win_track_opts", label=f"Track {track_idx+1} Options", width=300, height=120, modal=True, show=True):
+                with dpg.window(tag="win_track_opts", label=f"Track {track_idx+1} Options", width=300, height=120, modal=True, show=True, pos=mpos):
                     dpg.add_input_text(tag="input_rename", default_value=self.sequencer.tracks[track_idx].name)
                     def do_rename(s, a, u):
                         name = dpg.get_value("input_rename")
@@ -570,49 +836,16 @@ class FeditNativeApp:
             return
 
         found = False
-        if 0 <= track_idx < len(self.sequencer.tracks):
-             clip = self.sequencer.get_clip_at(track_idx, time_s)
-             if clip:
-                 self.sequencer.selected_clip = clip
-                 dpg.set_value("insp_start", clip.start_time)
-                 dpg.set_value("insp_dur", clip.duration)
-                 dpg.set_value("insp_mag", clip.magnitude)
-                 dpg.set_value("insp_freq", clip.frequency)
-                 dpg.set_value("insp_freq_end", clip.frequency_end)
-                 
-                 # Show/Hide End Freq based on type
-                 if clip.type == "Sine": dpg.show_item("insp_freq_end")
-                 else: dpg.hide_item("insp_freq_end")
-                 
-                 dpg.show_item("btn_delete")
-                 found = True
-                 
-                 # Check Edges for resizing
-                 clip_px_start = clip.start_time * self.sequencer.zoom_x
-                 clip_px_end = (clip.start_time + clip.duration) * self.sequencer.zoom_x
-                 threshold = 10.0
-                 
-                 if abs(rel_x - clip_px_end) < threshold:
-                     self.sequencer.resize_clip = clip
-                     self.sequencer.resize_edge = "right"
-                     self.sequencer.resize_initial_dur = clip.duration
-                     self.sequencer.resize_initial_time = clip.start_time
-                 elif abs(rel_x - clip_px_start) < threshold:
-                     self.sequencer.resize_clip = clip
-                     self.sequencer.resize_edge = "left"
-                     self.sequencer.resize_initial_dur = clip.duration
-                     self.sequencer.resize_initial_time = clip.start_time
-                 else:
-                     # Normal Drag
-                     self.sequencer.drag_clip = clip
-                     self.sequencer.drag_offset = rel_x - clip_px_start
-        
-        if not found:
-             self.sequencer.selected_clip = None
-             dpg.hide_item("btn_delete")
-             self.sequencer.current_time = max(0.0, time_s)
-             self.log(f"Seek to {self.sequencer.current_time:.2f}s")
-             
+        # Remove old legacy selection loop if present
+        return
+
+    def on_key_press(self, sender, app_data):
+        if app_data == dpg.mvKey_Delete or app_data == dpg.mvKey_Back:
+            # Check if an input is active (don't delete clip while typing)
+            if dpg.is_item_active(dpg.get_active_item()):
+                return
+            self.delete_selected_clip()
+
     def update_selected_clip(self, sender, app_data, user_data):
         if not self.sequencer.selected_clip: return
         param = user_data
@@ -622,6 +855,55 @@ class FeditNativeApp:
         elif param == "dur": self.sequencer.selected_clip.duration = app_data
         elif param == "start": self.sequencer.selected_clip.start_time = app_data
 
+
+    def update_mag_percent(self, sender, app_data, user_data):
+        if not self.sequencer.selected_clip: return
+        # app_data is 0-100
+        val = max(0, min(100, app_data))
+        mag = int((val / 100.0) * 32767)
+        self.sequencer.selected_clip.magnitude = mag
+        
+        # Update software sweep if needed? 
+        # (Clip data is updated, next update_loop will handle engine update)
+        
+    def show_floating_inspector(self):
+        # Create or Show Window
+        if not dpg.does_item_exist("win_inspector_floating"):
+            with dpg.window(tag="win_inspector_floating", label="Inspector", width=250, height=300, pos=[400, 200]):
+                 dpg.add_text("Clip Properties")
+                 dpg.add_input_float(label="Start (s)", tag="insp_start", callback=self.update_selected_clip, user_data="start")
+                 dpg.add_input_float(label="Duration (s)", tag="insp_dur", callback=self.update_selected_clip, user_data="dur")
+                 dpg.add_slider_int(label="Magnitude %", tag="insp_mag_pct", max_value=100, callback=self.update_mag_percent)
+                 dpg.add_input_int(label="HZ Start", tag="insp_freq", min_value=1, max_value=5000, step=1, step_fast=10, callback=self.update_selected_clip, user_data="freq")
+                 dpg.add_input_int(label="HZ End", tag="insp_freq_end", min_value=1, max_value=5000, step=1, step_fast=10, callback=self.update_selected_clip, user_data="freq_end", show=False)
+        
+        dpg.show_item("win_inspector_floating")
+        dpg.focus_item("win_inspector_floating")
+        self.update_inspector_ui()
+
+    def update_inspector_ui(self):
+        # Helper to sync UI with selection
+        clip = self.sequencer.selected_clip
+        
+        # Only update if the window actually exists and is visible
+        if not dpg.does_item_exist("win_inspector_floating") or not dpg.is_item_visible("win_inspector_floating"):
+            return
+
+        if clip:
+             # Populate
+             dpg.set_value("insp_start", clip.start_time)
+             dpg.set_value("insp_dur", clip.duration)
+             dpg.set_value("insp_mag_pct", int((clip.magnitude / 32767.0) * 100))
+             dpg.set_value("insp_freq", clip.frequency)
+             # Show extended props
+             if clip.type == "Sine": dpg.show_item("insp_freq_end")
+             else: dpg.hide_item("insp_freq_end")
+        else:
+             # Deselected / Deleted -> Hide Window
+             dpg.hide_item("win_inspector_floating")
+
+    # --- Palette Drag Source ---
+
     # --- Palette Drag Source ---
     def make_drag_source(self, label, type):
         with dpg.group():
@@ -629,6 +911,67 @@ class FeditNativeApp:
              with dpg.drag_payload(drag_data=type): # Removed payload_type for compatibility
                  dpg.add_text(f"Effect: {label}")
 
+    def on_mouse_wheel(self, sender, app_data):
+        # app_data is value
+        # Lock view to tracks: Only zoom if hovering timeline
+        if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
+            # Get Mouse Time
+            mouse_x_screen = dpg.get_mouse_pos(local=False)[0]
+            # Offset from scroll window
+            try:
+                win_pos = dpg.get_item_pos("timeline_scroll") 
+                # Note: get_item_pos returns [x,y]. Mouse is global.
+                # Scoll offset x
+                scroll_x = dpg.get_x_scroll("timeline_scroll")
+                
+                # Mouse X relative to content 0
+                # mouse_in_content = (mouse_x - win_x) + scroll_x
+                # Simplified: timeline_canvas starts at 0,0 of child window content.
+                # Warning: win_pos might be unstable or title bar offset.
+                # Let's use get_item_rect_min of the scroll window
+                r_min = dpg.get_item_rect_min("timeline_scroll")
+                mouse_rel_x = mouse_x_screen - r_min[0] + scroll_x
+            except:
+                mouse_rel_x = 0
+            
+            # Calculate Time
+            t_mouse = max(0.0, mouse_rel_x / self.sequencer.zoom_x)
+            
+            # Zoom
+            scale_factor = 1.15
+            if app_data > 0:
+                self.sequencer.zoom_x *= scale_factor
+            elif app_data < 0:
+                self.sequencer.zoom_x /= scale_factor
+            
+            # Clamp settings
+            self.sequencer.zoom_x = max(10.0, min(50000.0, self.sequencer.zoom_x))
+            
+            # Restore Scroll to keep t_mouse at mouse_rel_x location on screen
+            # new_mouse_rel_x (in pixels) = t_mouse * new_zoom
+            # new_scroll_x = new_mouse_rel_x - (mouse_x_screen - r_min[0])
+            try:
+                new_pixel_x = t_mouse * self.sequencer.zoom_x
+                screen_offset = mouse_x_screen - r_min[0]
+                new_scroll_x = max(0.0, new_pixel_x - screen_offset)
+                dpg.set_x_scroll("timeline_scroll", new_scroll_x)
+            except: pass
+            
+            # Prevent Vertical Scroll Drift?
+            # If content fits, ensure Y scroll is 0?
+            total_h = len(self.sequencer.tracks) * 80
+            win_h = dpg.get_item_height("timeline_scroll")
+            if total_h <= win_h:
+                dpg.set_y_scroll("timeline_scroll", 0)
+
+    def on_timebase_change(self, sender, app_data):
+        # User manually entered a timebase (e.g. 0.1)
+        # We need to set zoom_x such that grid lines appear at this interval
+        # Base target px ~ 100px?
+        if app_data <= 0.00001: return
+        target_px = 100.0
+        self.sequencer.zoom_x = target_px / app_data
+        
     def setup_ui(self):
         with dpg.theme() as global_theme:
             with dpg.theme_component(dpg.mvAll):
@@ -654,6 +997,12 @@ class FeditNativeApp:
             # Set Main as a fallback drop target without payload type check
             try: dpg.set_item_drop_callback("Main", self.on_drop_receive)
             except: pass
+            
+            # Global Handlers
+            with dpg.handler_registry():
+                dpg.add_mouse_wheel_handler(callback=self.on_mouse_wheel)
+                dpg.add_key_press_handler(dpg.mvKey_Delete, callback=self.on_key_press)
+                dpg.add_key_press_handler(dpg.mvKey_Back, callback=self.on_key_press)
 
             # Top Bar
             with dpg.group(horizontal=True):
@@ -671,6 +1020,10 @@ class FeditNativeApp:
                 dpg.add_spacer(width=50)
                 dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
                 dpg.add_text("0.00s", tag="time_display")
+                
+                dpg.add_spacer(width=20)
+                dpg.add_text("TimeBase (s):")
+                dpg.add_input_float(tag="input_timebase", width=60, default_value=0.1, step=0, callback=self.on_timebase_change)
 
             dpg.add_separator()
 
@@ -698,7 +1051,8 @@ class FeditNativeApp:
                     # Col 2: Timeline
                     with dpg.group(tag="timeline_group"):
                          # Scroll Window
-                         with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True):
+                         # Disable mouse scroll to handle Zoom ourselves without fighting vertical scroll
+                         with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True, no_scroll_with_mouse=True):
                                  with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
                                     pass
 
@@ -718,21 +1072,9 @@ class FeditNativeApp:
                              dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
                          except Exception as e: print(f"Init Warning: {e}")
 
-                    # Col 3: Inspector
-                    with dpg.child_window(tag="inspector_win", height=-1):
-                        dpg.add_text("Inspector")
-                        dpg.add_separator()
-                        dpg.add_input_float(label="Start (s)", tag="insp_start", callback=self.update_selected_clip, user_data="start")
-                        dpg.add_input_float(label="Duration (s)", tag="insp_dur", callback=self.update_selected_clip, user_data="dur")
-                        dpg.add_slider_int(label="Magnitude", tag="insp_mag", max_value=32000, callback=self.update_selected_clip, user_data="mag")
-                        dpg.add_slider_int(label="Frequency", tag="insp_freq", max_value=100, callback=self.update_selected_clip, user_data="freq")
-                        dpg.add_slider_int(label="End Freq (Sine)", tag="insp_freq_end", max_value=100, callback=self.update_selected_clip, user_data="freq_end", show=False)
-                        
-                        dpg.add_separator()
-                        dpg.add_button(label="DELETE CLIP", callback=self.delete_selected_clip, width=-1, show=False, tag="btn_delete")
-                        dpg.add_separator()
-                        dpg.add_text("Log")
-                        dpg.add_listbox(tag="log_list", num_items=10, width=-1)
+                    # Col 3: Inspector REMOVED
+                    # Spacer to fill? No, column 2 is stretch.
+                    pass
 
         # FINAL BINDING
         try:
@@ -744,6 +1086,11 @@ class FeditNativeApp:
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("Main", True)
+        
+        
+        # GLOBAL HANDLERS removed in favor of polling in update_loop for reliability
+        # with dpg.handler_registry():
+        #    dpg.add_key_press_handler(callback=self.on_key_press)
         
         self.scan_devices()
 

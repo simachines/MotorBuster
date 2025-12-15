@@ -47,40 +47,19 @@
     - [ ] **Gapless Playback**: Eliminate delay between adjacent clips
     - [ ] Increase Max Frequency to 5000Hz (Implemented)
 - [ ] **Inspector & UI Interaction (The "Big Overhaul")**
-    - [ ] **Selection Logic**:
+    - [x] **Selection Logic**:
         - [x] **Separate Seek vs Select**: Left-click on clip should SELECT only. Click on ruler/empty should SEEK.
         - [x] Click empty space -> Deselect & Hide Inspector
-        - [ ] "Delete" key shortcut to remove selected clip (Implemented)
-    - [ ] **Inspector Features**:
-        - [ ] **Locking**: Checkbox to keep Inspector open/locked to a clip (Implemented)
-        - [ ] **Multiple Windows**:
-            - [ ] Double-click clip -> Open new "Locked" Inspector below current
-            - [ ] Right-click clip -> Open separate Floating Inspector window
-        - [ ] **Clip Renaming**:
-            - [ ] Auto-name clips (Sine 1, Sine 2...)
-            - [ ] Allow custom renaming in Inspector
-        - [ ] **Controls**:
-            - [ ] Inputs with +/- buttons (Implemented)
-            - [ ] Double-click to type value (Int only) (Implemented)
-            - [ ] Magnitude: 0-100% (mapped to 0-32767) (Implemented)
-            - [ ] Labels: "HZ Start" / "HZ End" (Implemented)
+        - [x] "Delete" key shortcut to remove selected clip
+    - [x] **Windowed Inspector**:
+        - [x] Remove Side Panel Inspector (User Request)
+        - [x] Double-Click on Clip -> Open Floating Inspector Window
+        - [x] Right-Click Context Menu -> Ensure "Delete" option works
+        - [x] **Controls**:
+            - [x] Inputs with +/- buttons (Implemented)
+            - [x] Magnitude: 0-100% (Implemented)
+            - [x] Labels: "HZ Start" / "HZ End" (Implemented)
 - [ ] **UX Polish**
-    - [ ] **Drag & Drop**: Highlight *only* the target track (not whole window) (Implemented)
-    - [ ] **Inspector Features**:
-        - [ ] **Locking**: Checkbox to keep Inspector open/locked to a clip
-        - [ ] **Multiple Windows**:
-            - [ ] Double-click clip -> Open new "Locked" Inspector below current
-            - [ ] Right-click clip -> Open separate Floating Inspector window
-        - [ ] **Clip Renaming**:
-            - [ ] Auto-name clips (Sine 1, Sine 2...)
-            - [ ] Allow custom renaming in Inspector
-        - [ ] **Controls**:
-            - [ ] Inputs with +/- buttons
-            - [ ] Double-click to type value (Int only)
-            - [ ] Magnitude: 0-100% (mapped to 0-32767)
-            - [ ] Labels: "HZ Start" / "HZ End"
-- [ ] **UX Polish**
-    - [ ] **Drag & Drop**: Highlight *only* the target track (not whole window)
-    - [ ] **Context Menus**:
-        - [ ] Right-click clip -> options to Delete Clip / Rename Track (?)
-
+    - [x] **Drag & Drop**: Highlight *only* the target track (not whole window)
+    - [x] **Context Menus**:
+        - [x] Right-click clip -> options to Delete Clip / Rename Track (?)
