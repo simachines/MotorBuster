@@ -557,7 +557,7 @@ class FeditNativeApp:
             prev_ctype = state['clip_type']
             
             # Find current logical clip
-            current_clip = self.get_clip_at_precise(t_idx, cur_t)
+            current_clip = self.sequencer.get_clip_at_precise(t_idx, cur_t)
             curr_cid = current_clip.id if current_clip else None
             
             # Helper to update active effect with new clip
@@ -591,7 +591,13 @@ class FeditNativeApp:
                              progress = max(0.0, min(1.0, progress))
                              current_freq = int(current_clip.frequency + (current_clip.frequency_end - current_clip.frequency) * progress)
                              current_freq = max(1, current_freq)
-                             engine.update_effect_sine(eff_id, current_freq, current_clip.magnitude, remaining_ms)
+                             
+                             # FIX: Use full duration to prevent timeout dropouts during recreation
+                             effect_len_ms = int(current_clip.duration * 1000) 
+                             new_eff_id = engine.update_effect_sine(eff_id, current_freq, current_clip.magnitude, effect_len_ms)
+                             if new_eff_id != -1:
+                                 eff_id = new_eff_id
+                                 state['effect_id'] = eff_id
                              
                 elif current_clip and eff_id == -1:
                     # Recovery: Should be playing but isn't
@@ -603,7 +609,9 @@ class FeditNativeApp:
                 
                 # Try Transfer (Reuse Effect)
                 transferred = False
-                if eff_id != -1 and current_clip and prev_ctype == current_clip.type:
+                # FIX: Disable reuse to avoid issues with updating stopped effects. 
+                # Always Stop/Start new ensures reliable triggering.
+                if False and eff_id != -1 and current_clip and prev_ctype == current_clip.type:
                      # Reuse Effect ID by Updating
                      dur_ms = int(current_clip.duration * 1000)
                      transferred = True

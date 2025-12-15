@@ -251,8 +251,8 @@ class HapticController:
         return new_id
 
     def update_effect_sine(self, effect_id: int, freq: int, magnitude: int, duration_ms: int):
-        """Updates parameters of an active sine effect."""
-        if not self.haptic or effect_id == -1: return
+        """Updates parameters of an active sine effect. Returns current (or new) effect_id."""
+        if not self.haptic or effect_id == -1: return -1
 
         effect = sdl2.SDL_HapticEffect()
         effect.type = sdl2.SDL_HAPTIC_SINE
@@ -260,12 +260,22 @@ class HapticController:
         effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
         effect.periodic.period = int(1000 / max(1, freq))
         effect.periodic.magnitude = magnitude
-        effect.periodic.length = duration_ms # Update length remaining? Or total? 
-        # SDL docs imply update essentially replaces parameters. 
-        # If we are continuing playback, ensure duration handles play time correctly or use Infinite.
+        effect.periodic.length = duration_ms 
+        effect.periodic.attack_length = 0
+        effect.periodic.fade_length = 0
         
         if sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect)) < 0:
-            logger.warning(f"Update failed: {sdl2.SDL_GetError()}")
+            logger.warning(f"Update failed: {sdl2.SDL_GetError()}. Recreating effect.")
+            # Fallback: Destroy and Recreate
+            sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id)
+            
+            # Re-create using the same logic as start_effect_sine but using prepared effect struct
+            new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
+            if new_id != -1:
+                sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+            return new_id
+            
+        return effect_id
 
     def update_effect_constant(self, effect_id: int, magnitude: int, duration_ms: int):
         if not self.haptic or effect_id == -1: return
