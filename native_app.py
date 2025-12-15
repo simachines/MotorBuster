@@ -557,7 +557,7 @@ class FeditNativeApp:
             prev_ctype = state['clip_type']
             
             # Find current logical clip
-            current_clip = self.get_clip_at_precise(t_idx, cur_t)
+            current_clip = self.sequencer.get_clip_at_precise(t_idx, cur_t)
             curr_cid = current_clip.id if current_clip else None
             
             # Helper to update active effect with new clip
@@ -896,7 +896,9 @@ class FeditNativeApp:
              dpg.set_value("insp_mag_pct", int((clip.magnitude / 32767.0) * 100))
              dpg.set_value("insp_freq", clip.frequency)
              # Show extended props
-             if clip.type == "Sine": dpg.show_item("insp_freq_end")
+             if clip.type == "Sine": 
+                 dpg.show_item("insp_freq_end")
+                 dpg.set_value("insp_freq_end", clip.frequency_end)
              else: dpg.hide_item("insp_freq_end")
         else:
              # Deselected / Deleted -> Hide Window
@@ -1072,9 +1074,11 @@ class FeditNativeApp:
                              dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
                          except Exception as e: print(f"Init Warning: {e}")
 
-                    # Col 3: Inspector REMOVED
-                    # Spacer to fill? No, column 2 is stretch.
-                    pass
+                    # Col 3: Logic / Log
+                    with dpg.child_window(tag="log_panel", width=300):
+                        dpg.add_text("System Log")
+                        dpg.add_separator()
+                        dpg.add_listbox(tag="log_list", num_items=30, width=-1)
 
         # FINAL BINDING
         try:

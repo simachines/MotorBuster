@@ -40,12 +40,12 @@
         - [ ] Add units to Time Base display (s, ms, us)
         - [x] Fix grid density transitions (1-2-5 step)
     - [ ] Allow entering Time Base via keyboard
-- [ ] **Engine & Playback Improvements**
-    - [ ] **Frequency Sweep Fixes**:
-        - [ ] Verify/Fix Hardware Sweep (Wheel compatibility) (Implemented Software Fallback)
-        - [ ] Implement Software Sweep fallback (10x update rate) if hardware fails (Implemented)
-    - [ ] **Gapless Playback**: Eliminate delay between adjacent clips
-    - [ ] Increase Max Frequency to 5000Hz (Implemented)
+- [x] **Engine & Playback Improvements**
+    - [x] **Frequency Sweep Fixes**:
+        - [x] Verify/Fix Hardware Sweep (Wheel compatibility) (Implemented Software Fallback)
+        - [x] Implement Software Sweep fallback (10x update rate) if hardware fails (Implemented)
+    - [x] **Gapless Playback**: Eliminate delay between adjacent clips
+    - [x] Increase Max Frequency to 5000Hz (Implemented)
 - [ ] **Inspector & UI Interaction (The "Big Overhaul")**
     - [x] **Selection Logic**:
         - [x] **Separate Seek vs Select**: Left-click on clip should SELECT only. Click on ruler/empty should SEEK.
