@@ -145,7 +145,7 @@ class FeditSequencer:
 
 
 class InspectorPanel:
-    def __init__(self, app, parent, clip=None):
+    def __init__(self, app, parent, clip=None, pos=[400, 200]):
         self.app = app
         self.clip = clip # If None, acts as "Live" inspector for selection
         self.parent = parent
@@ -158,6 +158,7 @@ class InspectorPanel:
         self.tag_mag = f"insp_mag_{self.id}"
         self.tag_freq = f"insp_freq_{self.id}"
         self.tag_freq_end = f"insp_freq_end_{self.id}"
+        self.tag_phase = f"insp_phase_{self.id}"
         self.tag_sweep = f"insp_sweep_{self.id}"
         self.tag_title = f"insp_title_{self.id}"
         
@@ -167,7 +168,7 @@ class InspectorPanel:
         
         # Container Context Manager matching the type (Window or Tab)
         if self.is_window:
-             self.container = dpg.window(label=label, tag=self.tag_tab, autosize=True, pos=[400, 200])
+             self.container = dpg.window(label=label, tag=self.tag_tab, autosize=True, pos=pos)
         else:
              self.container = dpg.tab(label=label, tag=self.tag_tab, parent=parent, closable=(clip is not None))
              
@@ -187,8 +188,8 @@ class InspectorPanel:
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
              
              dpg.add_separator()
-             if not clip:
-                 dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
+             # if not clip:
+             #     dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
     
     def get_target_clip(self):
         if self.clip: return self.clip
@@ -242,8 +243,19 @@ class InspectorPanel:
         elif param == "mag": 
             val = max(0, min(100, app_data))
             clip.magnitude = int((val / 100.0) * 32767)
-        elif param == "freq": clip.frequency = max(1, app_data)
-        elif param == "freq_end": clip.frequency_end = max(1, app_data)
+        elif param == "freq": 
+            if app_data < 1: 
+                dpg.set_value(sender, 1)
+                clip.frequency = 1
+            else:
+                clip.frequency = app_data
+        elif param == "phase": clip.start_phase = max(0, min(360, app_data))
+        elif param == "freq_end": 
+             if app_data < 1:
+                 dpg.set_value(sender, 1)
+                 clip.frequency_end = 1
+             else:
+                 clip.frequency_end = app_data
         elif param == "sweep": 
             clip.sweep_enabled = app_data
             self.update() # Refresh visibility immediately
