@@ -648,11 +648,15 @@ class FeditNativeApp:
             if dpg.does_item_exist("txt_min"): dpg.set_value("txt_min", "Min: --")
             
             # Auto-rewind if at end
+            # Auto-rewind if at end AND we have content
             max_dur = 0
+            has_content = False
             for t in self.sequencer.tracks:
                 for c in t.clips:
                     max_dur = max(max_dur, c.start_time + c.duration)
-            if self.sequencer.current_time >= max_dur - 0.1:
+                    has_content = True
+            
+            if has_content and self.sequencer.current_time >= max_dur - 0.1:
                 self.sequencer.current_time = 0.0
         else:
             dpg.configure_item("btn_play", label="Play")
