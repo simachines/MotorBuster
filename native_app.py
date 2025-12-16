@@ -101,8 +101,11 @@ class FeditSequencer:
         self.resize_edge: str = None # "left" or "right"
         self.resize_initial_time: float = 0.0
         self.resize_initial_dur: float = 0.0
-        
-    def to_dict(self):
+        self.resize_clip: Clip = None
+        self.resize_edge: str = None # "left" or "right"
+        self.resize_initial_time: float = 0.0
+        self.resize_initial_dur: float = 0.0
+        self.clipboard: dict = None # For Copy/Paste
         return {"tracks": [t.to_dict() for t in self.tracks]}
         
     def load_from_dict(self, d):
@@ -724,6 +727,42 @@ class FeditNativeApp:
             # Using simple hover check for now as focus might be tricky
             if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_focused("timeline_scroll"):
                  self.delete_selected_clip()
+
+        # COPY / PASTE (Ctrl+C, Ctrl+V)
+        if dpg.is_key_down(dpg.mvKey_Control):
+            if dpg.is_key_pressed(dpg.mvKey_C):
+                if self.sequencer.selected_clip:
+                    # Deep copy via dictionary serialization
+                    self.sequencer.clipboard = self.sequencer.selected_clip.to_dict()
+                    self.log(f"Copied {self.sequencer.selected_clip.name or 'Clip'}")
+            
+            if dpg.is_key_pressed(dpg.mvKey_V):
+                if self.sequencer.clipboard:
+                    # Create new clip logic
+                    data = self.sequencer.clipboard
+                    new_clip = Clip.from_dict(data)
+                    # New ID
+                    new_clip.id = str(uuid.uuid4())
+                    # Position at playhead
+                    new_clip.start_time = self.sequencer.current_time
+                    
+                    # Target Track (Same as original if possible, or try to respect selected track if implementing)
+                    # For now: Same track
+                    target_t_idx = new_clip.track_index
+                    if 0 <= target_t_idx < len(self.sequencer.tracks):
+                        t = self.sequencer.tracks[target_t_idx]
+                        t.clips.append(new_clip)
+                        # Fix overlaps
+                        # snapped_start = self._snap_to_edges(t, new_clip, new_clip.start_time) # Optional snap
+                        # Avoiding overlap on paste might be abrupt; standard DAW lets you paste on top sometimes.
+                        # But our engine is monophonic per track-slot logically in the UI visuals often.
+                        # Let's use the overlap avoidance to keep it clean.
+                        actual_start = self._avoid_overlap_on_drag(t, new_clip, new_clip.start_time)
+                        new_clip.start_time = actual_start
+                        
+                        self.sequencer.selected_clip = new_clip
+                        self.update_inspector_ui()
+                        self.log("Pasted Clip")
 
         # DOUBLE CLICK CHECK (Open Inspector)
         if dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
