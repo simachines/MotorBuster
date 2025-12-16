@@ -384,9 +384,14 @@ class FeditNativeApp:
             period = 1.0 / max(1.0, clip.frequency)
             phase = (t / period) % 1.0
             return mag * (2 * phase - 1)  # -mag .. +mag
+            
         # Default: Sine
         start_f = clip.frequency
-        end_f = getattr(clip, 'frequency_end', start_f)
+        end_f = start_f
+        
+        # Only use frequency_end if sweep is actually enabled
+        if getattr(clip, 'sweep_enabled', False):
+             end_f = getattr(clip, 'frequency_end', start_f)
         
         if start_f == end_f:
              omega = 2 * math.pi * start_f
@@ -403,6 +408,9 @@ class FeditNativeApp:
         y_mid = (y_top + y_bottom) / 2.0
         amp_span = (y_bottom - y_top) * 0.45 
         mag_max = 32767.0 # Normalize against full scale, so lower magnitude = smaller wave
+        
+        # Calculate visualization scale based on clip magnitude
+        clip_scale = clip.magnitude / mag_max
 
         if width <= 0: return []
         
@@ -425,9 +433,9 @@ class FeditNativeApp:
             local_max = 0.0
 
             if is_aliasing:
-                # Aliasing: Draw full height
-                local_min = -1.0
-                local_max = 1.0
+                # Aliasing: Draw full height relative to magnitude
+                local_min = -1.0 * clip_scale
+                local_max = 1.0 * clip_scale
             else:
                 # Sub-pixel sampling: Check 10 points to catch peaks accurately
                 # This prevents "pre-aliasing" noise where we miss the sine peak indtermittently
