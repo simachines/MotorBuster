@@ -77,6 +77,12 @@ if sdl2_path and os.path.exists(sdl2_path):
 else:
     print("WARNING: Could not find SDL2.dll to bundle! Application may fail.")
 
+# Force include the 'server' package dir
+server_dir = os.path.join(BASE_DIR, "server")
+if os.path.exists(server_dir):
+     print(f"Bundling server package from: {server_dir}")
+     args.append(f'--add-data={server_dir};server')
+
 print(f"Running PyInstaller with: {args}")
 
 PyInstaller.__main__.run(args)

@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server', 'server')]
 binaries = [('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.dependencies\\sdl2dll\\dll\\SDL2.dll', '.')]
 hiddenimports = ['server.ffb_engine']
 hiddenimports += collect_submodules('server')
