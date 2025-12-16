@@ -52,12 +52,14 @@
         - [x] Click empty space -> Deselect & Hide Inspector
         - [x] "Delete" key shortcut to remove selected clip
     - [x] **Windowed Inspector**:
-        - [x] Remove Side Panel Inspector (User Request)
+        - [x] Remove Side Panel Inspector (Replaced with Dockable Windows)
         - [x] Double-Click on Clip -> Open Floating Inspector Window
         - [x] Right-Click Context Menu -> Ensure "Delete" option works
         - [x] **Controls**:
             - [x] Inputs with +/- buttons (Implemented)
             - [x] Magnitude: 0-100% (Implemented)
+            - [x] Clip Naming Support (Implemented)
+        - [x] Docking Support (Implemented)
             - [x] Labels: "HZ Start" / "HZ End" (Implemented)
 - [ ] **UX Polish**
     - [x] **Drag & Drop**: Highlight *only* the target track (not whole window)

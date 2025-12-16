@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 import uuid
 import json
 import math
+import warnings
+
+# Filter benign PySDL2 warning
+warnings.filterwarnings("ignore", message="pysdl2-dll is installed as source-only")
 
 # Fix for finding modules in .dependencies when running locally or frozen
 if getattr(sys, 'frozen', False):
@@ -16,6 +20,7 @@ else:
     sys.path.append(os.path.join(base_path, '.dependencies'))
 
 from server.ffb_engine import engine, DeviceInfo
+
 
 # --- Data Model ---
 @dataclass
@@ -29,6 +34,8 @@ class Clip:
     magnitude: int = 10000
     frequency: int = 10
     frequency_end: int = 10 # For Sweep
+    sweep_enabled: bool = False
+    name: str = "Clip"
     active_effect_id: int = -1 # Runtime ID
     
     def to_dict(self):
@@ -36,7 +43,8 @@ class Clip:
             "id": self.id, "type": self.type, "start_time": self.start_time,
             "duration": self.duration, "track_index": self.track_index,
             "magnitude": self.magnitude, "frequency": self.frequency,
-            "frequency_end": self.frequency_end
+            "frequency_end": self.frequency_end, "sweep_enabled": self.sweep_enabled,
+            "name": self.name
         }
     
     @staticmethod
@@ -47,7 +55,9 @@ class Clip:
             start_time=d.get("start_time", 0.0), duration=d.get("duration", 1.0),
             track_index=d.get("track_index", 0),
             magnitude=d.get("magnitude", 10000), frequency=freq,
-            frequency_end=d.get("frequency_end", freq) # Default to start freq if missing
+            frequency_end=d.get("frequency_end", freq), # Default to start freq if missing
+            sweep_enabled=d.get("sweep_enabled", False),
+            name=d.get("name", "Clip")
         )
         return c
 
@@ -122,13 +132,134 @@ class FeditSequencer:
                 return clip
         return None
 
+    def get_clip_by_id(self, clip_id):
+        if clip_id is None: return None
+        for track in self.tracks:
+            for clip in track.clips:
+                if clip.id == clip_id: return clip
+        return None
+
+
+class InspectorPanel:
+    def __init__(self, app, parent, clip=None):
+        self.app = app
+        self.clip = clip # If None, acts as "Live" inspector for selection
+        self.parent = parent
+        self.id = str(uuid.uuid4())[:8]
+        
+        # Unique Tags
+        self.tag_tab = f"tab_{self.id}"
+        self.tag_start = f"insp_start_{self.id}"
+        self.tag_dur = f"insp_dur_{self.id}"
+        self.tag_mag = f"insp_mag_{self.id}"
+        self.tag_freq = f"insp_freq_{self.id}"
+        self.tag_freq_end = f"insp_freq_end_{self.id}"
+        self.tag_sweep = f"insp_sweep_{self.id}"
+        self.tag_title = f"insp_title_{self.id}"
+        
+        label = "Inspector (Live)" if not clip else (clip.name or f"Clip {clip.type}")
+        
+        self.is_window = (parent is None)
+        
+        # Container Context Manager matching the type (Window or Tab)
+        if self.is_window:
+             self.container = dpg.window(label=label, tag=self.tag_tab, autosize=True, pos=[400, 200])
+        else:
+             self.container = dpg.tab(label=label, tag=self.tag_tab, parent=parent, closable=(clip is not None))
+             
+        with self.container:
+             dpg.add_text("Properties", tag=self.tag_title)
+             dpg.add_separator()
+             
+             # Fields
+             dpg.add_input_float(label="Start (s)", tag=self.tag_start, callback=self.on_change, user_data="start")
+             dpg.add_input_float(label="Duration (s)", tag=self.tag_dur, callback=self.on_change, user_data="dur")
+             dpg.add_slider_int(label="Magnitude %", tag=self.tag_mag, max_value=100, callback=self.on_change, user_data="mag")
+             
+             dpg.add_separator()
+             dpg.add_input_int(label="Frequency (Hz)", tag=self.tag_freq, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq")
+             
+             dpg.add_checkbox(label="Enable Sweep", tag=self.tag_sweep, callback=self.on_change, user_data="sweep")
+             dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
+             
+             dpg.add_separator()
+             if not clip:
+                 dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
+    
+    def get_target_clip(self):
+        if self.clip: return self.clip
+        return self.app.sequencer.selected_clip
+
+    def update(self):
+        clip = self.get_target_clip()
+        if not clip:
+            # Disable or clear?
+            # dpg.disable_item(self.tag_tab) # Can't disable tab content easily?
+            dpg.set_value(self.tag_title, "No Selection")
+            return
+        
+        dpg.set_value(self.tag_title, f"Clip: {clip.type} ({clip.id[:4]})")
+        
+        # Update Values (Only if not active to allow typing?)
+        # Simple check: dpg.is_item_active
+        
+        def safe_set(tag, val):
+            if not dpg.is_item_active(tag):
+                dpg.set_value(tag, val)
+        
+        # Name update removed from here (handled via Right Click)
+
+        
+        safe_set(self.tag_start, clip.start_time)
+        safe_set(self.tag_dur, clip.duration)
+        safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
+        safe_set(self.tag_freq, clip.frequency)
+        safe_set(self.tag_sweep, clip.sweep_enabled)
+        
+        if clip.type == "Sine":
+            dpg.show_item(self.tag_sweep)
+            if clip.sweep_enabled:
+                dpg.show_item(self.tag_freq_end)
+                safe_set(self.tag_freq_end, clip.frequency_end)
+            else:
+                dpg.hide_item(self.tag_freq_end)
+        else:
+             dpg.hide_item(self.tag_sweep)
+             dpg.hide_item(self.tag_freq_end)
+
+    def on_change(self, sender, app_data, user_data):
+        clip = self.get_target_clip()
+        if not clip: return
+        
+        param = user_data
+        param = user_data
+        if param == "start": clip.start_time = app_data
+        elif param == "dur": clip.duration = max(0.01, app_data)
+        elif param == "mag": 
+            val = max(0, min(100, app_data))
+            clip.magnitude = int((val / 100.0) * 32767)
+        elif param == "freq": clip.frequency = max(1, app_data)
+        elif param == "freq_end": clip.frequency_end = max(1, app_data)
+        elif param == "sweep": 
+            clip.sweep_enabled = app_data
+            self.update() # Refresh visibility immediately
+            
+    def duplicate_to_tab(self, sender, app_data):
+        clip = self.get_target_clip()
+        if clip:
+            self.app.create_floating_inspector(clip)
+
 # --- Application ---
 class FeditNativeApp:
     def __init__(self):
         self.sequencer = FeditSequencer()
         self.log_items = []
+        self.fps_frames = 0
+        self.fps_last_time = time.time()
+        self.renaming_track_idx = -1
         self.renaming_track_idx = -1
         self.drag_target_track_idx = -1 # For visual highlight
+        self.inspectors = [] # List of InspectorPanel instances
         
         dpg.create_context()
         self.setup_ui()
@@ -245,15 +376,24 @@ class FeditNativeApp:
             phase = (t / period) % 1.0
             return mag * (2 * phase - 1)  # -mag .. +mag
         # Default: Sine
-        omega = 2 * math.pi * clip.frequency
-        return mag * math.sin(omega * t)
+        start_f = clip.frequency
+        end_f = getattr(clip, 'frequency_end', start_f)
+        
+        if start_f == end_f:
+             omega = 2 * math.pi * start_f
+             return mag * math.sin(omega * t)
+        else:
+             # Chirp: phase = 2*pi * (f0*t + 0.5*k*t^2)
+             k = (end_f - start_f) / max(1e-6, clip.duration)
+             phase = 2 * math.pi * (start_f * t + 0.5 * k * t * t)
+             return mag * math.sin(phase)
 
     def _clip_wave_points(self, clip: Clip, x_start: float, width: float, y_top: float, y_bottom: float, samples: int = 0):
         # Precise Peak-Detection for Aliasing
         points = []
         y_mid = (y_top + y_bottom) / 2.0
         amp_span = (y_bottom - y_top) * 0.45 
-        mag_max = max(1.0, abs(clip.magnitude))
+        mag_max = 32767.0 # Normalize against full scale, so lower magnitude = smaller wave
 
         if width <= 0: return []
         
@@ -263,7 +403,7 @@ class FeditNativeApp:
         # Hard limit
         if pixels > 5000: pixels = 5000; step_t = clip.duration / pixels
 
-        freq = clip.frequency
+        freq = max(clip.frequency, getattr(clip, 'frequency_end', clip.frequency))
         is_aliasing = False
         if freq > 0 and (1.0/freq) < step_t * 2.5:
              is_aliasing = True
@@ -371,14 +511,23 @@ class FeditNativeApp:
     # --- Transport Logic ---
     def toggle_play(self):
         self.sequencer.is_playing = not self.sequencer.is_playing
-        self.sequencer.last_tick = time.time()
-        label = "Stop" if self.sequencer.is_playing else "Play"
-        dpg.configure_item("btn_play", label=label)
-        
-        if not self.sequencer.is_playing:
-            # Stop all
-            engine.stop_effect()
-            # Reset active IDs
+        if self.sequencer.is_playing:
+            dpg.configure_item("btn_play", label="Stop")
+            self.sequencer.last_tick = time.time()
+            
+            # Auto-rewind if at end
+            max_dur = 0
+            for t in self.sequencer.tracks:
+                for c in t.clips:
+                    max_dur = max(max_dur, c.start_time + c.duration)
+            if self.sequencer.current_time >= max_dur - 0.1:
+                self.sequencer.current_time = 0.0
+        else:
+            dpg.configure_item("btn_play", label="Play")
+            engine.stop_effect() # Stop all
+            # Reset valid states
+            for k in self.track_states:
+                self.track_states[k] = {'effect_id': -1, 'clip_id': None, 'clip_type': None}
             for t in self.sequencer.tracks:
                 for c in t.clips: c.active_effect_id = -1
 
@@ -424,7 +573,8 @@ class FeditNativeApp:
              d_clip = self.get_clip_at_pos(rx, ry)
              if d_clip:
                  self.sequencer.selected_clip = d_clip
-                 self.show_floating_inspector()
+                 # Open a dedicated Locked Inspector Tab on Double Click
+                 self.create_floating_inspector(d_clip)
 
         # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
         # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
@@ -520,11 +670,8 @@ class FeditNativeApp:
                      new_t = max(0.0, rel_x / self.sequencer.zoom_x)
                      self.sequencer.current_time = new_t
                      
-                     # Deselect if not locked
-                     is_locked = dpg.get_value("chk_insp_lock") if dpg.does_item_exist("chk_insp_lock") else False
-                     if not is_locked:
-                         self.sequencer.selected_clip = None
-                         self.update_inspector_ui()
+                     self.sequencer.selected_clip = None
+                     self.update_inspector_ui()
 
         else:
             # Mouse Up - Release Drag/Resize
@@ -561,12 +708,13 @@ class FeditNativeApp:
             curr_cid = current_clip.id if current_clip else None
             
             # Helper to update active effect with new clip
-            def start_new_effect():
+            def start_new_effect(start_phase=-1):
                 if not current_clip: return -1
                 dur_ms = int(current_clip.duration * 1000)
                 new_id = -1
                 if current_clip.type == "Sine":
-                    new_id = engine.start_effect_sine(current_clip.frequency, current_clip.magnitude, dur_ms)
+                    phase_arg = start_phase if start_phase >= 0 else 0
+                    new_id = engine.start_effect_sine(current_clip.frequency, current_clip.magnitude, dur_ms, phase=phase_arg)
                 elif current_clip.type == "Constant":
                     new_id = engine.start_effect_constant(current_clip.magnitude, dur_ms)
                 elif current_clip.type == "Ramp":
@@ -585,20 +733,65 @@ class FeditNativeApp:
                     if remaining_ms < 0: remaining_ms = 0 # Safety
                     
                     if current_clip.type == "Sine":
-                        # Sweep Logic
-                        if current_clip.frequency != current_clip.frequency_end:
+                        # Always debug active clips
+                        if self.sequencer.is_playing:
+                            print(f"ClipActive: t={cur_t:.2f} id={eff_id} freq={current_clip.frequency} end={current_clip.frequency_end}")
+                        
+                        dpg.set_value("monitor_freq", f"Freq: {current_clip.frequency} Hz")
+                        
+                        # --- REAL-TIME UPDATE LOGIC ---
+                        # Verify change against stored state or just update if sweep
+                        is_sweep = current_clip.frequency != current_clip.frequency_end and current_clip.sweep_enabled
+                        
+                        # Check "Dirty" State (User changed sliders)
+                        last_mag = state.get('last_mag', -1)
+                        last_freq = state.get('last_freq', -1)
+                        
+                        has_changed = (current_clip.magnitude != last_mag) or \
+                                      (current_clip.frequency != last_freq and not is_sweep) 
+                        
+                        if is_sweep or has_changed:
+                             # Calculate current parameters
                              progress = (cur_t - current_clip.start_time) / current_clip.duration
                              progress = max(0.0, min(1.0, progress))
-                             current_freq = int(current_clip.frequency + (current_clip.frequency_end - current_clip.frequency) * progress)
-                             current_freq = max(1, current_freq)
                              
-                             # FIX: Use full duration to prevent timeout dropouts during recreation
+                             if is_sweep:
+                                 current_freq = float(current_clip.frequency + (current_clip.frequency_end - current_clip.frequency) * progress)
+                                 current_freq = max(0.1, current_freq)
+                             else:
+                                 current_freq = float(current_clip.frequency)
+
+                             dpg.set_value("monitor_freq", f"Freq: {current_freq:.2f} Hz")
+                             
                              effect_len_ms = int(current_clip.duration * 1000) 
-                             new_eff_id = engine.update_effect_sine(eff_id, current_freq, current_clip.magnitude, effect_len_ms)
+
+                             # Calculate Phase
+                             t_local = cur_t - current_clip.start_time
+                             start_f = current_clip.frequency
+                             end_f = current_clip.frequency_end if is_sweep else start_f
+                             k = (end_f - start_f) / max(1e-6, current_clip.duration)
+                             norm_phase = (start_f * t_local + 0.5 * k * t_local * t_local) % 1.0
+                             sdl_phase = int(norm_phase * 36000)
+                             
+                             # Update Engine
+                             new_eff_id = engine.update_effect_sine(eff_id, current_freq, current_clip.magnitude, effect_len_ms, phase=sdl_phase)
                              if new_eff_id != -1:
                                  eff_id = new_eff_id
                                  state['effect_id'] = eff_id
-                             
+                        
+                        # Update State
+                        state['last_mag'] = current_clip.magnitude
+                        state['last_freq'] = current_clip.frequency
+
+                # Update Phase Tracking for next frame's potential transition
+                if current_clip and current_clip.type == "Sine":
+                     t_local = cur_t - current_clip.start_time
+                     start_f = current_clip.frequency
+                     end_f = current_clip.frequency_end if current_clip.sweep_enabled else start_f
+                     k = (end_f - start_f) / max(1e-6, current_clip.duration)
+                     norm_phase = (start_f * t_local + 0.5 * k * t_local * t_local) % 1.0
+                     state['last_phase'] = int(norm_phase * 36000)
+                     
                 elif current_clip and eff_id == -1:
                     # Recovery: Should be playing but isn't
                     eff_id = start_new_effect()
@@ -607,26 +800,24 @@ class FeditNativeApp:
             else:
                 # TRANSITION (Clip Changed or Ended/Started)
                 
-                # Try Transfer (Reuse Effect)
+                # Determine Start Phase for Gapless Continuity
+                start_phase_override = -1
+                if prev_cid is not None and current_clip and current_clip.type == "Sine" and prev_ctype == "Sine":
+                     # Robust calculation: Find previous clip object and calculate its end phase
+                     prev_clip = self.sequencer.get_clip_by_id(prev_cid)
+                     if prev_clip:
+                         start_f_prev = prev_clip.frequency
+                         end_f_prev = prev_clip.frequency_end if prev_clip.sweep_enabled else start_f_prev
+                         k_prev = (end_f_prev - start_f_prev) / max(1e-6, prev_clip.duration)
+                         t_end = prev_clip.duration
+                         # Calc exact end phase
+                         end_phase_val = (start_f_prev * t_end + 0.5 * k_prev * t_end * t_end) % 1.0
+                         start_phase_override = int(end_phase_val * 36000)
+                     elif 'last_phase' in state:
+                         start_phase_override = state['last_phase']
+                
+                # Try Transfer (Reuse Effect) - DISABLED for now to ensure clean start
                 transferred = False
-                # FIX: Disable reuse to avoid issues with updating stopped effects. 
-                # Always Stop/Start new ensures reliable triggering.
-                if False and eff_id != -1 and current_clip and prev_ctype == current_clip.type:
-                     # Reuse Effect ID by Updating
-                     dur_ms = int(current_clip.duration * 1000)
-                     transferred = True
-                     
-                     if current_clip.type == "Sine":
-                         engine.update_effect_sine(eff_id, current_clip.frequency, current_clip.magnitude, dur_ms)
-                     elif current_clip.type == "Constant":
-                         engine.update_effect_constant(eff_id, current_clip.magnitude, dur_ms)
-                     elif current_clip.type == "Ramp":
-                         engine.update_effect_ramp(eff_id, 0, current_clip.magnitude, dur_ms)
-                     elif current_clip.type == "Sawtooth":
-                         per = int(1000 / max(1, current_clip.frequency))
-                         engine.update_effect_sawtooth(eff_id, current_clip.magnitude, per, dur_ms)
-                     else:
-                         transferred = False
                 
                 if not transferred:
                     # Stop Old
@@ -636,12 +827,14 @@ class FeditNativeApp:
                     
                     # Start New
                     if current_clip:
-                        eff_id = start_new_effect()
+                        eff_id = start_new_effect(start_phase=start_phase_override)
                 
                 # Save State
                 state['effect_id'] = eff_id
                 state['clip_id'] = curr_cid
                 state['clip_type'] = current_clip.type if current_clip else None
+                if current_clip:
+                     state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
 
     # --- Rendering ---
     def render_grid(self, total_w, total_h):
@@ -746,7 +939,7 @@ class FeditNativeApp:
                  border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
                  
                  dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
-                 dpg.draw_text([x_start + 5, y_offset + 25], clip.type, size=13, parent="timeline_canvas")
+                 dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=13, parent="timeline_canvas")
 
                  # Waveform preview
                  wave_points = self._clip_wave_points(
@@ -765,7 +958,6 @@ class FeditNativeApp:
         dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
 
     def delete_selected_clip(self):
-        if self.sequencer.selected_clip:
             self.sequencer.delete_clip(self.sequencer.selected_clip)
             self.sequencer.selected_clip = None
             self.update_inspector_ui()
@@ -811,14 +1003,30 @@ class FeditNativeApp:
                 # CLIP CONTEXT MENU
                 if dpg.does_item_exist("win_clip_opts"): dpg.delete_item("win_clip_opts")
                 self.sequencer.selected_clip = clip # Auto-select on right click
+                self.renaming_clip = clip
                 
-                with dpg.window(tag="win_clip_opts", label="Clip Options", width=200, height=100, modal=True, show=True, pos=mpos):
-                    dpg.add_text(f"Clip: {clip.type}")
-                    def do_del_clip(s, a, u):
-                        self.delete_selected_clip()
-                        dpg.delete_item("win_clip_opts")
-                    dpg.add_button(label="Delete", callback=do_del_clip)
-                    dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_clip_opts"))
+                with dpg.window(tag="win_clip_opts", label="Clip Options", width=250, height=120, modal=True, show=True, pos=mpos):
+                     dpg.add_text(f"Clip: {clip.type}")
+                     dpg.add_input_text(tag="input_clip_name", default_value=clip.name, on_enter=True, callback=lambda: do_rename_clip(None, None, None))
+
+                     def do_rename_clip(s, a, u):
+                         name = dpg.get_value("input_clip_name")
+                         if self.renaming_clip:
+                             self.renaming_clip.name = name
+                             self.update_inspector_ui()
+                         dpg.delete_item("win_clip_opts")
+
+                     def do_del_clip(s, a, u):
+                         if self.renaming_clip:
+                             self.sequencer.delete_clip(self.renaming_clip)
+                             self.sequencer.selected_clip = None
+                             self.update_inspector_ui()
+                         dpg.delete_item("win_clip_opts")
+
+                     with dpg.group(horizontal=True):
+                         dpg.add_button(label="Rename", callback=do_rename_clip)
+                         dpg.add_button(label="Delete", callback=do_del_clip)
+                         dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_clip_opts"))
             
             elif 0 <= track_idx < len(self.sequencer.tracks):
                 # TRACK CONTEXT MENU
@@ -847,70 +1055,42 @@ class FeditNativeApp:
         # Remove old legacy selection loop if present
         return
 
-    def on_key_press(self, sender, app_data):
-        if app_data == dpg.mvKey_Delete or app_data == dpg.mvKey_Back:
-            # Check if an input is active (don't delete clip while typing)
-            if dpg.is_item_active(dpg.get_active_item()):
-                return
-            self.delete_selected_clip()
-
-    def update_selected_clip(self, sender, app_data, user_data):
-        if not self.sequencer.selected_clip: return
-        param = user_data
-        if param == "freq": self.sequencer.selected_clip.frequency = app_data
-        elif param == "freq_end": self.sequencer.selected_clip.frequency_end = app_data
-        elif param == "mag": self.sequencer.selected_clip.magnitude = app_data
-        elif param == "dur": self.sequencer.selected_clip.duration = app_data
-        elif param == "start": self.sequencer.selected_clip.start_time = app_data
+    # on_key_press REMOVED - Logic moved to update_loop
+    # def on_key_press(self, sender, app_data):
+    #     if app_data == dpg.mvKey_Delete or app_data == dpg.mvKey_Back:
+    #         # Check if an input is active (don't delete clip while typing)
+    #         if dpg.is_item_active(dpg.get_active_item()):
+    #             return
+    #         self.delete_selected_clip()
 
 
-    def update_mag_percent(self, sender, app_data, user_data):
-        if not self.sequencer.selected_clip: return
-        # app_data is 0-100
-        val = max(0, min(100, app_data))
-        mag = int((val / 100.0) * 32767)
-        self.sequencer.selected_clip.magnitude = mag
-        
-        # Update software sweep if needed? 
-        # (Clip data is updated, next update_loop will handle engine update)
-        
-    def show_floating_inspector(self):
-        # Create or Show Window
-        if not dpg.does_item_exist("win_inspector_floating"):
-            with dpg.window(tag="win_inspector_floating", label="Inspector", width=250, height=300, pos=[400, 200]):
-                 dpg.add_text("Clip Properties")
-                 dpg.add_input_float(label="Start (s)", tag="insp_start", callback=self.update_selected_clip, user_data="start")
-                 dpg.add_input_float(label="Duration (s)", tag="insp_dur", callback=self.update_selected_clip, user_data="dur")
-                 dpg.add_slider_int(label="Magnitude %", tag="insp_mag_pct", max_value=100, callback=self.update_mag_percent)
-                 dpg.add_input_int(label="HZ Start", tag="insp_freq", min_value=1, max_value=5000, step=1, step_fast=10, callback=self.update_selected_clip, user_data="freq")
-                 dpg.add_input_int(label="HZ End", tag="insp_freq_end", min_value=1, max_value=5000, step=1, step_fast=10, callback=self.update_selected_clip, user_data="freq_end", show=False)
-        
-        dpg.show_item("win_inspector_floating")
-        dpg.focus_item("win_inspector_floating")
-        self.update_inspector_ui()
 
     def update_inspector_ui(self):
-        # Helper to sync UI with selection
-        clip = self.sequencer.selected_clip
-        
-        # Only update if the window actually exists and is visible
-        if not dpg.does_item_exist("win_inspector_floating") or not dpg.is_item_visible("win_inspector_floating"):
-            return
+        # Update all active inspector panels
+        # Filter closed panels? DPG deletes items but our list might keep them.
+        # Simple cleanup: check if tag exists.
+        active = []
+        for p in self.inspectors:
+            if dpg.does_item_exist(p.tag_tab):
+                p.update()
+                active.append(p)
+            else:
+                pass # Closed
+        self.inspectors = active
 
-        if clip:
-             # Populate
-             dpg.set_value("insp_start", clip.start_time)
-             dpg.set_value("insp_dur", clip.duration)
-             dpg.set_value("insp_mag_pct", int((clip.magnitude / 32767.0) * 100))
-             dpg.set_value("insp_freq", clip.frequency)
-             # Show extended props
-             if clip.type == "Sine": 
-                 dpg.show_item("insp_freq_end")
-                 dpg.set_value("insp_freq_end", clip.frequency_end)
-             else: dpg.hide_item("insp_freq_end")
-        else:
-             # Deselected / Deleted -> Hide Window
-             dpg.hide_item("win_inspector_floating")
+    def create_floating_inspector(self, clip=None, parent=None):
+        # If parent implies "Docked Tab" (tab bar)
+        # If no parent, implies "Floating Window"
+        
+        p = InspectorPanel(self, parent, clip)
+        self.inspectors.append(p)
+        
+        # If using tab bar, select it
+        if parent:
+             dpg.set_value(parent, p.tag_tab)
+        
+
+
 
     # --- Palette Drag Source ---
 
@@ -1005,14 +1185,14 @@ class FeditNativeApp:
 
         with dpg.window(tag="Main"):
             # Set Main as a fallback drop target without payload type check
-            try: dpg.set_item_drop_callback("Main", self.on_drop_receive)
-            except: pass
+            # try: dpg.set_item_drop_callback("Main", self.on_drop_receive)
+            # except: pass
             
             # Global Handlers
             with dpg.handler_registry():
                 dpg.add_mouse_wheel_handler(callback=self.on_mouse_wheel)
-                dpg.add_key_press_handler(dpg.mvKey_Delete, callback=self.on_key_press)
-                dpg.add_key_press_handler(dpg.mvKey_Back, callback=self.on_key_press)
+                # dpg.add_key_press_handler(dpg.mvKey_Delete, callback=self.on_key_press)
+                # dpg.add_key_press_handler(dpg.mvKey_Back, callback=self.on_key_press)
 
             # Top Bar
             with dpg.group(horizontal=True):
@@ -1026,10 +1206,13 @@ class FeditNativeApp:
                 dpg.add_button(label="Scan", callback=self.scan_devices)
                 dpg.add_button(label="Connect", callback=self.connect_callback)
                 dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                dpg.add_text("| Rate: -- Hz", tag="status_fps", color=(150, 255, 150))
                 
                 dpg.add_spacer(width=50)
                 dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
                 dpg.add_text("0.00s", tag="time_display")
+                dpg.add_spacer(width=20)
+                dpg.add_text("Freq: --", tag="monitor_freq", color=(100, 255, 100))
                 
                 dpg.add_spacer(width=20)
                 dpg.add_text("TimeBase (s):")
@@ -1037,72 +1220,74 @@ class FeditNativeApp:
 
             dpg.add_separator()
 
-            with dpg.table(header_row=False, resizable=True, policy=dpg.mvTable_SizingStretchProp, 
-                           borders_innerV=True):
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=150) # Palette
-                dpg.add_table_column() # Timeline
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=200) # Inspector
+        
 
-                with dpg.table_row():
-                    
-                    # Col 1: Palette
-                    with dpg.child_window(height=-1):
-                        dpg.add_text("Effects")
-                        dpg.add_separator()
-                        self.make_drag_source("Sine Wave", "Sine")
-                        self.make_drag_source("Constant", "Constant")
-                        self.make_drag_source("Ramp", "Ramp")
-                        self.make_drag_source("Sawtooth", "Sawtooth")
-                        
-                        dpg.add_spacer(height=20)
-                        dpg.add_text("Tools")
-                        dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
+        # --- SOLID TABLE LAYOUT ---
+        with dpg.table(header_row=False, resizable=True, policy=dpg.mvTable_SizingStretchProp, 
+                       borders_innerV=True, parent="Main"):
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=150) # Palette
+            dpg.add_table_column() # Timeline
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=300) # Inspector & Log
 
-                    # Col 2: Timeline
-                    with dpg.group(tag="timeline_group"):
-                         # Scroll Window
-                         # Disable mouse scroll to handle Zoom ourselves without fighting vertical scroll
-                         with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True, no_scroll_with_mouse=True):
-                                 with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
-                                    pass
+            with dpg.table_row():
+                
+                # Col 1: Palette
+                with dpg.child_window(height=-1):
+                    dpg.add_text("Effects")
+                    dpg.add_separator()
+                    self.make_drag_source("Sine Wave", "Sine")
+                    self.make_drag_source("Constant", "Constant")
+                    self.make_drag_source("Ramp", "Ramp")
+                    self.make_drag_source("Sawtooth", "Sawtooth")
+                    dpg.add_spacer(height=20)
+                    dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
 
-                         # EXPLICIT TARGET to handle drop visualization and acceptance
-                         # Removed invalid widget call. Relying on Main Window callback.
-                         dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
+                # Col 2: Timeline
+                with dpg.group(tag="timeline_group"):
+                     # Scroll Window
+                     with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True, no_scroll_with_mouse=True):
+                             with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
+                                pass
+
+                     dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
+                     
+                     with dpg.item_handler_registry(tag="timeline_click_handler"):
+                             dpg.add_item_clicked_handler(callback=self.canvas_click)
                          
-                         with dpg.item_handler_registry(tag="timeline_click_handler"):
-                                 dpg.add_item_clicked_handler(callback=self.canvas_click)
-                             
-                         dpg.bind_item_handler_registry("timeline_canvas", "timeline_click_handler")
-                             
-                         # Enable Drop
-                         try:
-                             # We set the callback on the Main window at the end of setup_ui
-                             # But we can also try the child window one last time as a backup
-                             dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
-                         except Exception as e: print(f"Init Warning: {e}")
+                     dpg.bind_item_handler_registry("timeline_canvas", "timeline_click_handler")
+                         
+                     try:
+                         dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
+                     except Exception as e: print(f"Init Warning: {e}")
 
-                    # Col 3: Logic / Log
-                    with dpg.child_window(tag="log_panel", width=300):
+                # Col 3: Inspector (Top) & Log (Bottom)
+                with dpg.group():
+                    # Inspector Section (Top Half)
+                    with dpg.child_window(tag="panel_inspector", height=450):
+                        # We use a Tab Bar here to host the single Live Inspector tab
+                        # This keeps the look consistent and clean
+                        with dpg.tab_bar(tag="inspector_tab_bar"):
+                            pass
+                    
+                    # Log Section (Bottom Half)
+                    with dpg.child_window(tag="panel_log", height=-1):
                         dpg.add_text("System Log")
-                        dpg.add_separator()
                         dpg.add_listbox(tag="log_list", num_items=30, width=-1)
 
+        # Initialize Live Inspector (Docked in inspector_tab_bar)
+        self.create_floating_inspector(None, parent="inspector_tab_bar")
+        
         # FINAL BINDING
         try:
             dpg.set_item_drop_callback("Main", self.on_drop_receive)
-        except Exception as e: print(f"Main Drop Bind Error: {e}")
+        except Exception: pass
 
     def run(self):
-        dpg.create_viewport(title='Fedit DAW 2.0', width=1280, height=800)
+        # Disable VSync for Haptics
+        dpg.create_viewport(title='Fedit DAW 2.0', width=1280, height=800, vsync=False)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("Main", True)
-        
-        
-        # GLOBAL HANDLERS removed in favor of polling in update_loop for reliability
-        # with dpg.handler_registry():
-        #    dpg.add_key_press_handler(callback=self.on_key_press)
         
         self.scan_devices()
 

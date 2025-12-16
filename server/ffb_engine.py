@@ -231,7 +231,7 @@ class HapticController:
         sdl2.SDL_Quit()
 
     # --- Sequencer Methods ---
-    def start_effect_sine(self, freq: int, magnitude: int, duration_ms: int):
+    def start_effect_sine(self, freq: float, magnitude: int, duration_ms: int, phase: int = 0):
         if not self.haptic: return -1
         
         # New Effect
@@ -239,42 +239,73 @@ class HapticController:
         effect.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
-        effect.periodic.period = int(1000 / max(1, freq))
+        effect.periodic.period = int(1000 / max(0.1, float(freq)))
         effect.periodic.magnitude = magnitude
         effect.periodic.length = duration_ms
-        effect.periodic.attack_length = 50
-        effect.periodic.fade_length = 50
+        effect.periodic.attack_length = 0
+        effect.periodic.fade_length = 0
+        effect.periodic.phase = phase
         
         new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
         if new_id != -1:
             sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
         return new_id
 
-    def update_effect_sine(self, effect_id: int, freq: int, magnitude: int, duration_ms: int):
-        """Updates parameters of an active sine effect. Returns current (or new) effect_id."""
+    def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = -1):
+        """Updates parameters. If phase >= 0, attempts to set phase."""
         if not self.haptic or effect_id == -1: return -1
 
         effect = sdl2.SDL_HapticEffect()
         effect.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
-        effect.periodic.period = int(1000 / max(1, freq))
+        # Allow low frequency (0.1Hz = 10000ms period)
+        effect.periodic.period = int(1000 / max(0.1, float(freq)))
         effect.periodic.magnitude = magnitude
         effect.periodic.length = duration_ms 
         effect.periodic.attack_length = 0
         effect.periodic.fade_length = 0
-        
-        if sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect)) < 0:
-            logger.warning(f"Update failed: {sdl2.SDL_GetError()}. Recreating effect.")
-            # Fallback: Destroy and Recreate
-            sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id)
+        if phase >= 0:
+            effect.periodic.phase = phase
+            # HOT SWAP: Create New -> Run -> Destroy Old
+            # This prevents torque drop-out (gap) during the swap.
             
-            # Re-create using the same logic as start_effect_sine but using prepared effect struct
+            # 1. Try to create new effect while old exists
             new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
-            if new_id != -1:
-                sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
-            return new_id
             
+            if new_id != -1:
+                # 2. Success: Run new, then destroy old
+                sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+                if effect_id != -1:
+                    sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id)
+                return new_id
+            else:
+                # 3. Fail (Maybe full?): Destroy old, then retry
+                # logger.warning("Hot-Swap failed (Device Full?). Falling back to Destroy-First.")
+                if effect_id != -1:
+                    sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id)
+                    effect_id = -1
+                
+                # Retry
+                new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
+                if new_id != -1:
+                    sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+                return new_id
+        
+        # Only try Standard Update if we are NOT forcing phase
+        elif sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect)) == 0:
+            return effect_id
+            
+        # Update Failed logic
+        if effect_id != -1:
+             sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id)
+            
+        # Re-create 
+        new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
+        if new_id != -1:
+            sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+        return new_id
+        
         return effect_id
 
     def update_effect_constant(self, effect_id: int, magnitude: int, duration_ms: int):
