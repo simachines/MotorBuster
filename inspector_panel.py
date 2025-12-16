@@ -15,6 +15,7 @@ class InspectorPanel:
         self.tag_mag = f"insp_mag_{self.id}"
         self.tag_freq = f"insp_freq_{self.id}"
         self.tag_freq_end = f"insp_freq_end_{self.id}"
+        self.tag_phase = f"insp_phase_{self.id}"
         self.tag_sweep = f"insp_sweep_{self.id}"
         self.tag_title = f"insp_title_{self.id}"
         
@@ -40,6 +41,7 @@ class InspectorPanel:
              
              dpg.add_separator()
              dpg.add_input_int(label="Frequency (Hz)", tag=self.tag_freq, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq")
+             dpg.add_slider_int(label="Phase (deg)", tag=self.tag_phase, min_value=0, max_value=360, callback=self.on_change, user_data="phase")
              
              dpg.add_checkbox(label="Enable Sweep", tag=self.tag_sweep, callback=self.on_change, user_data="sweep")
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
@@ -75,7 +77,9 @@ class InspectorPanel:
         safe_set(self.tag_start, clip.start_time)
         safe_set(self.tag_dur, clip.duration)
         safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
+        safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
         safe_set(self.tag_freq, clip.frequency)
+        safe_set(self.tag_phase, getattr(clip, 'start_phase', 0))
         safe_set(self.tag_sweep, clip.sweep_enabled)
         
         if clip.type == "Sine":
@@ -106,6 +110,7 @@ class InspectorPanel:
             val = max(0, min(100, app_data))
             clip.magnitude = int((val / 100.0) * 32767)
         elif param == "freq": clip.frequency = max(1, app_data)
+        elif param == "phase": clip.start_phase = max(0, min(360, app_data))
         elif param == "freq_end": clip.frequency_end = max(1, app_data)
         elif param == "sweep": 
             clip.sweep_enabled = app_data

@@ -32,9 +32,10 @@ class Clip:
     duration: float = 2.0 # Seconds
     track_index: int = 0
     # Parameters
-    magnitude: int = 10000
+    magnitude: int = 3276 # Default 10%
     frequency: int = 10
     frequency_end: int = 10 # For Sweep
+    start_phase: int = 0
     sweep_enabled: bool = False
     name: str = "Clip"
     active_effect_id: int = -1 # Runtime ID
@@ -45,6 +46,7 @@ class Clip:
             "duration": self.duration, "track_index": self.track_index,
             "magnitude": self.magnitude, "frequency": self.frequency,
             "frequency_end": self.frequency_end, "sweep_enabled": self.sweep_enabled,
+            "start_phase": self.start_phase,
             "name": self.name
         }
     
@@ -55,8 +57,9 @@ class Clip:
             id=d.get("id", str(uuid.uuid4())), type=d.get("type", "Sine"),
             start_time=d.get("start_time", 0.0), duration=d.get("duration", 1.0),
             track_index=d.get("track_index", 0),
-            magnitude=d.get("magnitude", 10000), frequency=freq,
+            magnitude=d.get("magnitude", 3276), frequency=freq, # Default 10%
             frequency_end=d.get("frequency_end", freq), # Default to start freq if missing
+            start_phase=d.get("start_phase", 0),
             sweep_enabled=d.get("sweep_enabled", False),
             name=d.get("name", "Clip")
         )
@@ -644,7 +647,7 @@ class FeditNativeApp:
             
             # Reset valid states (HEAD)
             for k in self.track_states:
-                self.track_states[k] = {'effect_id': -1, 'clip_id': None, 'clip_type': None}
+                self.track_states[k] = {'effect_id': -1, 'clip_id': None, 'clip_type': None, 'phase_acc': 0.0}
             
             # Reset active IDs (Main)
             for t in self.sequencer.tracks:
@@ -936,6 +939,11 @@ class FeditNativeApp:
                 
                 new_id = -1
                 if current_clip.type == "Sine":
+                    # If start_phase is not overridden (i.e. -1), use the clip's defined start_phase
+                    if start_phase == -1:
+                        # Convert 0-360 deg to 0-36000
+                        start_phase = getattr(current_clip, "start_phase", 0) * 100
+                    
                     phase_arg = start_phase if start_phase >= 0 else 0
                     new_id = engine.start_effect_sine(current_clip.frequency, eff_mag, dur_ms, phase=phase_arg)
                 elif current_clip.type == "Constant":
@@ -993,7 +1001,13 @@ class FeditNativeApp:
                              start_f = current_clip.frequency
                              end_f = current_clip.frequency_end if is_sweep else start_f
                              k = (end_f - start_f) / max(1e-6, current_clip.duration)
-                             norm_phase = (start_f * t_local + 0.5 * k * t_local * t_local) % 1.0
+                             
+                             # Base Phase Integral: f0*t + 0.5*k*t^2
+                             phase_integral = (start_f * t_local + 0.5 * k * t_local * t_local)
+                             
+                             # Add Start Phase Offset
+                             start_deg = getattr(current_clip, "start_phase", 0)
+                             norm_phase = (phase_integral + (start_deg / 360.0)) % 1.0
                              sdl_phase = int(norm_phase * 36000)
                              
                              # Update Engine
