@@ -1423,6 +1423,7 @@ class FeditNativeApp:
         if clip and not parent:
             for p in self.inspectors:
                 if p.clip == clip and p.is_window and dpg.does_item_exist(p.tag_tab):
+                    dpg.configure_item(p.tag_tab, show=True)
                     dpg.focus_item(p.tag_tab)
                     # Bring to front? Focus usually does it.
                     return
