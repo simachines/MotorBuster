@@ -101,11 +101,9 @@ class FeditSequencer:
         self.resize_edge: str = None # "left" or "right"
         self.resize_initial_time: float = 0.0
         self.resize_initial_dur: float = 0.0
-        self.resize_clip: Clip = None
-        self.resize_edge: str = None # "left" or "right"
-        self.resize_initial_time: float = 0.0
-        self.resize_initial_dur: float = 0.0
         self.clipboard: dict = None # For Copy/Paste
+
+    def to_dict(self):
         return {"tracks": [t.to_dict() for t in self.tracks]}
         
     def load_from_dict(self, d):
@@ -729,7 +727,7 @@ class FeditNativeApp:
                  self.delete_selected_clip()
 
         # COPY / PASTE (Ctrl+C, Ctrl+V)
-        if dpg.is_key_down(dpg.mvKey_Control):
+        if dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl):
             if dpg.is_key_pressed(dpg.mvKey_C):
                 if self.sequencer.selected_clip:
                     # Deep copy via dictionary serialization
