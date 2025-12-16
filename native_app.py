@@ -1717,7 +1717,14 @@ class FeditNativeApp:
         self.scan_devices()
 
         while dpg.is_dearpygui_running():
-            self.update_loop()
+            try:
+                self.update_loop()
+            except Exception as e:
+                print(f"Update Loop Crash: {e}")
+                self.log(f"CRITICAL: {e}")
+                # Optional: pause playback on crash to prevent loop
+                self.sequencer.is_playing = False
+                
             dpg.render_dearpygui_frame()
             
         dpg.destroy_context()
