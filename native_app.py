@@ -125,6 +125,12 @@ class FeditNativeApp:
         self.renaming_track_idx = -1
         
         dpg.create_context()
+        
+        # Theme Init
+        self.theme_colors = {}
+        self.current_theme_mode = "Dark" 
+        self.load_fonts()
+
         self.setup_ui()
         
         # Init Engine
@@ -139,6 +145,8 @@ class FeditNativeApp:
         self.stats_min = 0.0
         self.stats_sum = 0.0
         self.stats_count = 0
+
+
 
 
     # --- Clip helpers ---
@@ -371,7 +379,9 @@ class FeditNativeApp:
              idx = int(name.split("#")[-1].replace(")", ""))
              if engine.connect_device(idx):
                  dpg.set_value("status_text", "Status: Connected")
-                 dpg.configure_item("status_text", color=(0, 255, 0))
+                 # Theme Aware Color
+                 col = (0, 255, 0) if self.current_theme_mode == "Dark" else (0, 150, 0)
+                 dpg.configure_item("status_text", color=col)
                  
                  # Auto-Detect Torque
                  detected_torque = self._get_torque_for_device(name)
@@ -411,8 +421,28 @@ class FeditNativeApp:
         if dpg.does_item_exist("slider_gain"):
              gain = dpg.get_value("slider_gain") / 100.0
         
+        # Apply Safety Limit Logic
+        limit_gain = 1.0
+        if dpg.does_item_exist("input_max_torque") and dpg.does_item_exist("input_torque_limit"):
+            dev_peak = dpg.get_value("input_max_torque")
+            safe_limit = dpg.get_value("input_torque_limit")
+            if dev_peak > 0 and safe_limit > 0:
+                # If theoretical max (dev_peak) > safe_limit, we might need to clamp
+                # total_force is in range +/- 32767 approx (if 1 clip full mag)
+                # We essentially want to clamp the FINAL NORMALIZED PERCENTAGE?
+                # Or clamp the precision value.
+                pass
+        
         normalized = (total_force * gain / 32767.0) * 100.0
         
+        # Clamp Normalized based on Safety Limit vs Device Peak
+        if dpg.does_item_exist("input_max_torque") and dpg.does_item_exist("input_torque_limit"):
+             dev_peak = dpg.get_value("input_max_torque")
+             safe_limit = dpg.get_value("input_torque_limit")
+             if dev_peak > 0:
+                 max_pct = (safe_limit / dev_peak) * 100.0
+                 normalized = max(-max_pct, min(max_pct, normalized))
+
         # Check if we are "active" (i.e. inside any clip)
         is_active = False
         for t in self.sequencer.tracks:
@@ -428,7 +458,7 @@ class FeditNativeApp:
     def toggle_play(self):
         self.sequencer.is_playing = not self.sequencer.is_playing
         self.sequencer.last_tick = time.time()
-        label = "Stop" if self.sequencer.is_playing else "Play"
+        label = "Pause" if self.sequencer.is_playing else "Play"
         dpg.configure_item("btn_play", label=label)
         
         if self.sequencer.is_playing:
@@ -491,12 +521,19 @@ class FeditNativeApp:
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        if rel_y < 25: 
+            track_idx = -1 # Ruler area
+        else:
+            track_idx = int((rel_y - 25) // track_h)
         
         resize_clip_hover, _ = self._get_resize_hover(track_idx, rel_x)
         
         if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
              
+             # 0. CURSOR ON RULER -> Scrub (Top Priority if in ruler)
+             if 0 <= rel_y < 25 and dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip and not self.sequencer.resize_clip:
+                 self.sequencer.is_scrubbing = True
+
              # 1. RESIZING logic
              if self.sequencer.resize_clip:
                  clip = self.sequencer.resize_clip
@@ -520,7 +557,9 @@ class FeditNativeApp:
                   new_px = rel_x - self.sequencer.drag_offset
                   new_t = max(0.0, new_px / self.sequencer.zoom_x)
                   
-                  new_track_idx = int(rel_y // track_h)
+                  new_t = max(0.0, new_px / self.sequencer.zoom_x)
+                  
+                  new_track_idx = int((rel_y - 25) // track_h)
                   
                   # Update clip
                   clip = self.sequencer.drag_clip
@@ -544,13 +583,18 @@ class FeditNativeApp:
                           
              # 3. SCRUBBING logic (Sticky)
              elif self.sequencer.is_scrubbing or (dpg.is_item_hovered("timeline_canvas") and not self.sequencer.drag_clip and not self.sequencer.resize_clip):
-                 # Scrubbing
-                 new_t = max(0.0, rel_x / self.sequencer.zoom_x)
-                 
-                 # Snap to Zero
-                 if new_t < 0.05: new_t = 0.0
-                 
-                 self.sequencer.current_time = new_t
+                 # Check if we are starting a new scrub outside of bounds
+                 total_h = 25 + len(self.sequencer.tracks) * 80
+                 if not self.sequencer.is_scrubbing and rel_y > total_h:
+                     pass # Do nothing
+                 else:
+                     # Scrubbing
+                     new_t = max(0.0, rel_x / self.sequencer.zoom_x)
+                     
+                     # Snap to Zero
+                     if new_t < 0.05: new_t = 0.0
+                     
+                     self.sequencer.current_time = new_t
 
         else:
             # Mouse Up - Release Drag/Resize/Scrub
@@ -596,9 +640,10 @@ class FeditNativeApp:
             # Default to 8.0 Nm if not set (could make this a variable later accessible via UI)
             max_torque = dpg.get_value("input_max_torque") if dpg.does_item_exist("input_max_torque") else 8.0
             
-            # force is -100 to 100
+            # force is -100 to 100 (normalized signal)
             current_nm = (force / 100.0) * max_torque
-            dpg.set_value("txt_torque_val", f"{current_nm:.2f} Nm")
+            
+            dpg.set_value("txt_torque_val", f"{current_nm:.2f} Nm ({force:.0f}%)")
             dpg.set_value("bar_torque", (abs(current_nm)/max_torque) if max_torque > 0 else 0)
 
             # Statistics Update
@@ -645,8 +690,19 @@ class FeditNativeApp:
                     if clip.active_effect_id == -1:
                         
                         eff_mag = int(clip.magnitude * gain)
-                        
-                        # Start it
+                    
+                        # Apply Safety Limit
+                        if dpg.does_item_exist("input_max_torque") and dpg.does_item_exist("input_torque_limit"):
+                            dev_peak = dpg.get_value("input_max_torque")
+                            safe_limit = dpg.get_value("input_torque_limit")
+                            if dev_peak > 0 and safe_limit > 0:
+                                 # Ratio of limit to peak
+                                 ratio = safe_limit / dev_peak
+                                 limit_mag = int(ratio * 32767.0)
+                                 if eff_mag > limit_mag: eff_mag = limit_mag
+                                 if eff_mag < -limit_mag: eff_mag = -limit_mag # Magnitude is usually positive in Clip, but safe to check
+                    
+                    # Start it
                         if clip.type == "Sine":
                            if clip.frequency != clip.frequency_end:
                                # Sweep (Chirp)
@@ -677,27 +733,46 @@ class FeditNativeApp:
     def render_timeline(self):
         dpg.delete_item("timeline_canvas", children_only=True, slot=2)
         
-        y_offset = 0
+        ruler_height = 25
+        y_offset = ruler_height
         track_height = 80
         total_w = 3000
+        total_h = ruler_height + len(self.sequencer.tracks) * track_height
         
+        # 1. Draw Grid Lines (Vertical)
+        # Every 1 second
+        grid_step_s = 1.0
+        max_time = total_w / self.sequencer.zoom_x
+        
+        cols = self.theme_colors
+
+        current_grid_t = 0.0
+        while current_grid_t < max_time:
+            gx = current_grid_t * self.sequencer.zoom_x
+            dpg.draw_line([gx, 0], [gx, total_h], color=cols["grid_line"], thickness=1, parent="timeline_canvas")
+            current_grid_t += grid_step_s
+
+        # 2. Draw Tracks
         for i, track in enumerate(self.sequencer.tracks):
-             bg_col = (40, 40, 45) if i % 2 == 0 else (35, 35, 40)
+             bg_col = cols["track_bg_even"] if i % 2 == 0 else cols["track_bg_odd"]
              dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
-             dpg.draw_line([0, y_offset + track_height], [total_w, y_offset+track_height], color=(60, 60, 60), parent="timeline_canvas")
-             dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
+             dpg.draw_line([0, y_offset + track_height], [total_w, y_offset+track_height], color=cols["track_border"], parent="timeline_canvas")
+             dpg.draw_text([10, y_offset + 5], track.name, size=15, color=cols["text_track"], parent="timeline_canvas")
              
              for clip in track.clips:
                  x_start = clip.start_time * self.sequencer.zoom_x
                  width = clip.duration * self.sequencer.zoom_x
                  
-                 base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
-                 if clip.type == "Constant": base_col = (100, 255, 100)
-                 if clip.type == "Ramp": base_col = (255, 255, 100)
-                 if clip.type == "Sawtooth": base_col = (255, 150, 50)
+                 base_col = cols["clip_sine"]
+                 if clip.type == "Constant": base_col = cols["clip_const"]
+                 if clip.type == "Ramp": base_col = cols["clip_ramp"]
+                 if clip.type == "Sawtooth": base_col = cols["clip_saw"]
 
                  border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
-                 
+                 if self.current_theme_mode == "Light" and clip != self.sequencer.selected_clip:
+                      # Darker borders for light mode visibility if needed, or keep colored
+                      pass
+
                  dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
                  dpg.draw_text([x_start + 5, y_offset + 25], clip.type, size=13, parent="timeline_canvas")
 
@@ -710,12 +785,37 @@ class FeditNativeApp:
                      y_offset + track_height - 12,
                      samples= max(20, int(width / 6))
                  )
-                 dpg.draw_polyline(wave_points, color=(240, 240, 240, 220), thickness=2, parent="timeline_canvas")
+                 # Wave color contrast
+                 wave_col = (240, 240, 240, 220) if self.current_theme_mode == "Dark" else (20, 20, 20, 200)
+                 dpg.draw_polyline(wave_points, color=wave_col, thickness=2, parent="timeline_canvas")
 
              y_offset += track_height
         
+        # 3. Draw Ruler (Top)
+        dpg.draw_rectangle([0, 0], [total_w, ruler_height], fill=cols["ruler_bg"], color=cols["ruler_border"], parent="timeline_canvas")
+        dpg.draw_line([0, ruler_height], [total_w, ruler_height], color=cols["ruler_line"], parent="timeline_canvas")
+        
+        # Ticks
+        curr_t = 0.0
+        while curr_t < max_time:
+            rx = curr_t * self.sequencer.zoom_x
+            # Major tick every 1s
+            dpg.draw_line([rx, ruler_height-10], [rx, ruler_height], color=cols["ruler_tick"], thickness=1, parent="timeline_canvas")
+            dpg.draw_text([rx + 2, 2], f"{curr_t:.1f}", size=12, color=cols["ruler_text"], parent="timeline_canvas")
+            
+            # Minor ticks (0.1s)
+            for m in range(1, 10):
+                mx = (curr_t + m*0.1) * self.sequencer.zoom_x
+                h = 5 if m == 5 else 3
+                dpg.draw_line([mx, ruler_height-h], [mx, ruler_height], color=cols["ruler_tick"], thickness=1, parent="timeline_canvas")
+
+            curr_t += 1.0
+
+        # 4. Playhead
         px = self.sequencer.current_time * self.sequencer.zoom_x
-        dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
+        dpg.draw_line([px, 0], [px, y_offset], color=cols["playhead"], thickness=2, parent="timeline_canvas")
+        # Playhead Triangle
+        dpg.draw_triangle([px-6, 0], [px+6, 0], [px, 12], fill=cols["playhead_fill"], color=cols["playhead"], parent="timeline_canvas")
 
     def _draw_resize_cursor(self, x, y):
         """Draws a custom double-headed arrow cursor at (x,y)."""
@@ -774,7 +874,7 @@ class FeditNativeApp:
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        track_idx = int((rel_y - 25) // track_h)
         
         self.log(f"Drop [{sender}]: {effect_type} at {int(rel_x)},{int(rel_y)} -> Tk {track_idx+1}")
         
@@ -791,7 +891,7 @@ class FeditNativeApp:
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        track_idx = int((rel_y - 25) // track_h)
         time_s = rel_x / self.sequencer.zoom_x
         
         mouse_btn = app_data[0]
@@ -860,6 +960,10 @@ class FeditNativeApp:
         
         # 3. Seek (Priority: Low)
         if not found:
+             # Check if click is valid (within tracks)
+             if track_idx >= len(self.sequencer.tracks):
+                 return
+
              self.sequencer.selected_clip = None
              dpg.hide_item("btn_delete")
              self.sequencer.current_time = max(0.0, time_s)
@@ -904,12 +1008,234 @@ class FeditNativeApp:
         except Exception as e:
             print(f"Cursor Error: {e}")
 
+            print(f"Cursor Error: {e}")
+
+    def load_fonts(self):
+        with dpg.font_registry():
+            # Attempt to load Segoe UI
+            font_path = "C:\\Windows\\Fonts\\segoeui.ttf"
+            if os.path.exists(font_path):
+                self.main_font = dpg.add_font(font_path, 16)
+                dpg.bind_font(self.main_font)
+                self.log("Loaded font: Segoe UI")
+            else:
+                self.log("Segoe UI not found. Using default font.")
+
+    def apply_theme(self, mode="Dark"):
+        self.current_theme_mode = mode
+        
+        if mode == "Dark":
+            with dpg.theme() as theme:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (25, 25, 30))
+                    dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (30, 30, 35))
+                    dpg.add_theme_color(dpg.mvThemeCol_PopupBg, (30, 30, 35))
+                    dpg.add_theme_color(dpg.mvThemeCol_Border, (60, 60, 70))
+                    dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (45, 45, 50))
+                    dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (60, 60, 65))
+                    dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, (80, 80, 90))
+                    dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (40, 40, 45))
+                    dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (50, 50, 60))
+                    dpg.add_theme_color(dpg.mvThemeCol_MenuBarBg, (35, 35, 40))
+                    
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (50, 60, 70))
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (70, 80, 100))
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (100, 150, 255))
+                    
+                    dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (100, 150, 255))
+                    dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, (100, 150, 255))
+                    dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, (140, 180, 255))
+
+                    dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 220, 220))
+                    dpg.add_theme_color(dpg.mvThemeCol_TextSelectedBg, (100, 150, 255, 150))
+                    
+                    dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
+                    dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 6)
+            
+            dpg.bind_theme(theme)
+            
+            # Canvas Colors (Dark)
+            self.theme_colors = {
+                "grid_line": (60, 60, 65, 100),
+                "track_bg_even": (40, 40, 45),
+                "track_bg_odd": (35, 35, 40),
+                "track_border": (60, 60, 60),
+                "text_track": (200, 200, 200),
+                "ruler_bg": (30, 30, 35),
+                "ruler_border": (50, 50, 60),
+                "ruler_line": (100, 100, 100),
+                "ruler_tick": (150, 150, 150),
+                "ruler_text": (150, 150, 150),
+                "playhead": (255, 50, 50),
+                "playhead": (255, 50, 50),
+                "playhead_fill": (255, 50, 50),
+                "clip_sine": (100, 150, 255),
+                "clip_const": (100, 255, 100),
+                "clip_ramp": (255, 255, 100),
+                "clip_saw": (255, 150, 50)
+            }
+            
+            # Dynamic Colors for UI overrides 
+            if dpg.does_item_exist("txt_torque_val"): dpg.configure_item("txt_torque_val", color=(150, 255, 150))
+            if dpg.does_item_exist("txt_min"): dpg.configure_item("txt_min", color=(200, 200, 200))
+            if dpg.does_item_exist("time_display"): dpg.configure_item("time_display", color=(255, 255, 255))
+            if dpg.does_item_exist("txt_peak"): dpg.configure_item("txt_peak", color=(255, 100, 100))
+            if dpg.does_item_exist("txt_avg"): dpg.configure_item("txt_avg", color=(100, 200, 255))
+            if dpg.does_item_exist("txt_torque_title"): dpg.configure_item("txt_torque_title", color=(150, 255, 150))
+            if dpg.does_item_exist("txt_logo"): dpg.configure_item("txt_logo", color=(100, 180, 255))
+            # Status: If connected, Green. Disconnected, Red.
+            if dpg.does_item_exist("status_text"):
+                 curr_txt = dpg.get_value("status_text")
+                 if "Connected" in curr_txt and "Disconnected" not in curr_txt:
+                     dpg.configure_item("status_text", color=(0, 255, 0))
+                 else:
+                     dpg.configure_item("status_text", color=(255, 100, 100))
+            
+        else: # LIGHT MODE
+            with dpg.theme() as theme:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (240, 240, 240))
+                    dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (245, 245, 250))
+                    dpg.add_theme_color(dpg.mvThemeCol_PopupBg, (250, 250, 255))
+                    dpg.add_theme_color(dpg.mvThemeCol_Border, (200, 200, 210))
+                    dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (220, 220, 230))
+                    dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (200, 200, 220))
+                    dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, (180, 200, 240))
+                    dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (230, 230, 235))
+                    dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (220, 220, 230))
+                    dpg.add_theme_color(dpg.mvThemeCol_MenuBarBg, (235, 235, 240))
+                    
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (220, 225, 230))
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (210, 220, 240))
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (150, 180, 255))
+                    
+                    dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (50, 100, 200))
+                    dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, (50, 100, 200))
+                    dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, (80, 130, 255))
+
+                    dpg.add_theme_color(dpg.mvThemeCol_Text, (30, 30, 30))
+                    dpg.add_theme_color(dpg.mvThemeCol_TextSelectedBg, (100, 150, 255, 100))
+                    
+                    dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
+                    dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 6)
+            
+            dpg.bind_theme(theme)
+
+            # Canvas Colors (Light)
+            self.theme_colors = {
+                "grid_line": (160, 160, 170, 255),
+                "track_bg_even": (255, 255, 255),
+                "track_bg_odd": (245, 245, 250),
+                "track_border": (180, 180, 200),
+                "text_track": (20, 20, 20),
+                "ruler_bg": (235, 235, 240),
+                "ruler_border": (180, 180, 200),
+                "ruler_line": (150, 150, 160),
+                "ruler_tick": (100, 100, 110),
+                "ruler_text": (50, 50, 60),
+                "playhead": (255, 50, 50),
+                "playhead": (255, 50, 50),
+                "playhead_fill": (255, 50, 50),
+                # High Contrast for Light Mode
+                "clip_sine": (0, 100, 200),     # Darker Blue
+                "clip_const": (0, 180, 0),      # Darker Green
+                "clip_ramp": (220, 180, 0),     # Darker Yellow/Gold
+                "clip_saw": (220, 100, 0)       # Darker Orange
+            }
+
+            # Dynamic Colors for UI overrides (Light)
+            if dpg.does_item_exist("txt_torque_val"): dpg.configure_item("txt_torque_val", color=(0, 160, 0)) # Darker Green
+            if dpg.does_item_exist("txt_min"): dpg.configure_item("txt_min", color=(80, 80, 80)) # Dark Grey
+            if dpg.does_item_exist("time_display"): dpg.configure_item("time_display", color=(20, 20, 20))
+            if dpg.does_item_exist("txt_peak"): dpg.configure_item("txt_peak", color=(200, 0, 0)) # Dark Red
+            if dpg.does_item_exist("txt_avg"): dpg.configure_item("txt_avg", color=(0, 80, 200)) # Dark Blue
+            if dpg.does_item_exist("txt_torque_title"): dpg.configure_item("txt_torque_title", color=(0, 120, 0)) # Dark Green
+            if dpg.does_item_exist("txt_logo"): dpg.configure_item("txt_logo", color=(0, 80, 180)) # Dark Blue
+            
+            # Status
+            if dpg.does_item_exist("status_text"):
+                 curr_txt = dpg.get_value("status_text")
+                 if "Connected" in curr_txt and "Disconnected" not in curr_txt:
+                     dpg.configure_item("status_text", color=(0, 150, 0)) # Dark Green
+                 else:
+                     dpg.configure_item("status_text", color=(200, 0, 0)) # Dark Red
+    def create_status_themes(self):
+        with dpg.theme(tag="theme_btn_red"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 100, 100)) # Red Text
+        
+        with dpg.theme(tag="theme_btn_green"):
+             with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (100, 255, 100)) # Green Text
+
+    def action_toggle_torque(self):
+        # Initialize state if needed
+        if not hasattr(self, 'is_torque_open'): self.is_torque_open = False
+        
+        self.is_torque_open = not self.is_torque_open
+        
+        # Color Update
+        if self.is_torque_open:
+            dpg.bind_item_theme("btn_toggle_torque", "theme_btn_green")
+        else:
+             dpg.bind_item_theme("btn_toggle_torque", "theme_btn_red")
+             
+        # Visibility Update
+        pinned = getattr(self, 'torque_pinned', False)
+        
+        if pinned:
+            # If pinned, we show/hide the content group within Inspector
+            if self.is_torque_open:
+                dpg.show_item("grp_torque_content")
+            else:
+                dpg.hide_item("grp_torque_content")
+        else:
+            # If floating, we show/hide the Window
+            if self.is_torque_open:
+                dpg.show_item("win_torque_monitor")
+            else:
+                dpg.hide_item("win_torque_monitor")
+
+    def on_torque_win_close(self, sender, app_data):
+        """Callback for when the 'X' is clicked on the floating window."""
+        self.is_torque_open = False
+        dpg.bind_item_theme("btn_toggle_torque", "theme_btn_red")
+
+    def toggle_torque_pin(self):
+        # Toggle State
+        if not hasattr(self, 'torque_pinned'): self.torque_pinned = False
+        self.torque_pinned = not self.torque_pinned
+        
+        if self.torque_pinned:
+             # Pin to Inspector
+             dpg.move_item("grp_torque_content", parent="inspector_win", before="sep_log")
+             dpg.configure_item("btn_pin_torque", label="Undock") # Pop out
+             dpg.hide_item("win_torque_monitor")
+        else:
+             # Unpin (Float)
+             dpg.move_item("grp_torque_content", parent="win_torque_monitor")
+             dpg.configure_item("btn_pin_torque", label="Dock") # Pin/Dock
+             dpg.show_item("win_torque_monitor")
+
+    def on_mouse_wheel(self, sender, app_data):
+        # app_data is usually float (positive for up/forward, negative for down/back)
+        if dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl):
+            # Zoom Logic
+            zoom_speed = 1.1
+            if app_data > 0:
+                self.sequencer.zoom_x *= zoom_speed
+            else:
+                self.sequencer.zoom_x /= zoom_speed
+                
+            # Clamp Zoom
+            self.sequencer.zoom_x = max(10.0, min(2000.0, self.sequencer.zoom_x))
+            
+            # Redraw
+            self.render_timeline()
+
     def setup_ui(self):
-        with dpg.theme() as global_theme:
-            with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (20, 20, 25))
-                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 0)
-        dpg.bind_theme(global_theme)
+        self.apply_theme("Dark") # Default
+        self.create_status_themes() # Status colors
         
         # File Dialogs
         dpg.add_file_dialog(
@@ -927,8 +1253,9 @@ class FeditNativeApp:
 
         # Shortcuts
         with dpg.handler_registry():
-            dpg.add_key_press_handler(dpg.mvKey_S, callback=lambda: dpg.show_item("dlg_save") if dpg.is_key_down(dpg.mvKey_Control) else None)
-            dpg.add_key_press_handler(dpg.mvKey_O, callback=lambda: dpg.show_item("dlg_load") if dpg.is_key_down(dpg.mvKey_Control) else None)
+            dpg.add_key_press_handler(dpg.mvKey_S, callback=lambda: dpg.show_item("dlg_save") if (dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)) else None)
+            dpg.add_key_press_handler(dpg.mvKey_O, callback=lambda: dpg.show_item("dlg_load") if (dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)) else None)
+            dpg.add_mouse_wheel_handler(callback=self.on_mouse_wheel)
 
         with dpg.window(tag="Main"):
             # Menu Bar
@@ -938,34 +1265,54 @@ class FeditNativeApp:
                     dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
+
                 with dpg.menu(label="View"):
-                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: self.toggle_torque_pin() if getattr(self, 'torque_pinned', False) else dpg.show_item("win_torque_monitor"))
+                     with dpg.menu(label="Theme"):
+                         dpg.add_menu_item(label="Dark Mode", callback=lambda: self.apply_theme("Dark"))
+                         dpg.add_menu_item(label="Light Mode", callback=lambda: self.apply_theme("Light"))
 
             # Torque Monitor Window (Initially Hidden or Shown)
-            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=True):
-                 dpg.add_text("Real-time Torque", color=(150, 255, 150))
-                 dpg.add_text("0.00 Nm", tag="txt_torque_val") # Standard size for now to avoid crash
-                 # We'll stick to standard text for now, maybe add a progress bar.
-                 dpg.add_progress_bar(tag="bar_torque", width=-1, height=20)
-                 
-                 dpg.add_spacer(height=5)
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Peak: --", tag="txt_peak", color=(255, 100, 100))
-                     dpg.add_spacer(width=10)
-                     dpg.add_text("Avg: --", tag="txt_avg", color=(100, 200, 255))
-                     dpg.add_spacer(width=10)
-                     dpg.add_text("Min: --", tag="txt_min", color=(200, 200, 200))
+            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=300, height=270, pos=[400, 100], show=False, no_resize=True, no_scrollbar=True, on_close=self.on_torque_win_close):
+                 # Group content for moving
+                 with dpg.group(tag="grp_torque_content"):
+                     # Title Header with Pin Button
+                     with dpg.group(horizontal=True):
+                         dpg.add_text("Real-time Torque", tag="txt_torque_title", color=(150, 255, 150))
+                         dpg.add_spacer(width=90) # Adjusted for text width
+                         dpg.add_button(label="Dock", tag="btn_pin_torque", width=50, height=20, callback=self.toggle_torque_pin)
 
-                 dpg.add_separator()
-                 dpg.add_text("Settings:")
-
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Base Torque (Ref):")
-                     dpg.add_input_float(tag="input_max_torque", default_value=8.0, width=100, step=0.5)
+                     dpg.add_text("0.00 Nm", tag="txt_torque_val") 
+                     dpg.add_progress_bar(tag="bar_torque", width=-1, height=20)
                      
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Master Gain (%):  ")
-                     dpg.add_slider_int(tag="slider_gain", default_value=100, min_value=0, max_value=100, width=100)
+                     dpg.add_spacer(height=5)
+                     with dpg.group(horizontal=True):
+                         dpg.add_text("Peak: --", tag="txt_peak", color=(255, 100, 100))
+                         dpg.add_spacer(width=10)
+                         dpg.add_text("Avg: --", tag="txt_avg", color=(100, 200, 255))
+                         dpg.add_spacer(width=10)
+                         dpg.add_text("Min: --", tag="txt_min", color=(200, 200, 200))
+
+                     dpg.add_separator()
+                     # Settings Group
+                     dpg.add_text("Settings:")
+                     with dpg.group(horizontal=True):
+                         dpg.add_text("Device Peak Torque:")
+                         dpg.add_input_float(tag="input_max_torque", default_value=8.0, width=120, step=0.5)
+                         with dpg.tooltip("input_max_torque"):
+                             dpg.add_text("The physical maximum torque (Nm) of your hardware.\nSet this to match your wheelbase to ensure accurate monitoring.")
+
+                     with dpg.group(horizontal=True):
+                         dpg.add_text("Safety Limit (Nm):   ")
+                         dpg.add_input_float(tag="input_torque_limit", default_value=20.0, width=120, step=0.5)
+                         with dpg.tooltip("input_torque_limit"):
+                             dpg.add_text("Clamps the output force to this Nm value.\nUse this to reduce strength without affecting the reference calibration.")
+                         
+                     with dpg.group(horizontal=True):
+                         dpg.add_text("Master Gain (%):  ")
+                         dpg.add_slider_int(tag="slider_gain", default_value=100, min_value=0, max_value=100, width=100)
+                         with dpg.tooltip("slider_gain"):
+                             dpg.add_text("Scales the overall output strength. 100% = No reduction.\n\nNOTE: Ensure your wheelbase software is set to 100% strength for accurate Nm readings.")
 
             
             # Set Main as a fallback drop target without payload type check
@@ -974,30 +1321,49 @@ class FeditNativeApp:
 
             # Top Bar
             with dpg.group(horizontal=True):
-                dpg.add_spacer(width=10)
-                dpg.add_text("Fedit DAW", color=(100, 200, 255))
+                dpg.add_spacer(width=8)
+                
+                # LOGO
+                with dpg.group():
+                    dpg.add_text("Fedit DAW", tag="txt_logo", color=(100, 180, 255))
+                    
                 dpg.add_spacer(width=20)
-                # Removed redundant buttons to rely on Menu/Shortcuts, but Keeping per request "Add a function", kept simple.
-                # Actually, user might still want buttons. I'll keep them but maybe minimal.
-                # dpg.add_button(label="SAVE", callback=lambda: dpg.show_item("dlg_save"))
-                # dpg.add_button(label="LOAD", callback=lambda: dpg.show_item("dlg_load"))
-                # dpg.add_spacer(width=20)
-                dpg.add_combo(tag="device_combo", width=250)
-                dpg.add_button(label="Scan", callback=self.scan_devices)
-                dpg.add_button(label="Connect", callback=self.connect_callback)
-                dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                # Separator Replaced by Spacer
+                dpg.add_spacer(width=20)
+                
+                # DEVICE SECTION
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Device:")
+                    dpg.add_combo(tag="device_combo", width=200)
+                    dpg.add_button(label="Scan", callback=self.scan_devices)
+                    dpg.add_button(label="Connect", callback=self.connect_callback)
+                    dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
                 
                 dpg.add_spacer(width=20)
-                # Force Monitor
-                # Using a theme for the slider to look like a gauge/bar
-                dpg.add_text("Force:")
-                dpg.add_slider_float(tag="force_gauge", width=150, min_value=-100, max_value=100, format="%.0f%%")
+                # Separator Replaced by Spacer
+                dpg.add_spacer(width=20)
+                
+                # MONITOR SECTION
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Force:")
+                    dpg.add_slider_float(tag="force_gauge", width=120, min_value=-100, max_value=100, format="%.0f%%")
 
-                dpg.add_spacer(width=50)
-                dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
-                dpg.add_text("0.00s", tag="time_display")
-                dpg.add_button(label="Restart", callback=self.action_restart)
-                dpg.add_checkbox(label="Loop", tag="chk_loop")
+                dpg.add_spacer(width=20)
+                # Separator Replaced by Spacer
+                dpg.add_spacer(width=20)
+
+                # TRANSPORT SECTION
+                with dpg.group(horizontal=True):
+                    dpg.add_button(tag="btn_toggle_torque", label="Torque Monitor", callback=self.action_toggle_torque)
+                    dpg.bind_item_theme("btn_toggle_torque", "theme_btn_red") # Default Off
+                    
+                    dpg.add_button(tag="btn_play", label="Play", width=60, callback=self.toggle_play)
+                    dpg.add_button(label="Restart", callback=self.action_restart) # Using restart as Stop/Return for now
+                    dpg.add_checkbox(label="Loop", tag="chk_loop")
+                    dpg.add_spacer(width=10)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Time:")
+                        dpg.add_text("0.00s", tag="time_display")
 
             dpg.add_separator()
 
@@ -1005,7 +1371,7 @@ class FeditNativeApp:
                            borders_innerV=True):
                 dpg.add_table_column(width_fixed=True, init_width_or_weight=150) # Palette
                 dpg.add_table_column() # Timeline
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=200) # Inspector
+                dpg.add_table_column(width_fixed=True, init_width_or_weight=300) # Inspector
 
                 with dpg.table_row():
                     
@@ -1020,7 +1386,7 @@ class FeditNativeApp:
                         
                         dpg.add_spacer(height=20)
                         dpg.add_text("Tools")
-                        dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
+                        dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name=str(len(self.sequencer.tracks) + 1))))
 
                     # Col 2: Timeline
                     with dpg.group(tag="timeline_group"):
@@ -1031,7 +1397,6 @@ class FeditNativeApp:
 
                          # EXPLICIT TARGET to handle drop visualization and acceptance
                          # Removed invalid widget call. Relying on Main Window callback.
-                         dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
                          
                          with dpg.item_handler_registry(tag="timeline_click_handler"):
                                  dpg.add_item_clicked_handler(callback=self.canvas_click)
@@ -1057,7 +1422,7 @@ class FeditNativeApp:
                         
                         dpg.add_separator()
                         dpg.add_button(label="DELETE CLIP", callback=self.delete_selected_clip, width=-1, show=False, tag="btn_delete")
-                        dpg.add_separator()
+                        dpg.add_separator(tag="sep_log")
                         dpg.add_text("Log")
                         dpg.add_listbox(tag="log_list", num_items=10, width=-1)
 
@@ -1067,6 +1432,12 @@ class FeditNativeApp:
         except Exception as e: print(f"Main Drop Bind Error: {e}")
 
     def run(self):
+        # Enable High DPI Awareness (Fix blurriness)
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass # Fails on non-Windows or older Windows
+
         dpg.create_viewport(title='Fedit DAW 2.0', width=1280, height=800)
         dpg.setup_dearpygui()
         dpg.show_viewport()
