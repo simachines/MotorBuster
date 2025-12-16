@@ -1502,7 +1502,7 @@ class FeditNativeApp:
                 dpg.add_button(label="Scan", callback=self.scan_devices)
                 dpg.add_button(label="Connect", callback=self.connect_callback)
                 dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
-                dpg.add_text("| Rate: -- Hz", tag="status_fps", color=(150, 255, 150))
+                # dpg.add_text("| Rate: -- Hz", tag="status_fps", color=(150, 255, 150)) # REMOVED per user request
                 
                 dpg.add_spacer(width=20)
                 # Force Monitor
@@ -1512,16 +1512,17 @@ class FeditNativeApp:
 
                 dpg.add_spacer(width=50)
                 dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
+                dpg.add_button(label="|<", tag="btn_restart", width=30, callback=self.action_restart)
+                dpg.add_checkbox(label="Loop", tag="chk_loop")
+                
                 dpg.add_text("0.00s", tag="time_display")
+                
                 dpg.add_spacer(width=20)
                 dpg.add_text("Freq: --", tag="monitor_freq", color=(100, 255, 100))
                 
                 dpg.add_spacer(width=20)
-                dpg.add_text("TimeBase (s):")
+                dpg.add_text("T:")
                 dpg.add_input_float(tag="input_timebase", width=60, default_value=0.1, step=0, callback=self.on_timebase_change)
-                
-                dpg.add_button(label="Restart", callback=self.action_restart)
-                dpg.add_checkbox(label="Loop", tag="chk_loop")
 
             dpg.add_separator()
 

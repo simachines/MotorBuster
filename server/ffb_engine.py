@@ -87,6 +87,11 @@ class HapticController:
         if not self.haptic:
             logger.error(f"Haptic Open Failed: {sdl2.SDL_GetError()}")
             return False
+            
+        # Ensure haptic handle is a proper pointer
+        if isinstance(self.haptic, int):
+             logger.info(f"Casting Haptic handle {self.haptic} (int) to LP_SDL_Haptic")
+             self.haptic = ctypes.cast(self.haptic, sdl2.LP_SDL_Haptic)
 
         if sdl2.SDL_HapticRumbleSupported(self.haptic):
              sdl2.SDL_HapticRumbleInit(self.haptic)
@@ -236,6 +241,7 @@ class HapticController:
         
         # New Effect
         effect = sdl2.SDL_HapticEffect()
+        ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
         effect.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
