@@ -1370,7 +1370,25 @@ class FeditNativeApp:
         self.inspectors = active
 
     def create_floating_inspector(self, clip=None, parent=None):
-        p = InspectorPanel(self, parent, clip)
+        # 1. Check if window already exists for this clip (only for floating windows)
+        if clip and not parent:
+            for p in self.inspectors:
+                if p.clip == clip and p.is_window and dpg.does_item_exist(p.tag_tab):
+                    dpg.focus_item(p.tag_tab)
+                    # Bring to front? Focus usually does it.
+                    return
+
+        # 2. Cleanup closed inspectors
+        self.inspectors = [p for p in self.inspectors if dpg.does_item_exist(p.tag_tab)]
+
+        # 3. Create New
+        pos = [400, 200]
+        if not parent:
+            # Cascade logic
+            offset = len(self.inspectors) * 30
+            pos = [400 + offset, 200 + offset]
+            
+        p = InspectorPanel(self, parent, clip, pos=pos)
         self.inspectors.append(p)
         if parent:
              dpg.set_value(parent, p.tag_tab)

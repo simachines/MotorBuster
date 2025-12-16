@@ -2,7 +2,7 @@ import uuid
 import dearpygui.dearpygui as dpg
 
 class InspectorPanel:
-    def __init__(self, app, parent, clip=None):
+    def __init__(self, app, parent, clip=None, pos=[400, 200]):
         self.app = app
         self.clip = clip # If None, acts as "Live" inspector for selection
         self.parent = parent
@@ -25,7 +25,7 @@ class InspectorPanel:
         
         # Container Context Manager matching the type (Window or Tab)
         if self.is_window:
-             self.container = dpg.window(label=label, tag=self.tag_tab, width=300, height=400, pos=[400, 200])
+             self.container = dpg.window(label=label, tag=self.tag_tab, width=300, height=400, pos=pos)
         else:
              self.container = dpg.tab(label=label, tag=self.tag_tab, parent=parent, closable=(clip is not None))
              
