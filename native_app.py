@@ -23,6 +23,7 @@ from server.ffb_engine import engine, DeviceInfo
 class Clip:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     type: str = "Sine" # Sine, Square, Ramp, etc.
+    name: str = "" # User defined name
     start_time: float = 0.0 # Seconds
     duration: float = 2.0 # Seconds
     track_index: int = 0
@@ -34,7 +35,7 @@ class Clip:
     
     def to_dict(self):
         return {
-            "id": self.id, "type": self.type, "start_time": self.start_time,
+            "id": self.id, "type": self.type, "name": self.name, "start_time": self.start_time,
             "duration": self.duration, "track_index": self.track_index,
             "magnitude": self.magnitude, "frequency": self.frequency,
             "frequency_end": self.frequency_end
@@ -45,6 +46,7 @@ class Clip:
         freq = d.get("frequency", 10)
         c = Clip(
             id=d.get("id", str(uuid.uuid4())), type=d.get("type", "Sine"),
+            name=d.get("name", ""),
             start_time=d.get("start_time", 0.0), duration=d.get("duration", 1.0),
             track_index=d.get("track_index", 0),
             magnitude=d.get("magnitude", 10000), frequency=freq,
@@ -774,8 +776,7 @@ class FeditNativeApp:
                       pass
 
                  dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
-                 dpg.draw_text([x_start + 5, y_offset + 25], clip.type, size=13, parent="timeline_canvas")
-
+                 
                  # Waveform preview
                  wave_points = self._clip_wave_points(
                      clip,
@@ -788,6 +789,10 @@ class FeditNativeApp:
                  # Wave color contrast
                  wave_col = (240, 240, 240, 220) if self.current_theme_mode == "Dark" else (20, 20, 20, 200)
                  dpg.draw_polyline(wave_points, color=wave_col, thickness=2, parent="timeline_canvas")
+
+                 # Display Name if set, else Type (Draw ABOVE waveform/rect in empty space)
+                 display_txt = clip.name if clip.name else clip.type
+                 dpg.draw_text([x_start, y_offset], display_txt, size=20, color=(255, 255, 255, 255), parent="timeline_canvas")
 
              y_offset += track_height
         
@@ -887,6 +892,10 @@ class FeditNativeApp:
              self.log(f"Drop Skipped: Invalid Track {track_idx}")
 
     def canvas_click(self, sender, app_data):
+        # Clear existing menus on any click (Left or Right)
+        if dpg.does_item_exist("win_clip_opts"): dpg.delete_item("win_clip_opts")
+        if dpg.does_item_exist("win_track_opts"): dpg.delete_item("win_track_opts")
+
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
@@ -898,25 +907,80 @@ class FeditNativeApp:
         
         if mouse_btn == 1:
             if 0 <= track_idx < len(self.sequencer.tracks):
-                self.renaming_track_idx = track_idx
-                if dpg.does_item_exist("win_track_opts"): dpg.delete_item("win_track_opts")
+                click_clip = self.sequencer.get_clip_at(track_idx, time_s)
                 
-                with dpg.window(tag="win_track_opts", label=f"Track {track_idx+1} Options", width=300, height=120, modal=True, show=True):
-                    dpg.add_input_text(tag="input_rename", default_value=self.sequencer.tracks[track_idx].name)
-                    def do_rename(s, a, u):
-                        name = dpg.get_value("input_rename")
-                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
-                            self.sequencer.tracks[self.renaming_track_idx].name = name
-                        dpg.delete_item("win_track_opts")
-                    def do_delete(s, a, u):
-                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
-                            del self.sequencer.tracks[self.renaming_track_idx]
-                            self.sequencer.selected_clip = None 
-                        dpg.delete_item("win_track_opts")
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label="Rename", callback=do_rename)
-                        dpg.add_button(label="Delete Track", callback=do_delete)
-                        dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_track_opts"))
+                if click_clip:
+                    # CLIP CONTEXT MENU (Native-style)
+                    self.sequencer.selected_clip = click_clip 
+                    
+                    with dpg.window(tag="win_clip_opts", no_title_bar=True, no_resize=True, autosize=True, pos=mpos, no_move=True):
+                         dpg.add_text(f"{click_clip.type} Options")
+                         dpg.add_separator()
+                         
+                         dpg.add_input_text(tag="input_clip_name", default_value=click_clip.name, hint="Clip Name", width=150)
+                         
+                         def do_update_name(s, a, u):
+                             key = dpg.get_item_label(s)
+                             # Auto-save name on change or just let it stay for Duplicate?
+                             # Actually we can just read it when Duplicate is clicked or when window closes?
+                             # Let's just update immediately on change?
+                             # dpg callback for input_text on_enter=True?
+                             pass
+                         
+                         def do_save_name():
+                             click_clip.name = dpg.get_value("input_clip_name")
+                             self.render_timeline()
+                             
+                         # Bind enter to save? or just save on menu actions. 
+                         # Let's save on any action.
+
+                         def do_dup():
+                             click_clip.name = dpg.get_value("input_clip_name") # Save name first
+                             import copy
+                             new_clip = Clip.from_dict(click_clip.to_dict())
+                             new_clip.id = str(uuid.uuid4())
+                             new_clip.start_time = click_clip.start_time + click_clip.duration
+                             self.sequencer.tracks[track_idx].clips.append(new_clip)
+                             self.sequencer.selected_clip = new_clip
+                             dpg.delete_item("win_clip_opts")
+                             self.log("Clip Duplicated")
+                             self.render_timeline()
+                             
+                         def do_del_clip():
+                             self.sequencer.delete_clip(click_clip)
+                             dpg.delete_item("win_clip_opts")
+                             self.render_timeline()
+                             
+                         # Add callback to save name when typing
+                         dpg.set_item_callback("input_clip_name", lambda: setattr(click_clip, 'name', dpg.get_value("input_clip_name")) or self.render_timeline())
+
+                         dpg.add_selectable(label="Duplicate Clip", callback=do_dup, width=150)
+                         dpg.add_selectable(label="Delete Clip", callback=do_del_clip, width=150)
+                         dpg.add_separator()
+                         dpg.add_selectable(label="Close", callback=lambda: dpg.delete_item("win_clip_opts"), width=150)
+                else:
+                    # TRACK CONTEXT MENU (Native-style)
+                    self.renaming_track_idx = track_idx
+                    
+                    with dpg.window(tag="win_track_opts", no_title_bar=True, no_resize=True, autosize=True, pos=mpos, no_move=True):
+                        dpg.add_text(f"Track {track_idx+1}")
+                        dpg.add_separator()
+                        dpg.add_input_text(tag="input_rename", default_value=self.sequencer.tracks[track_idx].name, width=150)
+                        
+                        def do_rename():
+                            name = dpg.get_value("input_rename")
+                            if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                                self.sequencer.tracks[self.renaming_track_idx].name = name
+                            dpg.delete_item("win_track_opts")
+                            
+                        def do_delete_trk():
+                            if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                                del self.sequencer.tracks[self.renaming_track_idx]
+                                self.sequencer.selected_clip = None 
+                            dpg.delete_item("win_track_opts")
+
+                        if dpg.add_button(label="Rename", callback=do_rename, width=150): pass
+                        if dpg.add_button(label="Delete Track", callback=do_delete_trk, width=150): pass
             return
 
         # 1. Check for Resize (Priority: High)
