@@ -47,8 +47,8 @@ class InspectorPanel:
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
              
              dpg.add_separator()
-             if not clip:
-                 dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
+             # if not clip:
+             #     dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
     
     def get_target_clip(self):
         if self.clip: return self.clip

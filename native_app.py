@@ -1054,8 +1054,36 @@ class FeditNativeApp:
                      elif 'last_phase' in state:
                          start_phase_override = state['last_phase']
                 
-                # Try Transfer (Reuse Effect) - DISABLED for now to ensure clean start
+                # Try Transfer (Reuse Effect)
                 transferred = False
+                if eff_id != -1 and current_clip and prev_ctype == current_clip.type == "Sine":
+                    # Reuse the sine effect via update
+                    dur_ms = int(current_clip.duration * 1000)
+                    eff_mag = int(current_clip.magnitude * global_gain)
+                    
+                    # Calculate Phase
+                    start_deg = getattr(current_clip, "start_phase", 0)
+                    phase_to_use = start_deg * 100 # Default user setting
+                    
+                    if start_phase_override != -1:
+                         # Gapless Override takes precedence if we want continuity
+                         # But wait, user wanted CONTROL.
+                         # If user set a specific Phase, maybe we should use it?
+                         # "I need you ... to set phase so it starts ... at same phase ... currently playing"
+                         # This implies AUTO-CONTINUITY for SWEEP, but what about CLIP-TO-CLIP?
+                         # "One ends at 0... Next starts at 0... I can choose the starting point"
+                         # Implies manual setup. 
+                         # So if start_phase is 0 (default), maybe use override?
+                         # If start_phase is non-zero, use it?
+                         if start_deg == 0:
+                              phase_to_use = start_phase_override
+                         else:
+                              phase_to_use = start_deg * 100
+                    
+                    new_id = engine.update_effect_sine(eff_id, current_clip.frequency, eff_mag, dur_ms, phase=phase_to_use)
+                    if new_id != -1:
+                        transferred = True
+                        eff_id = new_id
                 
                 if not transferred:
                     # Stop Old
