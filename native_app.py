@@ -1304,105 +1304,22 @@ class FeditNativeApp:
                         dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_track_opts"))
             return
 
-        # 1. Check for Resize (Priority: High)
-        r_clip, r_edge = self._get_resize_hover(track_idx, rel_x)
-        if r_clip:
-             self.sequencer.resize_clip = r_clip
-             self.sequencer.resize_edge = r_edge
-             self.sequencer.resize_initial_dur = r_clip.duration
-             self.sequencer.resize_initial_time = r_clip.start_time
-             self.sequencer.selected_clip = r_clip # Select on resize interaction
-             dpg.set_value("insp_start", r_clip.start_time)
-             dpg.set_value("insp_dur", r_clip.duration)
-             dpg.set_value("insp_mag", r_clip.magnitude)
-             dpg.set_value("insp_freq", r_clip.frequency)
-             dpg.set_value("insp_freq_end", r_clip.frequency_end)
-             return # Handled
-
-        # 2. Check for Selection / Drag (Priority: Medium)
-        found = False
-<<<<<<< HEAD
-        # Remove old legacy selection loop if present
-        return
-
-    # on_key_press REMOVED - Logic moved to update_loop
-    # def on_key_press(self, sender, app_data):
-    #     if app_data == dpg.mvKey_Delete or app_data == dpg.mvKey_Back:
-    #         # Check if an input is active (don't delete clip while typing)
-    #         if dpg.is_item_active(dpg.get_active_item()):
-    #             return
-    #         self.delete_selected_clip()
-
 
 
     def update_inspector_ui(self):
         # Update all active inspector panels
-        # Filter closed panels? DPG deletes items but our list might keep them.
-        # Simple cleanup: check if tag exists.
         active = []
         for p in self.inspectors:
             if dpg.does_item_exist(p.tag_tab):
                 p.update()
                 active.append(p)
-            else:
-                pass # Closed
         self.inspectors = active
 
     def create_floating_inspector(self, clip=None, parent=None):
-        # If parent implies "Docked Tab" (tab bar)
-        # If no parent, implies "Floating Window"
-        
         p = InspectorPanel(self, parent, clip)
         self.inspectors.append(p)
-        
-        # If using tab bar, select it
         if parent:
              dpg.set_value(parent, p.tag_tab)
-        
-
-
-
-    # --- Palette Drag Source ---
-=======
-        if 0 <= track_idx < len(self.sequencer.tracks):
-             clip = self.sequencer.get_clip_at(track_idx, time_s)
-             if clip:
-                 self.sequencer.selected_clip = clip
-                 dpg.set_value("insp_start", clip.start_time)
-                 dpg.set_value("insp_dur", clip.duration)
-                 dpg.set_value("insp_mag", clip.magnitude)
-                 dpg.set_value("insp_freq", clip.frequency)
-                 dpg.set_value("insp_freq_end", clip.frequency_end)
-                 
-                 # Show/Hide End Freq based on type
-                 if clip.type == "Sine": dpg.show_item("insp_freq_end")
-                 else: dpg.hide_item("insp_freq_end")
-                 
-                 dpg.show_item("btn_delete")
-                 found = True
-                 
-                 # Normal Drag
-                 clip_px_start = clip.start_time * self.sequencer.zoom_x
-                 self.sequencer.drag_clip = clip
-                 self.sequencer.drag_offset = rel_x - clip_px_start
-        
-        # 3. Seek (Priority: Low)
-        if not found:
-             self.sequencer.selected_clip = None
-             dpg.hide_item("btn_delete")
-             self.sequencer.current_time = max(0.0, time_s)
-             self.sequencer.is_scrubbing = True # Start scrubbing
-             self.log(f"Seek to {self.sequencer.current_time:.2f}s")
-             
-    def update_selected_clip(self, sender, app_data, user_data):
-        if not self.sequencer.selected_clip: return
-        param = user_data
-        if param == "freq": self.sequencer.selected_clip.frequency = app_data
-        elif param == "freq_end": self.sequencer.selected_clip.frequency_end = app_data
-        elif param == "mag": self.sequencer.selected_clip.magnitude = app_data
-        elif param == "dur": self.sequencer.selected_clip.duration = app_data
-        elif param == "start": self.sequencer.selected_clip.start_time = app_data
->>>>>>> origin/main
 
     # --- Palette Drag Source ---
     def make_drag_source(self, label, type):
@@ -1411,7 +1328,7 @@ class FeditNativeApp:
              with dpg.drag_payload(drag_data=type): # Removed payload_type for compatibility
                  dpg.add_text(f"Effect: {label}")
 
-<<<<<<< HEAD
+
     def on_mouse_wheel(self, sender, app_data):
         # app_data is value
         # Lock view to tracks: Only zoom if hovering timeline
@@ -1473,7 +1390,7 @@ class FeditNativeApp:
         target_px = 100.0
         self.sequencer.zoom_x = target_px / app_data
         
-=======
+
     def _set_system_cursor_visible(self, visible: bool):
         if not hasattr(self, 'cursor_visible'): self.cursor_visible = True
         
@@ -1496,7 +1413,7 @@ class FeditNativeApp:
         except Exception as e:
             print(f"Cursor Error: {e}")
 
->>>>>>> origin/main
+
     def setup_ui(self):
         with dpg.theme() as global_theme:
             with dpg.theme_component(dpg.mvAll):
