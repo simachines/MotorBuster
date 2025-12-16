@@ -47,8 +47,6 @@ class InspectorPanel:
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
              
              dpg.add_separator()
-             # if not clip:
-             #     dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
     
     def get_target_clip(self):
         if self.clip: return self.clip
@@ -77,7 +75,7 @@ class InspectorPanel:
         safe_set(self.tag_start, clip.start_time)
         safe_set(self.tag_dur, clip.duration)
         safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
-        safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
+        # Removed duplicate tag_mag set
         safe_set(self.tag_freq, clip.frequency)
         safe_set(self.tag_phase, getattr(clip, 'start_phase', 0))
         safe_set(self.tag_sweep, clip.sweep_enabled)
@@ -109,9 +107,19 @@ class InspectorPanel:
         elif param == "mag": 
             val = max(0, min(100, app_data))
             clip.magnitude = int((val / 100.0) * 32767)
-        elif param == "freq": clip.frequency = max(1, app_data)
+        elif param == "freq": 
+            if app_data < 1: 
+                dpg.set_value(sender, 1)
+                clip.frequency = 1
+            else:
+                clip.frequency = app_data
         elif param == "phase": clip.start_phase = max(0, min(360, app_data))
-        elif param == "freq_end": clip.frequency_end = max(1, app_data)
+        elif param == "freq_end": 
+             if app_data < 1:
+                 dpg.set_value(sender, 1)
+                 clip.frequency_end = 1
+             else:
+                 clip.frequency_end = app_data
         elif param == "sweep": 
             clip.sweep_enabled = app_data
             self.update() # Refresh visibility immediately
