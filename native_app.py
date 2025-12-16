@@ -1450,9 +1450,16 @@ class FeditNativeApp:
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
                 with dpg.menu(label="View"):
                      dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                
+                # --- Device Controls in Menu Bar ---
+                dpg.add_spacer(width=20)
+                dpg.add_combo(tag="device_combo", width=200)
+                dpg.add_button(label="Scan", callback=self.scan_devices)
+                dpg.add_button(label="Connect", callback=self.connect_callback)
+                dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
 
             # Torque Monitor Window (Initially Hidden or Shown)
-            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=True):
+            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=False):
                  dpg.add_text("Real-time Torque", color=(150, 255, 150))
                  dpg.add_text("0.00 Nm", tag="txt_torque_val") # Standard size for now to avoid crash
                  # We'll stick to standard text for now, maybe add a progress bar.
@@ -1491,17 +1498,8 @@ class FeditNativeApp:
             # Top Bar
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=10)
-                dpg.add_text("Fedit DAW", color=(100, 200, 255))
-                dpg.add_spacer(width=20)
-                # Removed redundant buttons to rely on Menu/Shortcuts, but Keeping per request "Add a function", kept simple.
-                # Actually, user might still want buttons. I'll keep them but maybe minimal.
-                # dpg.add_button(label="SAVE", callback=lambda: dpg.show_item("dlg_save"))
-                # dpg.add_button(label="LOAD", callback=lambda: dpg.show_item("dlg_load"))
-                # dpg.add_spacer(width=20)
-                dpg.add_combo(tag="device_combo", width=250)
-                dpg.add_button(label="Scan", callback=self.scan_devices)
-                dpg.add_button(label="Connect", callback=self.connect_callback)
-                dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                # Device controls moved to menu bar
+                # dpg.add_text("Fedit DAW", color=(100, 200, 255)) # Removed per request
                 # dpg.add_text("| Rate: -- Hz", tag="status_fps", color=(150, 255, 150)) # REMOVED per user request
                 
                 dpg.add_spacer(width=20)
