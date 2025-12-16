@@ -387,12 +387,16 @@ class HapticController:
     def stop_effect(self, effect_id: int = -1):
         if not self.haptic: return
         
-        if effect_id == -1:
-            # Stop All
-            sdl2.SDL_HapticStopAll(self.haptic)
-        else:
-            sdl2.SDL_HapticStopEffect(self.haptic, effect_id)
-            sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id) # Cleanup immediately? Or sequence end?
+        try:
+            if effect_id == -1:
+                # Stop All
+                sdl2.SDL_HapticStopAll(self.haptic)
+            else:
+                sdl2.SDL_HapticStopEffect(self.haptic, effect_id)
+                sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id) # Cleanup immediately? Or sequence end?
+        except (OSError, Exception) as e:
+            logger.error(f"Error in stop_effect: {e}")
+            self.close_device()
             
     # -----------------------
 

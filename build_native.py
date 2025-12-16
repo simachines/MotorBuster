@@ -21,7 +21,7 @@ print(f"Dependencies at {DEPENDENCIES_DIR}")
 # Build Arguments
 args = [
     'native_app.py',             # Your main script
-    '--name=Fedit',              # Executable name
+    '--name=Fedit2',              # Executable name
     '--onefile',                 # Single ONEFILE executable
     '--clean',                   # Clean cache
     '--windowed',                # No terminal window
