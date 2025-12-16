@@ -297,23 +297,7 @@ class HapticController:
              logger.error(f"Error in update_effect_sine: {e}")
              return -1 
 
-                return new_id
-        
-        # Only try Standard Update if we are NOT forcing phase
-        elif sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect)) == 0:
-            return effect_id
-            
-        # Update Failed logic
-        if effect_id != -1:
-             sdl2.SDL_HapticDestroyEffect(self.haptic, effect_id)
-            
-        # Re-create 
-        new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
-        if new_id != -1:
-            sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
-        return new_id
-        
-        return effect_id
+
 
     def update_effect_constant(self, effect_id: int, magnitude: int, duration_ms: int):
         if not self.haptic or effect_id == -1: return
