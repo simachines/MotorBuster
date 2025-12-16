@@ -1513,17 +1513,15 @@ class FeditNativeApp:
                 dpg.add_spacer(width=50)
                 dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
                 dpg.add_text("0.00s", tag="time_display")
-<<<<<<< HEAD
                 dpg.add_spacer(width=20)
                 dpg.add_text("Freq: --", tag="monitor_freq", color=(100, 255, 100))
                 
                 dpg.add_spacer(width=20)
                 dpg.add_text("TimeBase (s):")
                 dpg.add_input_float(tag="input_timebase", width=60, default_value=0.1, step=0, callback=self.on_timebase_change)
-=======
+                
                 dpg.add_button(label="Restart", callback=self.action_restart)
                 dpg.add_checkbox(label="Loop", tag="chk_loop")
->>>>>>> origin/main
 
             dpg.add_separator()
 
