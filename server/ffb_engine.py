@@ -252,18 +252,50 @@ class HapticController:
         effect.periodic.fade_length = 0
         effect.periodic.phase = phase
         
-        new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
-        if new_id != -1:
-            sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
-        return new_id
+        try:
+            new_id = sdl2.SDL_HapticNewEffect(self.haptic, ctypes.byref(effect))
+            if new_id != -1:
+                sdl2.SDL_HapticRunEffect(self.haptic, new_id, 1)
+            return new_id
+        except OSError:
+            logger.error("Access Violation in start_effect_sine: Device likely disconnected.")
+            self.close_device()
+            return -1
+        except Exception as e:
+            logger.error(f"Error in start_effect_sine: {e}")
+            return -1
 
     def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = -1):
         """Updates parameters. If phase >= 0, attempts to set phase."""
         if not self.haptic or effect_id == -1: return -1
 
         effect = sdl2.SDL_HapticEffect()
+        ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
         effect.type = sdl2.SDL_HAPTIC_SINE
         effect.periodic.type = sdl2.SDL_HAPTIC_SINE
+        effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
+        effect.periodic.period = int(1000 / max(0.1, float(freq)))
+        effect.periodic.magnitude = magnitude
+        effect.periodic.length = duration_ms
+        effect.periodic.attack_length = 0
+        effect.periodic.fade_length = 0
+        effect.periodic.phase = phase if phase >= 0 else 0
+        
+        try:
+            # Note: SDL_HapticUpdateEffect might crash if device gone
+            res = sdl2.SDL_HapticUpdateEffect(self.haptic, effect_id, ctypes.byref(effect))
+            if res == 0:
+                 sdl2.SDL_HapticRunEffect(self.haptic, effect_id, 1)
+                 return effect_id
+            else:
+                 return -1
+        except OSError:
+            logger.error("Access Violation in update_effect_sine: Device likely disconnected.")
+            self.close_device()
+            return -1
+        except Exception as e:
+             logger.error(f"Error in update_effect_sine: {e}")
+             return -1
         effect.periodic.direction.type = sdl2.SDL_HAPTIC_CARTESIAN
         # Allow low frequency (0.1Hz = 10000ms period)
         effect.periodic.period = int(1000 / max(0.1, float(freq)))

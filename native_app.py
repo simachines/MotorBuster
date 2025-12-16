@@ -552,6 +552,10 @@ class FeditNativeApp:
                  dpg.set_value("status_text", "Status: Connected")
                  dpg.configure_item("status_text", color=(0, 255, 0))
                  
+                 # Reset previous effect states as we have a new device
+                 for k in self.track_states:
+                     self.track_states[k] = {'effect_id': -1, 'clip_id': None, 'clip_type': None}
+                 
                  # Auto-Detect Torque
                  detected_torque = self._get_torque_for_device(name)
                  if detected_torque > 0.0:
