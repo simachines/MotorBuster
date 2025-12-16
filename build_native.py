@@ -36,6 +36,7 @@ args = [
     '--exclude-module=fastapi',
     '--exclude-module=starlette',
     '--exclude-module=tkinter',
+    '--hidden-import=server.ffb_engine', # Explicitly force import
 ]
 
 # Robust Dependency Handling

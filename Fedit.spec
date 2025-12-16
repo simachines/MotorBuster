@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = [('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.dependencies\\sdl2dll\\dll\\SDL2.dll', '.')]
-hiddenimports = []
+hiddenimports = ['server.ffb_engine']
 hiddenimports += collect_submodules('server')
 tmp_ret = collect_all('dearpygui')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
