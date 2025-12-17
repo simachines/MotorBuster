@@ -1,6 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import uvicorn
 import json
 import asyncio
@@ -12,11 +13,13 @@ from pathlib import Path
 # Fix DLL path for PyInstaller
 if getattr(sys, 'frozen', False):
     base_dir = Path(sys.executable).parent
-    os.environ["PYSDL2_DLL_PATH"] = str(base_dir)
 else:
     base_dir = Path(__file__).parent
 
-from ffb_engine import engine
+# Hint PySDL3 where to find bundled binaries (works for dev and PyInstaller)
+os.environ.setdefault("SDL_BINARY_PATH", str(base_dir))
+
+from .ffb_engine import DeviceInfo, engine
 
 app = FastAPI()
 
@@ -38,52 +41,6 @@ if getattr(sys, 'frozen', False):
 else:
     static_dir = base_dir.parent / "client" / "dist"
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    
-    try:
-        try:
-             engine.init_sdl()
-        except:
-             pass 
-
-        while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            cmd = msg.get("cmd")
-            payload = msg.get("payload", {})
-
-            if cmd == "scan_devices":
-                devices = engine.list_devices()
-                await websocket.send_json({"type": "devices", "payload": [vars(d) for d in devices]})
-
-            elif cmd == "connect":
-                idx = payload.get("index")
-                success = engine.connect_device(idx)
-                if success:
-                    await websocket.send_json({"type": "log", "payload": f"Connected to device {idx}"})
-                else:
-                    await websocket.send_json({"type": "log", "payload": f"Failed to connect to {idx}"})
-
-            elif cmd == "play_test":
-                effect_type = payload.get("type")
-                if effect_type == "square":
-                    engine.play_constant(level=10000, length=2000)
-                    await websocket.send_json({"type": "log", "payload": "Playing Square Wave"})
-                elif effect_type == "sweep":
-                    engine.play_constant(level=5000, length=2000)
-                    await websocket.send_json({"type": "log", "payload": "Playing Sweep"})
-
-            elif cmd == "stop_all":
-                engine.stop_effect()
-                await websocket.send_json({"type": "log", "payload": "Stopped all effects"})
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        print(f"Error: {e}")
-
 # Add Cache Control Middleware
 @app.middleware("http")
 async def add_cache_control_header(request, call_next):
@@ -93,12 +50,7 @@ async def add_cache_control_header(request, call_next):
     response.headers["Expires"] = "0"
     return response
 
-# Mount Static Files
-if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
-else:
-    print(f"Warning: Static files not found at {static_dir}")
-
+# WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -145,6 +97,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     engine.play_constant(level=5000, length=2000)
                     await websocket.send_json({"type": "log", "payload": "Playing Sweep"})
 
+            elif cmd == "play_clip":
+                clip = payload.get("clip") or payload
+                effect_id = engine.play_descriptor(clip)
+                if effect_id != -1:
+                    await websocket.send_json({"type": "log", "payload": f"Playing effect {clip.get('type', 'unknown')} (id={effect_id})"})
+                else:
+                    await websocket.send_json({"type": "log", "payload": f"Failed to play effect: {clip.get('type', 'unknown')}"})
+
             elif cmd == "stop_all":
                 engine.stop_effect()
                 await websocket.send_json({"type": "log", "payload": "Stopped all effects"})
@@ -153,6 +113,23 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
     except Exception as e:
         print(f"Error: {e}")
+
+# Static file serving (no root mount to avoid websocket interception)
+if static_dir.exists():
+    assets_dir = static_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_index():
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        # Fallback to SPA index for any unknown route (except websockets)
+        return FileResponse(static_dir / "index.html")
+else:
+    print(f"Warning: Static files not found at {static_dir}")
 
 def start():
     print("-----------------------------------------")
@@ -165,3 +142,7 @@ def start():
         webbrowser.open(f"http://localhost:8000?t={int(time.time())}")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    start()

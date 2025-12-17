@@ -19,7 +19,6 @@ if getattr(sys, 'frozen', False):
 else:
     base_path = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(os.path.join(base_path, '.dependencies'))
-
 from server.ffb_engine import engine, DeviceInfo
 
 
@@ -27,43 +26,89 @@ from server.ffb_engine import engine, DeviceInfo
 @dataclass
 class Clip:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    type: str = "Sine" # Sine, Square, Ramp, etc.
-    start_time: float = 0.0 # Seconds
-    duration: float = 2.0 # Seconds
+    type: str = "Sine"
+    start_time: float = 0.0
+    duration: float = 2.0
     track_index: int = 0
-    # Parameters
-    magnitude: int = 3276 # Default 10%
+    magnitude: int = 3276
     frequency: int = 10
-    frequency_end: int = 10 # For Sweep
+    frequency_end: int = 10
     start_phase: int = 0
     sweep_enabled: bool = False
+    direction_mode: str = "Polar"
+    angle: int = 0
+    radius: int = 1
+    x: int = 1
+    y: int = 0
+    z: int = 0
+    yaw: int = 0
+    pitch: int = 0
+    distance: int = 1
+    start_mag: int = -10000
+    end_mag: int = 10000
+    attack_length: int = 0
+    fade_length: int = 0
     name: str = "Clip"
-    active_effect_id: int = -1 # Runtime ID
-    
+    active_effect_id: int = -1
+
     def to_dict(self):
         return {
-            "id": self.id, "type": self.type, "start_time": self.start_time,
-            "duration": self.duration, "track_index": self.track_index,
-            "magnitude": self.magnitude, "frequency": self.frequency,
-            "frequency_end": self.frequency_end, "sweep_enabled": self.sweep_enabled,
+            "id": self.id,
+            "type": self.type,
+            "start_time": self.start_time,
+            "duration": self.duration,
+            "track_index": self.track_index,
+            "magnitude": self.magnitude,
+            "frequency": self.frequency,
+            "frequency_end": self.frequency_end,
+            "sweep_enabled": self.sweep_enabled,
             "start_phase": self.start_phase,
-            "name": self.name
+            "direction_mode": self.direction_mode,
+            "angle": self.angle,
+            "radius": self.radius,
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "yaw": self.yaw,
+            "pitch": self.pitch,
+            "distance": self.distance,
+            "start_mag": self.start_mag,
+            "end_mag": self.end_mag,
+            "attack_length": self.attack_length,
+            "fade_length": self.fade_length,
+            "name": self.name,
         }
-    
+
     @staticmethod
     def from_dict(d):
         freq = d.get("frequency", 10)
-        c = Clip(
-            id=d.get("id", str(uuid.uuid4())), type=d.get("type", "Sine"),
-            start_time=d.get("start_time", 0.0), duration=d.get("duration", 1.0),
+        return Clip(
+            id=d.get("id", str(uuid.uuid4())),
+            type=d.get("type", "Sine"),
+            start_time=d.get("start_time", 0.0),
+            duration=d.get("duration", 1.0),
             track_index=d.get("track_index", 0),
-            magnitude=d.get("magnitude", 3276), frequency=freq, # Default 10%
-            frequency_end=d.get("frequency_end", freq), # Default to start freq if missing
+            magnitude=d.get("magnitude", 3276),
+            frequency=freq,
+            frequency_end=d.get("frequency_end", freq),
             start_phase=d.get("start_phase", 0),
             sweep_enabled=d.get("sweep_enabled", False),
-            name=d.get("name", "Clip")
+            direction_mode=d.get("direction_mode", "Polar"),
+            angle=d.get("angle", 0),
+            radius=d.get("radius", 1),
+            x=d.get("x", 1),
+            y=d.get("y", 0),
+            z=d.get("z", 0),
+            yaw=d.get("yaw", 0),
+            pitch=d.get("pitch", 0),
+            distance=d.get("distance", 1),
+            start_mag=d.get("start_mag", -10000),
+            end_mag=d.get("end_mag", 10000),
+            attack_length=d.get("attack_length", 0),
+            fade_length=d.get("fade_length", 0),
+            name=d.get("name", "Clip"),
         )
-        return c
+
 
 @dataclass
 class Track:
@@ -71,41 +116,45 @@ class Track:
     name: str = "Track"
     gain: int = 100
     clips: list[Clip] = field(default_factory=list)
-    
+
     def to_dict(self):
         return {
-            "id": self.id, "name": self.name, "gain": self.gain,
-            "clips": [c.to_dict() for c in self.clips]
+            "id": self.id,
+            "name": self.name,
+            "gain": self.gain,
+            "clips": [c.to_dict() for c in self.clips],
         }
-    
+
     @staticmethod
     def from_dict(d):
-        t = Track(id=d.get("id", str(uuid.uuid4())), name=d.get("name", "Track"), gain=d.get("gain", 100))
-        t.clips = [Clip.from_dict(cd) for cd in d.get("clips", [])]
-        return t
+        track = Track(
+            id=d.get("id", str(uuid.uuid4())),
+            name=d.get("name", "Track"),
+            gain=d.get("gain", 100),
+        )
+        track.clips = [Clip.from_dict(cd) for cd in d.get("clips", [])]
+        return track
+
 
 class FeditSequencer:
     def __init__(self):
-        # Default tracks renamed to "1", "2"...
         self.tracks = [Track(name=f"{i+1}") for i in range(4)]
         self.is_playing = False
         self.current_time = 0.0
         self.last_tick = 0.0
-        self.zoom_x = 50.0 # Pixels per second
-        # Selection State
+        self.zoom_x = 50.0
         self.selected_clip: Clip = None
         self.drag_clip: Clip = None
         self.drag_offset: float = 0.0
-        # Resize State
         self.resize_clip: Clip = None
-        self.resize_edge: str = None # "left" or "right"
+        self.resize_edge: str = None
         self.resize_initial_time: float = 0.0
         self.resize_initial_dur: float = 0.0
-        self.clipboard: dict = None # For Copy/Paste
+        self.clipboard: dict = None
 
     def to_dict(self):
         return {"tracks": [t.to_dict() for t in self.tracks]}
-        
+
     def load_from_dict(self, d):
         self.tracks = [Track.from_dict(td) for td in d.get("tracks", [])]
         self.selected_clip = None
@@ -124,24 +173,24 @@ class FeditSequencer:
                 return
 
     def get_clip_at(self, track_idx, time_s):
-        # Allow some tolerance for clicking
         for clip in self.tracks[track_idx].clips:
             if clip.start_time <= time_s <= clip.start_time + clip.duration:
                 return clip
         return None
 
     def get_clip_at_precise(self, track_idx, time_s):
-        # Half-open interval [start, end) logic for playback to avoid overlap
         for clip in self.tracks[track_idx].clips:
             if clip.start_time <= time_s < clip.start_time + clip.duration:
                 return clip
         return None
 
     def get_clip_by_id(self, clip_id):
-        if clip_id is None: return None
+        if clip_id is None:
+            return None
         for track in self.tracks:
             for clip in track.clips:
-                if clip.id == clip_id: return clip
+                if clip.id == clip_id:
+                    return clip
         return None
 
 
@@ -162,6 +211,20 @@ class InspectorPanel:
         self.tag_phase = f"insp_phase_{self.id}"
         self.tag_sweep = f"insp_sweep_{self.id}"
         self.tag_title = f"insp_title_{self.id}"
+        self.tag_type = f"insp_type_{self.id}"
+        self.tag_dir_mode = f"insp_dir_mode_{self.id}"
+        self.tag_angle = f"insp_angle_{self.id}"
+        self.tag_radius = f"insp_radius_{self.id}"
+        self.tag_x = f"insp_x_{self.id}"
+        self.tag_y = f"insp_y_{self.id}"
+        self.tag_z = f"insp_z_{self.id}"
+        self.tag_yaw = f"insp_yaw_{self.id}"
+        self.tag_pitch = f"insp_pitch_{self.id}"
+        self.tag_distance = f"insp_distance_{self.id}"
+        self.tag_start_mag = f"insp_startmag_{self.id}"
+        self.tag_end_mag = f"insp_endmag_{self.id}"
+        self.tag_attack = f"insp_attack_{self.id}"
+        self.tag_fade = f"insp_fade_{self.id}"
         
         label = "Inspector (Live)" if not clip else (clip.name or f"Clip {clip.type}")
         
@@ -178,17 +241,39 @@ class InspectorPanel:
              dpg.add_separator()
              
              # Fields
+             dpg.add_combo(label="Effect Type", items=["Sine","Square","Triangle","SawtoothUp","SawtoothDown","Constant","Ramp","Spring","Damper","Inertia","Friction","LeftRight"], tag=self.tag_type, callback=self.on_change, user_data="type")
              dpg.add_input_float(label="Start (s)", tag=self.tag_start, callback=self.on_change, user_data="start")
              dpg.add_input_float(label="Duration (s)", tag=self.tag_dur, callback=self.on_change, user_data="dur")
              dpg.add_slider_int(label="Magnitude %", tag=self.tag_mag, max_value=100, callback=self.on_change, user_data="mag")
              
              dpg.add_separator()
              dpg.add_input_int(label="Frequency (Hz)", tag=self.tag_freq, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq")
-             
              dpg.add_checkbox(label="Enable Sweep", tag=self.tag_sweep, callback=self.on_change, user_data="sweep")
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
-             
+             dpg.add_input_int(label="Phase (deg)", tag=self.tag_phase, min_value=0, max_value=360, callback=self.on_change, user_data="phase")
+
              dpg.add_separator()
+             dpg.add_combo(label="Direction Mode", items=["Polar","Cartesian","Spherical"], tag=self.tag_dir_mode, callback=self.on_change, user_data="dir_mode")
+             with dpg.group(tag=f"grp_polar_{self.id}"):
+                 dpg.add_input_int(label="Angle (deg)", tag=self.tag_angle, callback=self.on_change, user_data="angle")
+                 dpg.add_input_int(label="Radius", tag=self.tag_radius, callback=self.on_change, user_data="radius")
+             with dpg.group(tag=f"grp_cart_{self.id}"):
+                 dpg.add_input_int(label="X", tag=self.tag_x, callback=self.on_change, user_data="x")
+                 dpg.add_input_int(label="Y", tag=self.tag_y, callback=self.on_change, user_data="y")
+                 dpg.add_input_int(label="Z", tag=self.tag_z, callback=self.on_change, user_data="z")
+             with dpg.group(tag=f"grp_spherical_{self.id}"):
+                 dpg.add_input_int(label="Yaw", tag=self.tag_yaw, callback=self.on_change, user_data="yaw")
+                 dpg.add_input_int(label="Pitch", tag=self.tag_pitch, callback=self.on_change, user_data="pitch")
+                 dpg.add_input_int(label="Distance", tag=self.tag_distance, callback=self.on_change, user_data="distance")
+
+             dpg.add_separator()
+             with dpg.group(tag=f"grp_ramp_{self.id}"):
+                 dpg.add_input_int(label="Start Magnitude", tag=self.tag_start_mag, callback=self.on_change, user_data="start_mag")
+                 dpg.add_input_int(label="End Magnitude", tag=self.tag_end_mag, callback=self.on_change, user_data="end_mag")
+
+             dpg.add_separator()
+             dpg.add_input_int(label="Attack (ms)", tag=self.tag_attack, callback=self.on_change, user_data="attack")
+             dpg.add_input_int(label="Fade (ms)", tag=self.tag_fade, callback=self.on_change, user_data="fade")
              # if not clip:
              #     dpg.add_button(label="Open in New Tab", callback=self.duplicate_to_tab)
     
@@ -221,6 +306,21 @@ class InspectorPanel:
         safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
         safe_set(self.tag_freq, clip.frequency)
         safe_set(self.tag_sweep, clip.sweep_enabled)
+        safe_set(self.tag_phase, getattr(clip, 'start_phase', 0))
+        safe_set(self.tag_type, clip.type)
+        safe_set(self.tag_dir_mode, clip.direction_mode)
+        safe_set(self.tag_angle, getattr(clip, 'angle', 0))
+        safe_set(self.tag_radius, getattr(clip, 'radius', 1))
+        safe_set(self.tag_x, getattr(clip, 'x', 1))
+        safe_set(self.tag_y, getattr(clip, 'y', 0))
+        safe_set(self.tag_z, getattr(clip, 'z', 0))
+        safe_set(self.tag_yaw, getattr(clip, 'yaw', 0))
+        safe_set(self.tag_pitch, getattr(clip, 'pitch', 0))
+        safe_set(self.tag_distance, getattr(clip, 'distance', 1))
+        safe_set(self.tag_start_mag, getattr(clip, 'start_mag', -10000))
+        safe_set(self.tag_end_mag, getattr(clip, 'end_mag', 10000))
+        safe_set(self.tag_attack, getattr(clip, 'attack_length', 0))
+        safe_set(self.tag_fade, getattr(clip, 'fade_length', 0))
         
         if clip.type == "Sine":
             dpg.show_item(self.tag_sweep)
@@ -232,6 +332,15 @@ class InspectorPanel:
         else:
              dpg.hide_item(self.tag_sweep)
              dpg.hide_item(self.tag_freq_end)
+
+        # Direction group visibility
+        mode = clip.direction_mode or "Polar"
+        dpg.configure_item(f"grp_polar_{self.id}", show=(mode == "Polar"))
+        dpg.configure_item(f"grp_cart_{self.id}", show=(mode == "Cartesian"))
+        dpg.configure_item(f"grp_spherical_{self.id}", show=(mode == "Spherical"))
+
+        # Ramp-only fields
+        dpg.configure_item(f"grp_ramp_{self.id}", show=(clip.type == "Ramp"))
 
     def on_change(self, sender, app_data, user_data):
         clip = self.get_target_clip()
@@ -260,6 +369,24 @@ class InspectorPanel:
         elif param == "sweep": 
             clip.sweep_enabled = app_data
             self.update() # Refresh visibility immediately
+        elif param == "type":
+            clip.type = app_data
+            self.update()
+        elif param == "dir_mode":
+            clip.direction_mode = app_data
+            self.update()
+        elif param == "angle": clip.angle = app_data
+        elif param == "radius": clip.radius = app_data
+        elif param == "x": clip.x = app_data
+        elif param == "y": clip.y = app_data
+        elif param == "z": clip.z = app_data
+        elif param == "yaw": clip.yaw = app_data
+        elif param == "pitch": clip.pitch = app_data
+        elif param == "distance": clip.distance = app_data
+        elif param == "start_mag": clip.start_mag = app_data
+        elif param == "end_mag": clip.end_mag = app_data
+        elif param == "attack": clip.attack_length = max(0, app_data)
+        elif param == "fade": clip.fade_length = max(0, app_data)
             
     def duplicate_to_tab(self, sender, app_data):
         clip = self.get_target_clip()
@@ -278,6 +405,9 @@ class FeditNativeApp:
         self.renaming_track_idx = -1
         self.drag_target_track_idx = -1 # For visual highlight
         self.inspectors = [] # List of InspectorPanel instances
+        self.api_log_items = []
+        self.resize_threshold_px = 12.0
+        self._console_opened = False
         
         dpg.create_context()
         self.setup_ui()
@@ -288,6 +418,8 @@ class FeditNativeApp:
             engine.init_sdl()
         except Exception as e:
             self.log(f"SDL Init Error: {e}")
+
+        self._ensure_api_console()
             
         # Playback State: { track_index: {'effect_id': -1, 'clip_id': None} }
         self.track_states = {}
@@ -479,6 +611,35 @@ class FeditNativeApp:
         if len(self.log_items) > 50: self.log_items.pop(0)
         if dpg.does_item_exist("log_list"):
             dpg.configure_item("log_list", items=self.log_items)
+
+    def log_api(self, action, payload):
+        """Record haptic API interactions with payload preview for debugging."""
+        preview = payload
+        try:
+            preview = json.dumps(payload) if not isinstance(payload, str) else payload
+        except Exception:
+            preview = str(payload)
+        entry = f"{action}: {preview}"
+        print(f"API {entry}")
+        self.api_log_items.append(entry[:500])
+        if len(self.api_log_items) > 200:
+            self.api_log_items.pop(0)
+        if dpg.does_item_exist("api_log_list"):
+            dpg.configure_item("api_log_list", items=self.api_log_items)
+
+    def _ensure_api_console(self):
+        """Open a dedicated console for API logs (Windows only)."""
+        if self._console_opened:
+            return
+        try:
+            ctypes.windll.kernel32.AllocConsole()
+            sys.stdout = open("CONOUT$", "w")
+            sys.stderr = sys.stdout
+            self._console_opened = True
+            print("API console initialized")
+        except Exception as e:
+            # Fallback: keep stdout as-is; API logs still appear in panel
+            self.log(f"API console unavailable: {e}")
             
     # --- Project Management ---
     def save_project_to_file(self, path):
@@ -661,6 +822,7 @@ class FeditNativeApp:
         else:
             dpg.configure_item("btn_play", label="Play")
             engine.stop_effect() # Stop all
+            self.log_api("stop_effect", {"scope": "all"})
             
             # Reset valid states (HEAD)
             for k in self.track_states:
@@ -675,6 +837,7 @@ class FeditNativeApp:
         self.sequencer.last_tick = time.time()
         # Reset effect states
         engine.stop_effect()
+        self.log_api("stop_effect", {"scope": "all"})
         for t in self.sequencer.tracks:
             for c in t.clips: c.active_effect_id = -1
         self.log("Restarted")
@@ -703,7 +866,7 @@ class FeditNativeApp:
         """Check if mouse is hovering over a clip edge for resizing. Returns (clip, edge_type) or (None, None)."""
         if 0 <= track_idx < len(self.sequencer.tracks):
              track = self.sequencer.tracks[track_idx]
-             threshold = 20.0 # Pixel threshold
+             threshold = self.resize_threshold_px
              
              for clip in track.clips:
                  clip_px_start = clip.start_time * self.sequencer.zoom_x
@@ -788,6 +951,17 @@ class FeditNativeApp:
         resize_clip_hover, _ = self._get_resize_hover(track_idx, rel_x)
         
         if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
+
+             # PRIORITIZE RESIZE WHEN EDGE HOVER IS ACTIVE
+             if resize_clip_hover:
+                 clip, edge = resize_clip_hover
+                 self.sequencer.selected_clip = clip
+                 self.sequencer.resize_clip = clip
+                 self.sequencer.resize_edge = edge
+                 self.sequencer.resize_initial_dur = clip.duration
+                 self.sequencer.resize_initial_time = clip.start_time
+                 self.update_inspector_ui()
+                 return
              
              # 1. CONTINUE RESIZING
              if self.sequencer.resize_clip:
@@ -855,7 +1029,7 @@ class FeditNativeApp:
                      # Check Edges for Resize
                      clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
                      clip_px_end = (hover_clip.start_time + hover_clip.duration) * self.sequencer.zoom_x
-                     edge_threshold = 8.0
+                     edge_threshold = self.resize_threshold_px
                      
                      if abs(rel_x - clip_px_start) < edge_threshold:
                          self.sequencer.resize_clip = hover_clip
@@ -986,26 +1160,58 @@ class FeditNativeApp:
             
             # Helper to update active effect with new clip
             def start_new_effect(start_phase=-1):
-                if not current_clip: return -1
+                if not current_clip:
+                    return -1
                 dur_ms = int(current_clip.duration * 1000)
                 eff_mag = int(current_clip.magnitude * global_gain)
-                
-                new_id = -1
-                if current_clip.type == "Sine":
-                    # If start_phase is not overridden (i.e. -1), use the clip's defined start_phase
-                    if start_phase == -1:
-                        # Convert 0-360 deg to 0-36000
-                        start_phase = getattr(current_clip, "start_phase", 0) * 100
-                    
-                    phase_arg = start_phase if start_phase >= 0 else 0
-                    new_id = engine.start_effect_sine(current_clip.frequency, eff_mag, dur_ms, phase=phase_arg)
-                elif current_clip.type == "Constant":
-                    new_id = engine.start_effect_constant(eff_mag, dur_ms)
-                elif current_clip.type == "Ramp":
-                    new_id = engine.start_effect_ramp(0, eff_mag, dur_ms)
-                elif current_clip.type == "Sawtooth":
-                    per = int(1000 / max(1, current_clip.frequency))
-                    new_id = engine.start_effect_sawtooth(eff_mag, per, dur_ms)
+
+                # Build descriptor for engine.play_descriptor
+                type_map = {
+                    "Sine": "sine",
+                    "Square": "square",
+                    "Triangle": "triangle",
+                    "SawtoothUp": "sawtoothup",
+                    "SawtoothDown": "sawtoothdown",
+                    "Sawtooth": "sawtoothup",
+                    "Constant": "constant",
+                    "Ramp": "ramp",
+                    "Spring": "spring",
+                    "Damper": "damper",
+                    "Inertia": "inertia",
+                    "Friction": "friction",
+                    "LeftRight": "leftright",
+                }
+                tkey = type_map.get(current_clip.type, "sine")
+
+                direction_mode = (current_clip.direction_mode or "Polar").lower()
+                direction = {}
+                if direction_mode == "cartesian":
+                    direction = {"x": current_clip.x, "y": current_clip.y, "z": current_clip.z}
+                elif direction_mode == "spherical":
+                    direction = {"yaw": max(0, min(36000, current_clip.yaw)), "pitch": max(0, min(36000, current_clip.pitch)), "distance": max(0, current_clip.distance)}
+                else:
+                    direction = {"angle": max(0, min(36000, current_clip.angle)), "radius": max(0, current_clip.radius)}
+
+                desc = {
+                    "type": tkey,
+                    "frequency_hz": float(current_clip.frequency),
+                    "magnitude": eff_mag,
+                    "length_ms": dur_ms,
+                    "phase": max(0, min(360, current_clip.start_phase)),
+                    "direction_mode": direction_mode,
+                    "direction": direction,
+                    "start_mag": current_clip.start_mag,
+                    "end_mag": current_clip.end_mag,
+                    "envelope": {
+                        "attack_length": current_clip.attack_length,
+                        "fade_length": current_clip.fade_length,
+                        "attack_level": 0,
+                        "fade_level": 0,
+                    },
+                }
+
+                self.log_api("play_descriptor", desc)
+                new_id = engine.play_descriptor(desc)
                 return new_id
 
             # State Machine
@@ -1034,7 +1240,13 @@ class FeditNativeApp:
                         has_changed = (current_clip.magnitude != last_mag) or \
                                       (current_clip.frequency != last_freq and not is_sweep) 
                         
-                        if is_sweep or has_changed:
+                        should_send = is_sweep or has_changed
+                        # Throttle updates to >=0.1 Hz change from last sent value
+                        last_sent = state.get('last_sent_freq', None)
+                        if last_sent is not None and abs(current_clip.frequency - last_sent) < 0.1 and is_sweep:
+                            should_send = False
+
+                        if should_send:
                              # Calculate current parameters
                              progress = (cur_t - current_clip.start_time) / current_clip.duration
                              progress = max(0.0, min(1.0, progress))
@@ -1065,10 +1277,12 @@ class FeditNativeApp:
                              
                              # Update Engine
                              eff_mag = int(current_clip.magnitude * global_gain)
+                             self.log_api("update_effect_sine", {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": sdl_phase})
                              new_eff_id = engine.update_effect_sine(eff_id, current_freq, eff_mag, effect_len_ms, phase=sdl_phase)
                              if new_eff_id != -1:
                                  eff_id = new_eff_id
                                  state['effect_id'] = eff_id
+                                 state['last_sent_freq'] = current_freq
                         
                         # Update State
                         state['last_mag'] = current_clip.magnitude
@@ -1133,6 +1347,7 @@ class FeditNativeApp:
                          else:
                               phase_to_use = start_deg * 100
                     
+                    self.log_api("update_effect_sine", {"effect_id": eff_id, "freq": current_clip.frequency, "mag": eff_mag, "length_ms": dur_ms, "phase": phase_to_use})
                     new_id = engine.update_effect_sine(eff_id, current_clip.frequency, eff_mag, dur_ms, phase=phase_to_use)
                     if new_id != -1:
                         transferred = True
@@ -1141,6 +1356,7 @@ class FeditNativeApp:
                 if not transferred:
                     # Stop Old
                     if eff_id != -1:
+                        self.log_api("stop_effect", {"effect_id": eff_id})
                         engine.stop_effect(eff_id)
                         eff_id = -1
                     
@@ -1153,7 +1369,7 @@ class FeditNativeApp:
                 state['clip_id'] = curr_cid
                 state['clip_type'] = current_clip.type if current_clip else None
                 if current_clip:
-                     state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
+                    state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
 
 
     # --- Rendering ---
@@ -1164,16 +1380,8 @@ class FeditNativeApp:
         # Let's try 1s, 0.1s, 0.01s based on zoom
         
         # Determine strict power of 10 spacing
-        # If pixels_per_sec (zoom_x) is 50:
-        # 1s = 50px (Too small? No)
-        # If zoom is 500: 1s = 500px, 0.1s = 50px
-        
-        # Base spacing in pixels we want is roughly 100px
         target_px = 100.0
-        # Ideal time step
         ideal_dt = target_px / max(0.1, self.sequencer.zoom_x)
-        
-        # Snap to 1, 2, 5
         power = math.floor(math.log10(ideal_dt))
         base = 10 ** power
         
@@ -1666,9 +1874,17 @@ class FeditNativeApp:
                     dpg.add_text("Effects")
                     dpg.add_separator()
                     self.make_drag_source("Sine Wave", "Sine")
+                    self.make_drag_source("Square", "Square")
+                    self.make_drag_source("Triangle", "Triangle")
                     self.make_drag_source("Constant", "Constant")
                     self.make_drag_source("Ramp", "Ramp")
-                    self.make_drag_source("Sawtooth", "Sawtooth")
+                    self.make_drag_source("Saw Up", "SawtoothUp")
+                    self.make_drag_source("Saw Down", "SawtoothDown")
+                    self.make_drag_source("Spring", "Spring")
+                    self.make_drag_source("Damper", "Damper")
+                    self.make_drag_source("Inertia", "Inertia")
+                    self.make_drag_source("Friction", "Friction")
+                    self.make_drag_source("Left/Right", "LeftRight")
                     dpg.add_spacer(height=20)
                     dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
 
@@ -1689,6 +1905,11 @@ class FeditNativeApp:
                      try:
                          dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
                      except Exception as e: print(f"Init Warning: {e}")
+
+                # API Calls under timeline for full-width view
+                with dpg.child_window(tag="panel_api", height=180):
+                    dpg.add_text("API Calls (latest first)")
+                    dpg.add_listbox(tag="api_log_list", num_items=8, width=-1)
 
                 # Col 3: Inspector (Top) & Log (Bottom)
                 with dpg.group():

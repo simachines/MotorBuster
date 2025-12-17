@@ -88,12 +88,13 @@ print(f"Running PyInstaller with: {args}")
 PyInstaller.__main__.run(args)
 
 # Post-Build Check
-if os.path.exists("dist/Fedit.exe"):
-    print("Build Complete: dist/Fedit.exe")
-    # If using OneFile, we don't need to copy SDL2.dll next to it usually, 
-    # BUT PySDL2 sometimes demands it in CWD. Let's be safe and copy it if we found it.
+exe_path = os.path.join(DIST_DIR, "Fedit2.exe")
+if os.path.exists(exe_path):
+    print(f"Build Complete: {exe_path}")
+    # If using OneFile, we don't need to copy SDL2.dll next to it usually,
+    # but PySDL2 sometimes demands it in CWD. Copy when available.
     if sdl2_path:
-         shutil.copy(sdl2_path, os.path.join(DIST_DIR, "SDL2.dll"))
-         print("Copied SDL2.dll to dist/ for safety.")
+        shutil.copy(sdl2_path, os.path.join(DIST_DIR, "SDL2.dll"))
+        print("Copied SDL2.dll to dist/ for safety.")
 else:
     print("Build Failed.")
