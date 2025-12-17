@@ -2,8 +2,8 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('C:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server', 'server')]
-binaries = [('C:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\.dependencies\\sdl2dll\\dll\\SDL2.dll', '.')]
+datas = [('c:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server', 'server')]
+binaries = [('c:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\.dependencies\\sdl2dll\\dll\\SDL2.dll', '.')]
 hiddenimports = ['server.ffb_engine']
 hiddenimports += collect_submodules('server')
 tmp_ret = collect_all('dearpygui')
@@ -16,7 +16,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ['native_app.py'],
-    pathex=['.', 'C:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\.dependencies'],
+    pathex=['.', 'c:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\.dependencies'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

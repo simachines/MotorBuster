@@ -613,19 +613,22 @@ class FeditNativeApp:
             dpg.configure_item("log_list", items=self.log_items)
 
     def log_api(self, action, payload):
-        """Record haptic API interactions with payload preview for debugging."""
+        """Record haptic API interactions; mirror to console and main log list."""
         preview = payload
         try:
             preview = json.dumps(payload) if not isinstance(payload, str) else payload
         except Exception:
             preview = str(payload)
-        entry = f"{action}: {preview}"
-        print(f"API {entry}")
+        entry = f"API {action}: {preview}"
+        print(entry)
+
+        # Keep dedicated API buffer (in case we re-add a panel later)
         self.api_log_items.append(entry[:500])
         if len(self.api_log_items) > 200:
             self.api_log_items.pop(0)
-        if dpg.does_item_exist("api_log_list"):
-            dpg.configure_item("api_log_list", items=self.api_log_items)
+
+        # Also surface inside the main app log for visibility
+        self.log(entry)
 
     def _ensure_api_console(self):
         """Open a dedicated console for API logs (Windows only)."""
@@ -948,13 +951,13 @@ class FeditNativeApp:
         track_h = 80
         track_idx = int(rel_y // track_h)
         
-        resize_clip_hover, _ = self._get_resize_hover(track_idx, rel_x)
+        resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
         
         if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
 
              # PRIORITIZE RESIZE WHEN EDGE HOVER IS ACTIVE
              if resize_clip_hover:
-                 clip, edge = resize_clip_hover
+                 clip, edge = resize_clip_hover, resize_edge
                  self.sequencer.selected_clip = clip
                  self.sequencer.resize_clip = clip
                  self.sequencer.resize_edge = edge
@@ -1223,10 +1226,6 @@ class FeditNativeApp:
                     if remaining_ms < 0: remaining_ms = 0 # Safety
                     
                     if current_clip.type == "Sine":
-                        # Always debug active clips
-                        if self.sequencer.is_playing:
-                            print(f"ClipActive: t={cur_t:.2f} id={eff_id} freq={current_clip.frequency} end={current_clip.frequency_end}")
-                        
                         dpg.set_value("monitor_freq", f"Freq: {current_clip.frequency} Hz")
                         
                         # --- REAL-TIME UPDATE LOGIC ---
@@ -1905,11 +1904,6 @@ class FeditNativeApp:
                      try:
                          dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
                      except Exception as e: print(f"Init Warning: {e}")
-
-                # API Calls under timeline for full-width view
-                with dpg.child_window(tag="panel_api", height=180):
-                    dpg.add_text("API Calls (latest first)")
-                    dpg.add_listbox(tag="api_log_list", num_items=8, width=-1)
 
                 # Col 3: Inspector (Top) & Log (Bottom)
                 with dpg.group():
