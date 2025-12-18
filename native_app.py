@@ -1289,6 +1289,10 @@ class FeditNativeApp:
                 new_id = engine.play_descriptor(desc)
                 state['effect_start_time'] = current_clip.start_time
                 state['last_sweep_update_local'] = None
+                # Initialize tracking so the first continuation tick doesn't immediately trigger an update
+                state['last_mag'] = current_clip.magnitude
+                state['last_freq'] = current_clip.frequency
+                state['last_sent_freq'] = current_clip.frequency
                 return new_id
 
             # State Machine
