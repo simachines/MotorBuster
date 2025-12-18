@@ -36,7 +36,7 @@ class Clip:
     start_phase: int = 0
     sweep_enabled: bool = False
     direction_mode: str = "Polar"
-    angle: int = 0
+    angle: int = 90
     radius: int = 1
     x: int = 1
     y: int = 0
@@ -82,6 +82,12 @@ class Clip:
     @staticmethod
     def from_dict(d):
         freq = d.get("frequency", 10)
+        raw_angle = d.get("angle", 90)
+        # Backward compatibility: older projects stored hundredths of a degree
+        if raw_angle > 359:
+            raw_angle = int(round(raw_angle / 100.0))
+        raw_angle = max(0, min(359, raw_angle))
+
         return Clip(
             id=d.get("id", str(uuid.uuid4())),
             type=d.get("type", "Sine"),
@@ -94,7 +100,7 @@ class Clip:
             start_phase=d.get("start_phase", 0),
             sweep_enabled=d.get("sweep_enabled", False),
             direction_mode=d.get("direction_mode", "Polar"),
-            angle=d.get("angle", 0),
+            angle=raw_angle,
             radius=d.get("radius", 1),
             x=d.get("x", 1),
             y=d.get("y", 0),
@@ -250,12 +256,12 @@ class InspectorPanel:
              dpg.add_input_int(label="Frequency (Hz)", tag=self.tag_freq, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq")
              dpg.add_checkbox(label="Enable Sweep", tag=self.tag_sweep, callback=self.on_change, user_data="sweep")
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
-             dpg.add_input_int(label="Phase (deg)", tag=self.tag_phase, min_value=0, max_value=360, callback=self.on_change, user_data="phase")
+             dpg.add_slider_int(label="Phase (deg)", tag=self.tag_phase, min_value=0, max_value=359, callback=self.on_change, user_data="phase")
 
              dpg.add_separator()
              dpg.add_combo(label="Direction Mode", items=["Polar","Cartesian","Spherical"], tag=self.tag_dir_mode, callback=self.on_change, user_data="dir_mode")
              with dpg.group(tag=f"grp_polar_{self.id}"):
-                 dpg.add_input_int(label="Angle (deg)", tag=self.tag_angle, callback=self.on_change, user_data="angle")
+                 dpg.add_slider_int(label="Direction (deg)", tag=self.tag_angle, min_value=0, max_value=359, callback=self.on_change, user_data="angle")
                  dpg.add_input_int(label="Radius", tag=self.tag_radius, callback=self.on_change, user_data="radius")
              with dpg.group(tag=f"grp_cart_{self.id}"):
                  dpg.add_input_int(label="X", tag=self.tag_x, callback=self.on_change, user_data="x")
@@ -306,10 +312,10 @@ class InspectorPanel:
         safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
         safe_set(self.tag_freq, clip.frequency)
         safe_set(self.tag_sweep, clip.sweep_enabled)
-        safe_set(self.tag_phase, getattr(clip, 'start_phase', 0))
+        safe_set(self.tag_phase, int(max(0, min(359, getattr(clip, 'start_phase', 0)))))
         safe_set(self.tag_type, clip.type)
         safe_set(self.tag_dir_mode, clip.direction_mode)
-        safe_set(self.tag_angle, getattr(clip, 'angle', 0))
+        safe_set(self.tag_angle, int(max(0, min(359, getattr(clip, 'angle', 90)))))
         safe_set(self.tag_radius, getattr(clip, 'radius', 1))
         safe_set(self.tag_x, getattr(clip, 'x', 1))
         safe_set(self.tag_y, getattr(clip, 'y', 0))
@@ -348,7 +354,7 @@ class InspectorPanel:
         
         param = user_data
         param = user_data
-        if param == "start": clip.start_time = app_data
+        if param == "start": clip.start_time = max(0.0, app_data)
         elif param == "dur": clip.duration = max(0.01, app_data)
         elif param == "mag": 
             val = max(0, min(100, app_data))
@@ -359,7 +365,7 @@ class InspectorPanel:
                 clip.frequency = 1
             else:
                 clip.frequency = app_data
-        elif param == "phase": clip.start_phase = max(0, min(360, app_data))
+        elif param == "phase": clip.start_phase = max(0, min(359, app_data))
         elif param == "freq_end": 
              if app_data < 1:
                  dpg.set_value(sender, 1)
@@ -375,14 +381,14 @@ class InspectorPanel:
         elif param == "dir_mode":
             clip.direction_mode = app_data
             self.update()
-        elif param == "angle": clip.angle = app_data
-        elif param == "radius": clip.radius = app_data
+        elif param == "angle": clip.angle = max(0, min(359, app_data))
+        elif param == "radius": clip.radius = max(0, app_data)
         elif param == "x": clip.x = app_data
         elif param == "y": clip.y = app_data
         elif param == "z": clip.z = app_data
-        elif param == "yaw": clip.yaw = app_data
-        elif param == "pitch": clip.pitch = app_data
-        elif param == "distance": clip.distance = app_data
+        elif param == "yaw": clip.yaw = max(0, min(360, app_data))
+        elif param == "pitch": clip.pitch = max(0, min(360, app_data))
+        elif param == "distance": clip.distance = max(0, app_data)
         elif param == "start_mag": clip.start_mag = app_data
         elif param == "end_mag": clip.end_mag = app_data
         elif param == "attack": clip.attack_length = max(0, app_data)
@@ -408,6 +414,7 @@ class FeditNativeApp:
         self.api_log_items = []
         self.resize_threshold_px = 12.0
         self._console_opened = False
+        self.sweep_markers = []  # [{"time": float, "phase": int}]
         
         dpg.create_context()
         self.setup_ui()
@@ -613,7 +620,7 @@ class FeditNativeApp:
             dpg.configure_item("log_list", items=self.log_items)
 
     def log_api(self, action, payload):
-        """Record haptic API interactions; mirror to console and main log list."""
+        """Record haptic API interactions; mirror only to API console/buffer (not main UI log)."""
         preview = payload
         try:
             preview = json.dumps(payload) if not isinstance(payload, str) else payload
@@ -626,9 +633,6 @@ class FeditNativeApp:
         self.api_log_items.append(entry[:500])
         if len(self.api_log_items) > 200:
             self.api_log_items.pop(0)
-
-        # Also surface inside the main app log for visibility
-        self.log(entry)
 
     def _ensure_api_console(self):
         """Open a dedicated console for API logs (Windows only)."""
@@ -742,7 +746,15 @@ class FeditNativeApp:
                  
                  # Reset previous effect states as we have a new device
                  for k in self.track_states:
-                     self.track_states[k] = {'effect_id': -1, 'clip_id': None, 'clip_type': None}
+                     self.track_states[k] = {
+                         'effect_id': -1,
+                         'clip_id': None,
+                         'clip_type': None,
+                         'last_sweep_update_local': None,
+                         'last_sent_freq': None,
+                         'last_mag': None,
+                         'last_freq': None,
+                     }
                  
                  # Auto-Detect Torque
                  detected_torque = self._get_torque_for_device(name)
@@ -801,6 +813,7 @@ class FeditNativeApp:
         if self.sequencer.is_playing:
             dpg.configure_item("btn_play", label="Stop")
             self.sequencer.last_tick = time.time()
+            self.sweep_markers = []
             
             # Reset Stats (from Main)
             self.stats_peak = 0.0
@@ -829,7 +842,17 @@ class FeditNativeApp:
             
             # Reset valid states (HEAD)
             for k in self.track_states:
-                self.track_states[k] = {'effect_id': -1, 'clip_id': None, 'clip_type': None, 'phase_acc': 0.0}
+                self.track_states[k] = {
+                    'effect_id': -1,
+                    'clip_id': None,
+                    'clip_type': None,
+                    'effect_start_time': None,
+                    'phase_acc': 0.0,
+                    'last_sweep_update_local': None,
+                    'last_sent_freq': None,
+                    'last_mag': None,
+                    'last_freq': None,
+                }
             
             # Reset active IDs (Main)
             for t in self.sequencer.tracks:
@@ -841,8 +864,21 @@ class FeditNativeApp:
         # Reset effect states
         engine.stop_effect()
         self.log_api("stop_effect", {"scope": "all"})
+        for k in self.track_states:
+            self.track_states[k] = {
+                'effect_id': -1,
+                'clip_id': None,
+                'clip_type': None,
+                'effect_start_time': None,
+                'phase_acc': 0.0,
+                'last_sweep_update_local': None,
+                'last_sent_freq': None,
+                'last_mag': None,
+                'last_freq': None,
+            }
         for t in self.sequencer.tracks:
             for c in t.clips: c.active_effect_id = -1
+        self.sweep_markers = []
         self.log("Restarted")
 
     def get_canvas_relative_pos(self, global_mouse_pos):
@@ -1087,9 +1123,28 @@ class FeditNativeApp:
             
             if has_clips:
                 if dpg.get_value("chk_loop"):
-                    # Loop Mode: Restart after buffer
-                    if self.sequencer.current_time > max_end + 0.5: # 0.5s buffer
-                        self.action_restart()
+                    # Loop Mode: restart immediately at end
+                    if self.sequencer.current_time >= max_end:
+                        self.sequencer.current_time = 0.0
+                        self.sequencer.last_tick = now
+                        engine.stop_effect()
+                        self.log_api("stop_effect", {"scope": "all"})
+                        for k in self.track_states:
+                            self.track_states[k] = {
+                                'effect_id': -1,
+                                'clip_id': None,
+                                'clip_type': None,
+                                'effect_start_time': None,
+                                'phase_acc': 0.0,
+                                'last_sweep_update_local': None,
+                                'last_sent_freq': None,
+                                'last_mag': None,
+                                'last_freq': None,
+                            }
+                        for t in self.sequencer.tracks:
+                            for c in t.clips:
+                                c.active_effect_id = -1
+                        self.sweep_markers = []
                 else:
                     # Normal Mode: Stop exactly at end
                     if self.sequencer.current_time >= max_end:
@@ -1150,7 +1205,16 @@ class FeditNativeApp:
         # Iterate Tracks (not clips) to manage monophonic channel state
         for t_idx, track in enumerate(self.sequencer.tracks):
             if t_idx not in self.track_states:
-                self.track_states[t_idx] = {'effect_id': -1, 'clip_id': None, 'clip_type': None}
+                self.track_states[t_idx] = {
+                    'effect_id': -1,
+                    'clip_id': None,
+                    'clip_type': None,
+                    'effect_start_time': None,
+                    'last_sweep_update_local': None,
+                    'last_sent_freq': None,
+                    'last_mag': None,
+                    'last_freq': None,
+                }
             
             state = self.track_states[t_idx]
             prev_cid = state['clip_id']
@@ -1193,14 +1257,22 @@ class FeditNativeApp:
                 elif direction_mode == "spherical":
                     direction = {"yaw": max(0, min(36000, current_clip.yaw)), "pitch": max(0, min(36000, current_clip.pitch)), "distance": max(0, current_clip.distance)}
                 else:
-                    direction = {"angle": max(0, min(36000, current_clip.angle)), "radius": max(0, current_clip.radius)}
+                    dir_deg = max(0, min(359, getattr(current_clip, "angle", 90)))
+                    direction = {"angle": int(dir_deg * 100), "radius": max(0, current_clip.radius)}
+
+                # Phase: slider stores 0-359 deg; API expects 0-35900 (hundredths). 36000 wraps to 0.
+                if start_phase != -1:
+                    phase_payload = max(0, min(35900, int(start_phase)))
+                else:
+                    phase_deg = max(0, min(359, int(getattr(current_clip, "start_phase", 0))))
+                    phase_payload = phase_deg * 100
 
                 desc = {
                     "type": tkey,
                     "frequency_hz": float(current_clip.frequency),
                     "magnitude": eff_mag,
                     "length_ms": dur_ms,
-                    "phase": max(0, min(360, current_clip.start_phase)),
+                    "phase": phase_payload,
                     "direction_mode": direction_mode,
                     "direction": direction,
                     "start_mag": current_clip.start_mag,
@@ -1215,6 +1287,8 @@ class FeditNativeApp:
 
                 self.log_api("play_descriptor", desc)
                 new_id = engine.play_descriptor(desc)
+                state['effect_start_time'] = current_clip.start_time
+                state['last_sweep_update_local'] = None
                 return new_id
 
             # State Machine
@@ -1226,8 +1300,6 @@ class FeditNativeApp:
                     if remaining_ms < 0: remaining_ms = 0 # Safety
                     
                     if current_clip.type == "Sine":
-                        dpg.set_value("monitor_freq", f"Freq: {current_clip.frequency} Hz")
-                        
                         # --- REAL-TIME UPDATE LOGIC ---
                         # Verify change against stored state or just update if sweep
                         is_sweep = current_clip.frequency != current_clip.frequency_end and current_clip.sweep_enabled
@@ -1235,61 +1307,72 @@ class FeditNativeApp:
                         # Check "Dirty" State (User changed sliders)
                         last_mag = state.get('last_mag', -1)
                         last_freq = state.get('last_freq', -1)
-                        
+
                         has_changed = (current_clip.magnitude != last_mag) or \
-                                      (current_clip.frequency != last_freq and not is_sweep) 
-                        
-                        should_send = is_sweep or has_changed
-                        # Throttle updates to >=0.1 Hz change from last sent value
-                        last_sent = state.get('last_sent_freq', None)
-                        if last_sent is not None and abs(current_clip.frequency - last_sent) < 0.1 and is_sweep:
-                            should_send = False
+                                      (current_clip.frequency != last_freq and not is_sweep)
+
+                        # Target ~10 updates per Hz across the clip duration (time-based, not frame-based)
+                        t_local = max(0.0, cur_t - (state.get('effect_start_time') if state.get('effect_start_time') is not None else current_clip.start_time))
+                        sweep_ready = False
+                        if is_sweep:
+                            freq_span = abs(current_clip.frequency_end - current_clip.frequency)
+                            steps = max(1, int(math.ceil(freq_span * 10.0)))
+                            interval = current_clip.duration / steps if steps > 0 else current_clip.duration
+                            last_local = state.get('last_sweep_update_local')
+                            sweep_ready = (last_local is None) or (t_local - last_local >= interval)
+
+                        # Calculate current parameters for monitoring
+                        progress = t_local / current_clip.duration
+                        progress = max(0.0, min(1.0, progress))
+
+                        if is_sweep:
+                            current_freq = float(current_clip.frequency + (current_clip.frequency_end - current_clip.frequency) * progress)
+                            current_freq = max(0.1, current_freq)
+                        else:
+                            current_freq = float(current_clip.frequency)
+
+                        # Always refresh on-screen monitor frequency
+                        dpg.set_value("monitor_freq", f"Freq: {current_freq:.2f} Hz")
+
+                        should_send = (is_sweep and sweep_ready) or has_changed
 
                         if should_send:
-                             # Calculate current parameters
-                             progress = (cur_t - current_clip.start_time) / current_clip.duration
-                             progress = max(0.0, min(1.0, progress))
-                             
-                             if is_sweep:
-                                 current_freq = float(current_clip.frequency + (current_clip.frequency_end - current_clip.frequency) * progress)
-                                 current_freq = max(0.1, current_freq)
-                             else:
-                                 current_freq = float(current_clip.frequency)
+                             effect_len_ms = int(max(0.0, current_clip.duration - t_local) * 1000)
 
-                             dpg.set_value("monitor_freq", f"Freq: {current_freq:.2f} Hz")
-                             
-                             effect_len_ms = int(current_clip.duration * 1000) 
-
-                             # Calculate Phase
-                             t_local = cur_t - current_clip.start_time
+                             # Calculate continuous phase from clip start to preserve direction on each update
+                             t_elapsed = t_local
                              start_f = current_clip.frequency
                              end_f = current_clip.frequency_end if is_sweep else start_f
                              k = (end_f - start_f) / max(1e-6, current_clip.duration)
-                             
-                             # Base Phase Integral: f0*t + 0.5*k*t^2
-                             phase_integral = (start_f * t_local + 0.5 * k * t_local * t_local)
-                             
-                             # Add Start Phase Offset
+                             phase_integral = (start_f * t_elapsed + 0.5 * k * t_elapsed * t_elapsed)
                              start_deg = getattr(current_clip, "start_phase", 0)
                              norm_phase = (phase_integral + (start_deg / 360.0)) % 1.0
-                             sdl_phase = int(norm_phase * 36000)
+                             phase_payload = int(norm_phase * 36000)
                              
-                             # Update Engine
                              eff_mag = int(current_clip.magnitude * global_gain)
-                             self.log_api("update_effect_sine", {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": sdl_phase})
-                             new_eff_id = engine.update_effect_sine(eff_id, current_freq, eff_mag, effect_len_ms, phase=sdl_phase)
+                             log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": phase_payload}
+                             self.log_api("update_effect_sine", log_payload)
+
+                             new_eff_id = engine.update_effect_sine(eff_id, current_freq, eff_mag, effect_len_ms, phase=phase_payload)
+
                              if new_eff_id != -1:
                                  eff_id = new_eff_id
                                  state['effect_id'] = eff_id
                                  state['last_sent_freq'] = current_freq
-                        
+                                 if is_sweep:
+                                     state['last_sweep_update_local'] = t_local
+                                     # record marker for visualization
+                                     self.sweep_markers.append({"time": cur_t, "phase": phase_payload})
+                                     if len(self.sweep_markers) > 500:
+                                         self.sweep_markers.pop(0)
+
                         # Update State
                         state['last_mag'] = current_clip.magnitude
                         state['last_freq'] = current_clip.frequency
 
                 # Update Phase Tracking for next frame's potential transition
                 if current_clip and current_clip.type == "Sine":
-                     t_local = cur_t - current_clip.start_time
+                     t_local = max(0.0, cur_t - (state.get('effect_start_time') if state.get('effect_start_time') is not None else current_clip.start_time))
                      start_f = current_clip.frequency
                      end_f = current_clip.frequency_end if current_clip.sweep_enabled else start_f
                      k = (end_f - start_f) / max(1e-6, current_clip.duration)
@@ -1341,16 +1424,20 @@ class FeditNativeApp:
                          # Implies manual setup. 
                          # So if start_phase is 0 (default), maybe use override?
                          # If start_phase is non-zero, use it?
-                         if start_deg == 0:
-                              phase_to_use = start_phase_override
-                         else:
-                              phase_to_use = start_deg * 100
+                        if start_deg == 0:
+                            phase_to_use = start_phase_override
+                        else:
+                            phase_to_use = start_deg * 100
+
+                    # Clamp to valid API range (0..35900); 36000 wraps to 0
+                    phase_to_use = max(0, min(35900, int(phase_to_use)))
                     
                     self.log_api("update_effect_sine", {"effect_id": eff_id, "freq": current_clip.frequency, "mag": eff_mag, "length_ms": dur_ms, "phase": phase_to_use})
                     new_id = engine.update_effect_sine(eff_id, current_clip.frequency, eff_mag, dur_ms, phase=phase_to_use)
                     if new_id != -1:
                         transferred = True
                         eff_id = new_id
+                        state['effect_start_time'] = current_clip.start_time
                 
                 if not transferred:
                     # Stop Old
@@ -1367,6 +1454,11 @@ class FeditNativeApp:
                 state['effect_id'] = eff_id
                 state['clip_id'] = curr_cid
                 state['clip_type'] = current_clip.type if current_clip else None
+                state['effect_start_time'] = current_clip.start_time if current_clip else None
+                state['last_sweep_update_local'] = None
+                state['last_sent_freq'] = None
+                state['last_mag'] = None
+                state['last_freq'] = None
                 if current_clip:
                     state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
 
@@ -1483,6 +1575,14 @@ class FeditNativeApp:
         
         px = self.sequencer.current_time * self.sequencer.zoom_x
         dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
+
+        # Sweep markers (phase at each frequency update)
+        if self.sweep_markers:
+            for m in self.sweep_markers:
+                mx = m.get("time", 0.0) * self.sequencer.zoom_x
+                phase_txt = f"{m.get('phase', 0)/100.0:.1f}°"
+                dpg.draw_line([mx, 0], [mx, y_offset], color=(200, 50, 50, 120), thickness=1, parent="timeline_canvas")
+                dpg.draw_text([mx + 4, 8], phase_txt, size=12, color=(255, 120, 120), parent="timeline_canvas")
 
     def _draw_resize_cursor(self, x, y):
         """Draws a custom double-headed arrow cursor at (x,y)."""
@@ -1936,18 +2036,24 @@ class FeditNativeApp:
         
         self.scan_devices()
 
-        while dpg.is_dearpygui_running():
+        try:
+            while dpg.is_dearpygui_running():
+                try:
+                    self.update_loop()
+                except Exception as e:
+                    print(f"Update Loop Crash: {e}")
+                    self.log(f"CRITICAL: {e}")
+                    # Optional: pause playback on crash to prevent loop
+                    self.sequencer.is_playing = False
+                    
+                dpg.render_dearpygui_frame()
+        finally:
             try:
-                self.update_loop()
+                engine.stop_effect()
+                self.log_api("stop_effect", {"scope": "all"})
             except Exception as e:
-                print(f"Update Loop Crash: {e}")
-                self.log(f"CRITICAL: {e}")
-                # Optional: pause playback on crash to prevent loop
-                self.sequencer.is_playing = False
-                
-            dpg.render_dearpygui_frame()
-            
-        dpg.destroy_context()
+                self.log(f"Stop on exit failed: {e}")
+            dpg.destroy_context()
 
 if __name__ == "__main__":
     app = FeditNativeApp()
