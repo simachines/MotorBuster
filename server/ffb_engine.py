@@ -61,9 +61,12 @@ class HapticController:
     def __init__(self):
         self.haptic = None
         self.joystick = None
+        self.gamepad = None
         self.effect_id = -1
         self._device_ids: list[int] = []
         self._current_custom_data = None
+        self.axis_baseline: dict[str, int] = {}
+        self.preferred_axis_key: Optional[str] = None
         
     def init_sdl(self):
         flags = (
@@ -130,6 +133,20 @@ class HapticController:
             logger.error(f"Joystick Open Failed: {_sdl_error()}")
             return False
 
+        # Open gamepad handle if supported so we can read standardized axes
+        if sdl_gp.SDL_IsGamepad(joy_id):
+            self.gamepad = sdl_gp.SDL_OpenGamepad(joy_id)
+            if not self.gamepad:
+                logger.warning(f"Gamepad open failed for id {joy_id}: {_sdl_error()}")
+        else:
+            self.gamepad = None
+
+        # Default axis preference: gamepad LEFTX if available, else joystick axis 0
+        if self.gamepad:
+            self.preferred_axis_key = "gp_0"  # LEFTX
+        else:
+            self.preferred_axis_key = "joy_0"
+
         self.haptic = sdl_haptic.SDL_OpenHapticFromJoystick(self.joystick)
         if not self.haptic:
             logger.error(f"Haptic Open Failed: {_sdl_error()}")
@@ -160,9 +177,16 @@ class HapticController:
             sdl_haptic.SDL_CloseHaptic(self.haptic)
             self.haptic = None
             
+        if self.gamepad:
+            sdl_gp.SDL_CloseGamepad(self.gamepad)
+            self.gamepad = None
+
         if self.joystick:
             sdl_joy.SDL_CloseJoystick(self.joystick)
             self.joystick = None
+
+        self.axis_baseline.clear()
+        self.preferred_axis_key = None
 
     def play_constant(self, level: int, length: int = 5000):
         if not self.haptic: return
@@ -252,6 +276,60 @@ class HapticController:
             return False
         
         return True
+
+    def _apply_baseline(self, key: str, value: int) -> int:
+        if key not in self.axis_baseline:
+            self.axis_baseline[key] = value
+        return value - self.axis_baseline.get(key, 0)
+
+    def get_axis_value(self, axis_idx: int = 0) -> Optional[int]:
+        """Read wheel position with baseline offset removal. Defaults to preferred X axis."""
+        if not self.joystick:
+            return None
+        try:
+            try:
+                sdl_gp.SDL_UpdateGamepads()
+            except Exception:
+                pass
+            try:
+                sdl_joy.SDL_UpdateJoysticks()
+            except Exception:
+                pass
+
+            axis_map = [
+                sdl_gp.SDL_GAMEPAD_AXIS_LEFTX,
+                sdl_gp.SDL_GAMEPAD_AXIS_LEFTY,
+                sdl_gp.SDL_GAMEPAD_AXIS_RIGHTX,
+                sdl_gp.SDL_GAMEPAD_AXIS_RIGHTY,
+            ]
+
+            # Decide which axis key to use
+            key = None
+            if self.preferred_axis_key:
+                key = self.preferred_axis_key
+            elif axis_idx >= 0:
+                key = f"gp_{axis_idx}" if self.gamepad else f"joy_{axis_idx}"
+            else:
+                key = "gp_0" if self.gamepad else "joy_0"
+
+            # Read from gamepad if key matches
+            if key.startswith("gp_") and self.gamepad:
+                idx = int(key.split("_")[1])
+                if 0 <= idx < len(axis_map):
+                    raw = int(sdl_gp.SDL_GetGamepadAxis(self.gamepad, axis_map[idx]))
+                    return self._apply_baseline(key, raw)
+
+            # Fallback to joystick
+            axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
+            if axis_count <= 0:
+                return None
+            idx = int(key.split("_")[1]) if key and key.startswith("joy_") else axis_idx
+            if idx < 0 or idx >= axis_count:
+                idx = 0
+            raw = int(sdl_joy.SDL_GetJoystickAxis(self.joystick, idx))
+            return self._apply_baseline(f"joy_{idx}", raw)
+        except Exception:
+            return None
 
     def play_sine_fallback(self, duration_ms: int, magnitude: int):
         """Plays a standard simple Sine wave for devices that don't support custom buffers."""

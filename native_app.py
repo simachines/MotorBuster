@@ -2,6 +2,7 @@ import dearpygui.dearpygui as dpg
 import sys
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 import uuid
 import json
@@ -415,6 +416,13 @@ class FeditNativeApp:
         self.resize_threshold_px = 12.0
         self._console_opened = False
         self.sweep_markers = []  # [{"time": float, "phase": int}]
+        self.wheel_graph_height = 150
+        self.wheel_graph_gain = 1.0
+        self.wheel_history = deque()
+        self.wheel_history_span = 12.0
+        self.wheel_min_raw = None
+        self.wheel_max_raw = None
+        self.wheel_span_floor = 8000.0
         
         dpg.create_context()
         self.setup_ui()
@@ -890,9 +898,17 @@ class FeditNativeApp:
         except:
              return 0,0
 
-    def get_clip_at_pos(self, rel_x, rel_y):
+    def _track_index_from_rel_y(self, rel_y: float) -> int:
+        """Map canvas-relative Y into track index; ignore the wheel graph band."""
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        if rel_y < self.wheel_graph_height:
+            return -1
+        return int((rel_y - self.wheel_graph_height) // track_h)
+
+    def get_clip_at_pos(self, rel_x, rel_y):
+        track_idx = self._track_index_from_rel_y(rel_y)
+        if track_idx < 0:
+            return None
         click_time = max(0.0, rel_x / self.sequencer.zoom_x)
         
         if 0 <= track_idx < len(self.sequencer.tracks):
@@ -923,7 +939,7 @@ class FeditNativeApp:
         rx, ry = self.get_canvas_relative_pos(mpos)
         mpos = dpg.get_mouse_pos(local=False)
         rx, ry = self.get_canvas_relative_pos(mpos)
-        self.drag_target_track_idx = int(ry // 80)
+        self.drag_target_track_idx = self._track_index_from_rel_y(ry)
         
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
@@ -985,7 +1001,7 @@ class FeditNativeApp:
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        track_idx = self._track_index_from_rel_y(rel_y)
         
         resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
         
@@ -1028,7 +1044,7 @@ class FeditNativeApp:
                   new_px = rel_x - self.sequencer.drag_offset
                   new_t = max(0.0, new_px / self.sequencer.zoom_x)
                   
-                  new_track_idx = int(rel_y // track_h)
+                  new_track_idx = self._track_index_from_rel_y(rel_y)
                   
                   # Update clip
                   clip = self.sequencer.drag_clip
@@ -1194,6 +1210,66 @@ class FeditNativeApp:
         
         self._set_system_cursor_visible(not should_hide_system)
 
+        # Always sample wheel position regardless of playback state so the overlay stays populated
+        self._record_wheel_sample(self.sequencer.current_time)
+
+    def _record_wheel_sample(self, current_time: float):
+        raw = engine.get_axis_value(-1)
+        if raw is None:
+            return
+        # Track observed extremes and normalize around the midpoint of min/max instead of zero-baseline.
+        if self.wheel_min_raw is None or raw < self.wheel_min_raw:
+            self.wheel_min_raw = raw
+        if self.wheel_max_raw is None or raw > self.wheel_max_raw:
+            self.wheel_max_raw = raw
+
+        span_half = (self.wheel_max_raw - self.wheel_min_raw) / 2.0 if self.wheel_max_raw is not None and self.wheel_min_raw is not None else 0.0
+        span_half = max(self.wheel_span_floor, span_half)
+        mid = (self.wheel_max_raw + self.wheel_min_raw) / 2.0 if self.wheel_max_raw is not None and self.wheel_min_raw is not None else 0.0
+
+        norm = (raw - mid) / span_half if span_half else 0.0
+        norm = max(-1.0, min(1.0, norm))
+        self.wheel_history.append({"time": current_time, "value": norm})
+        cutoff = current_time - self.wheel_history_span
+        while self.wheel_history and self.wheel_history[0]["time"] < cutoff:
+            self.wheel_history.popleft()
+
+    def _clear_wheel_history(self):
+        self.wheel_history.clear()
+        self.wheel_min_raw = None
+        self.wheel_max_raw = None
+
+    def _draw_wheel_graph(self, total_w: float):
+        height = max(0, self.wheel_graph_height)
+        if height <= 0:
+            return
+
+        gain = max(0.1, self.wheel_graph_gain)
+
+        dpg.draw_rectangle([0, 0], [total_w, height], color=(40, 40, 50, 220), fill=(20, 20, 25, 190), parent="timeline_canvas")
+
+        points = []
+        for sample in self.wheel_history:
+            x = sample["time"] * self.sequencer.zoom_x
+            if x < 0 or x > total_w:
+                continue
+            val = max(-1.0, min(1.0, sample["value"] * gain))
+            y = (height / 2) - val * (height / 2 - 6)
+            points.append([x, y])
+
+        if len(points) >= 2:
+            dpg.draw_polyline(points, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+
+        playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
+        dpg.draw_line([playhead_x, 0], [playhead_x, height], color=(255, 60, 60), thickness=1, parent="timeline_canvas")
+
+        latest = self.wheel_history[-1] if self.wheel_history else None
+        if latest:
+            val = max(-1.0, min(1.0, latest["value"] * gain))
+            y = (height / 2) - val * (height / 2 - 6)
+            dpg.draw_circle([playhead_x, y], 4, color=(255, 150, 60), fill=(255, 150, 60), parent="timeline_canvas")
+            dpg.draw_text([4, 4], f"Wheel: {latest['value']*100:.1f}%", size=12, color=(220, 220, 255), parent="timeline_canvas")
+
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
         
@@ -1323,7 +1399,9 @@ class FeditNativeApp:
                             steps = max(1, int(math.ceil(freq_span * 10.0)))
                             interval = current_clip.duration / steps if steps > 0 else current_clip.duration
                             last_local = state.get('last_sweep_update_local')
-                            sweep_ready = (last_local is None) or (t_local - last_local >= interval)
+                            sweep_ready = ((last_local is None) and (t_local >= interval)) or (
+                                last_local is not None and (t_local - last_local >= interval)
+                            )
 
                         # Calculate current parameters for monitoring
                         progress = t_local / current_clip.duration
@@ -1460,11 +1538,16 @@ class FeditNativeApp:
                 state['clip_type'] = current_clip.type if current_clip else None
                 state['effect_start_time'] = current_clip.start_time if current_clip else None
                 state['last_sweep_update_local'] = None
-                state['last_sent_freq'] = None
-                state['last_mag'] = None
-                state['last_freq'] = None
                 if current_clip:
+                    # Seed tracking to prevent an immediate "changed" update on the next tick
+                    state['last_sent_freq'] = current_clip.frequency
+                    state['last_mag'] = current_clip.magnitude
+                    state['last_freq'] = current_clip.frequency
                     state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
+                else:
+                    state['last_sent_freq'] = None
+                    state['last_mag'] = None
+                    state['last_freq'] = None
 
 
     # --- Rendering ---
@@ -1522,17 +1605,20 @@ class FeditNativeApp:
     def render_timeline(self):
         dpg.delete_item("timeline_canvas", children_only=True, slot=2)
         
-        y_offset = 0
+        y_offset = self.wheel_graph_height
         track_height = 80
         total_w = max(3000, int(self.sequencer.zoom_x * 60)) # Dynamic width
         # Ensure canvas is large enough
-        total_h = len(self.sequencer.tracks) * track_height
+        total_h = int(self.wheel_graph_height + len(self.sequencer.tracks) * track_height)
         dpg.configure_item("timeline_canvas", width=total_w, height=total_h) 
         # Setting height ensures that if we zoom out, canvas shrinks, scrollbar disappears.
         
         # Render Grid Background
         self.render_grid(total_w, total_h)
         
+        if self.wheel_graph_height > 0:
+            self._draw_wheel_graph(total_w)
+
         for i, track in enumerate(self.sequencer.tracks):
              # Highlight if target
              is_target = (i == self.drag_target_track_idx) 
@@ -1644,7 +1730,7 @@ class FeditNativeApp:
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        track_idx = self._track_index_from_rel_y(rel_y)
         
         self.log(f"Drop [{sender}]: {effect_type} at {int(rel_x)},{int(rel_y)} -> Tk {track_idx+1}")
         
@@ -1662,7 +1748,7 @@ class FeditNativeApp:
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
         track_h = 80
-        track_idx = int(rel_y // track_h)
+        track_idx = self._track_index_from_rel_y(rel_y)
         time_s = rel_x / self.sequencer.zoom_x
         
         if mouse_btn == 1:
@@ -1814,7 +1900,7 @@ class FeditNativeApp:
             
             # Prevent Vertical Scroll Drift?
             # If content fits, ensure Y scroll is 0?
-            total_h = len(self.sequencer.tracks) * 80
+            total_h = self.wheel_graph_height + len(self.sequencer.tracks) * 80
             win_h = dpg.get_item_height("timeline_scroll")
             if total_h <= win_h:
                 dpg.set_y_scroll("timeline_scroll", 0)
@@ -1873,9 +1959,12 @@ class FeditNativeApp:
         dpg.add_file_extension(".*", parent="dlg_load")
 
         # Shortcuts
+        def ctrl_pressed() -> bool:
+            return dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+
         with dpg.handler_registry():
-            dpg.add_key_press_handler(dpg.mvKey_S, callback=lambda: dpg.show_item("dlg_save") if dpg.is_key_down(dpg.mvKey_Control) else None)
-            dpg.add_key_press_handler(dpg.mvKey_O, callback=lambda: dpg.show_item("dlg_load") if dpg.is_key_down(dpg.mvKey_Control) else None)
+            dpg.add_key_press_handler(dpg.mvKey_S, callback=lambda: dpg.show_item("dlg_save") if ctrl_pressed() else None)
+            dpg.add_key_press_handler(dpg.mvKey_O, callback=lambda: dpg.show_item("dlg_load") if ctrl_pressed() else None)
 
         with dpg.window(tag="Main"):
             # Menu Bar
@@ -1954,6 +2043,9 @@ class FeditNativeApp:
                 
                 dpg.add_spacer(width=20)
                 dpg.add_text("Freq: --", tag="monitor_freq", color=(100, 255, 100))
+
+                dpg.add_spacer(width=20)
+                dpg.add_button(label="Clear", width=70, callback=lambda: self._clear_wheel_history())
                 
                 dpg.add_spacer(width=20)
                 dpg.add_text("T:")
