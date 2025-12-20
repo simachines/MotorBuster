@@ -425,7 +425,9 @@ class FeditNativeApp:
         self.wheel_span_floor = 8000.0
         
         dpg.create_context()
+        self.load_fonts()
         self.setup_ui()
+        self.apply_theme("Dark")
         
         # Init Engine
         try:
@@ -1936,6 +1938,92 @@ class FeditNativeApp:
         except Exception as e:
             print(f"Cursor Error: {e}")
 
+
+    def load_fonts(self):
+        with dpg.font_registry():
+            # Try to load custom font if exists
+            font_path = "assets/fonts/Inter-Regular.otf"
+            font_bold_path = "assets/fonts/Inter-Bold.otf"
+            
+            # System Fallback (Segoe UI on Windows is standard and clean)
+            sys_font_path = "C:/Windows/Fonts/segoeui.ttf"
+            sys_bold_path = "C:/Windows/Fonts/segoeuib.ttf"
+            
+            used_path = None
+            used_bold = None
+            
+            if os.path.exists(font_path):
+                used_path = font_path
+                used_bold = font_bold_path if os.path.exists(font_bold_path) else None
+            elif os.path.exists(sys_font_path):
+                used_path = sys_font_path
+                used_bold = sys_bold_path if os.path.exists(sys_bold_path) else None
+                
+            if used_path:
+                try:
+                    # Main Font
+                    with dpg.font(used_path, 16) as default_font:
+                        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    dpg.bind_font(default_font)
+                    
+                    # Bold Font (if needed later)
+                    if used_bold:
+                        with dpg.font(used_bold, 16) as bold_font:
+                             dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    
+                    print(f"Loaded Font: {used_path}")
+                except Exception as e:
+                    print(f"Font Load Error: {e}")
+            else:
+                print("Using Default DPG Font")
+
+    def apply_theme(self, mode):
+        self.current_theme_mode = mode
+        # define colors
+        if mode == "Dark":
+             cols = {
+                 "grid_line": (60, 60, 60, 100),
+                 "track_bg_even": (40, 40, 45, 50),
+                 "track_bg_odd": (35, 35, 40, 50),
+                 "track_border": (60, 60, 60),
+                 "text_track": (200, 200, 200),
+                 "clip_sine": (100, 150, 255),
+                 "clip_const": (150, 255, 100),
+                 "clip_ramp": (255, 150, 100),
+                 "clip_saw": (255, 100, 100),
+                 "ruler_bg": (30, 30, 35),
+                 "ruler_border": (60, 60, 60),
+                 "ruler_line": (100, 100, 100),
+                 "ruler_tick": (150, 150, 150),
+                 "ruler_text": (200, 200, 200),
+                 "playhead": (255, 50, 50),
+                 "playhead_fill": (255, 100, 100),
+             }
+        else:
+             # Light Mode
+             cols = {
+                 "grid_line": (200, 200, 200, 100),
+                 "track_bg_even": (240, 240, 245, 200),
+                 "track_bg_odd": (230, 230, 235, 200),
+                 "track_border": (180, 180, 180),
+                 "text_track": (50, 50, 50),
+                 "clip_sine": (50, 100, 200),
+                 "clip_const": (100, 200, 50),
+                 "clip_ramp": (200, 100, 50),
+                 "clip_saw": (200, 50, 50),
+                 "ruler_bg": (220, 220, 225),
+                 "ruler_border": (180, 180, 180),
+                 "ruler_line": (150, 150, 150),
+                 "ruler_tick": (100, 100, 100),
+                 "ruler_text": (50, 50, 50),
+                 "playhead": (200, 20, 20),
+                 "playhead_fill": (255, 50, 50),
+             }
+        self.theme_colors = cols
+        
+        # Trigger redraw if needed
+        if hasattr(self, 'sequencer'):
+            self.render_timeline()
 
     def setup_ui(self):
         with dpg.theme() as global_theme:
