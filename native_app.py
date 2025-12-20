@@ -424,6 +424,7 @@ class FeditNativeApp:
         self.hide_playhead_until_next_sample = False
         self.manual_timebase_override = False
         self.manual_timebase_value = None
+        self.show_redlines = True
         self.mouse_left_button_down = False
         
         dpg.create_context()
@@ -1711,7 +1712,7 @@ class FeditNativeApp:
         px = self.sequencer.current_time * self.sequencer.zoom_x
         dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
 
-        if self.sweep_markers:
+        if self.show_redlines and self.sweep_markers:
             for m in self.sweep_markers:
                 mx = m.get("time", 0.0) * self.sequencer.zoom_x
                 phase_txt = f"{m.get('phase', 0)/100.0:.1f}°"
@@ -1993,7 +1994,14 @@ class FeditNativeApp:
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
                 with dpg.menu(label="View"):
-                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                    dpg.add_menu_item(
+                        label="Show Redlines",
+                        check=True,
+                        default_value=self.show_redlines,
+                        tag="menu_redlines",
+                        callback=self.toggle_redlines,
+                    )
                 
                 # --- Device Controls in Menu Bar ---
                 dpg.add_spacer(width=20)
@@ -2140,6 +2148,9 @@ class FeditNativeApp:
         try:
             dpg.set_item_drop_callback("Main", self.on_drop_receive)
         except Exception: pass
+
+    def toggle_redlines(self, sender, app_data, user_data=None):
+        self.show_redlines = bool(app_data)
 
     def run(self):
         # Disable VSync for Haptics
