@@ -21,7 +21,8 @@ else:
     base_path = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(os.path.join(base_path, '.dependencies'))
 from server.ffb_engine import engine, DeviceInfo
- 
+
+
 # --- Data Model ---
 @dataclass
 class Clip:
@@ -114,7 +115,8 @@ class Clip:
             fade_length=d.get("fade_length", 0),
             name=d.get("name", "Clip"),
         )
- 
+
+
 @dataclass
 class Track:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -422,34 +424,10 @@ class FeditNativeApp:
         self.hide_playhead_until_next_sample = False
         self.manual_timebase_override = False
         self.manual_timebase_value = None
-        self.show_redlines = True
         self.mouse_left_button_down = False
-        self._blocking_hover_tags = ("panel_inspector", "panel_log")
-        self._hover_configs = {
-            "panel_inspector": {
-                "default": {"bg": (22, 22, 28), "border": (58, 62, 76)},
-                "hover": {"bg": (51, 67, 92), "border": (120, 180, 255)},
-            },
-            "panel_log": {
-                "default": {"bg": (22, 22, 28), "border": (58, 62, 76)},
-                "hover": {"bg": (51, 67, 92), "border": (120, 180, 255)},
-            },
-            "timeline_scroll": {
-                "default": {"bg": (16, 16, 20), "border": (40, 44, 56)},
-                "hover": {"bg": (255, 249, 184), "border": (225, 190, 0)},
-            },
-            "Main": {
-                "default": {"bg": (18, 18, 24), "border": (48, 56, 70)},
-                "hover": {"bg": (44, 75, 135), "border": (120, 180, 255)},
-            },
-        }
-        self._mouse_status_tag = "txt_mouse_status"
-        self._mouse_status_visible = True
-       
+        
         dpg.create_context()
-        self.load_fonts()
         self.setup_ui()
-        self.apply_theme("Dark")
         
         # Init Engine
         try:
@@ -601,20 +579,20 @@ class FeditNativeApp:
 
         if width <= 0: return []
 
-        pixels = max(1, int(width))
-        max_samples = 5000
-        sample_count = min(pixels, max_samples)
+        pixels = int(width)
+        step_t = clip.duration / max(1, pixels)
 
-        duration = max(clip.duration, 1e-6)
-        step_t = duration / max(1, sample_count)
-        step_x = width / max(1, sample_count)
+        # Hard limit
+        if pixels > 5000:
+            pixels = 5000
+            step_t = clip.duration / pixels
 
         freq = max(clip.frequency, getattr(clip, 'frequency_end', clip.frequency))
         is_aliasing = False
         if freq > 0 and (1.0/freq) < step_t * 2.5:
              is_aliasing = True
 
-        for i in range(sample_count):
+        for i in range(pixels):
             t0 = i * step_t
             t1 = (i + 1) * step_t
             
@@ -638,7 +616,7 @@ class FeditNativeApp:
             y_l = y_mid - max(-1.0, min(1.0, local_min)) * amp_span
             y_h = y_mid - max(-1.0, min(1.0, local_max)) * amp_span
             
-            x = x_start + i * step_x
+            x = x_start + i
             points.append([x, y_l])
             points.append([x, y_h])
             
@@ -922,14 +900,25 @@ class FeditNativeApp:
              return 0,0
 
     def _is_mouse_in_timeline_viewport(self, global_mouse_pos):
-        timeline_hit = self._mouse_hits_timeline(global_mouse_pos)
-        blocking_hover, hovered_tags = self._highlight_and_report()
-        self._refresh_mouse_status(global_mouse_pos, timeline_hit, hovered_tags, blocking_hover)
+        rects = []
+        if dpg.does_item_exist("timeline_scroll"):
+            rects.append(self._safe_get_rect("timeline_scroll"))
+        if dpg.does_item_exist("timeline_canvas"):
+            rects.append(self._safe_get_rect("timeline_canvas"))
 
-        if not timeline_hit:
+        in_timeline = False
+        for rect_min, rect_size in rects:
+            if rect_min and rect_size:
+                max_x = rect_min[0] + rect_size[0]
+                max_y = rect_min[1] + rect_size[1]
+                if rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y:
+                    in_timeline = True
+                    break
+        if not in_timeline:
             return False
 
-        if blocking_hover:
+        # Block hits when inspector column overlaps
+        if self._is_mouse_in_item("panel_inspector", global_mouse_pos):
             return False
 
         return True
@@ -940,124 +929,19 @@ class FeditNativeApp:
         except Exception:
             return None, None
 
-    def _point_in_rect(self, pt, rect_min, rect_size):
-        if not rect_min or not rect_size:
-            return False
-        max_x = rect_min[0] + rect_size[0]
-        max_y = rect_min[1] + rect_size[1]
-        return rect_min[0] <= pt[0] <= max_x and rect_min[1] <= pt[1] <= max_y
+    def _is_mouse_in_item(self, tag, global_mouse_pos):
+        rect_min, rect_size = self._safe_get_rect(tag)
+        if rect_min and rect_size:
+            max_x = rect_min[0] + rect_size[0]
+            max_y = rect_min[1] + rect_size[1]
+            return rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y
+        return False
 
-    def _mouse_hits_timeline(self, global_mouse_pos):
-        if dpg.is_item_hovered("panel_inspector"):
-            return False
-        if self._is_any_inspector_hovered():
-            return False
-
-        # Explicitly block if the pointer is inside the inspector/log columns even when not hovering items
-        insp_min, insp_size = self._safe_get_rect("panel_inspector")
-        log_min, log_size = self._safe_get_rect("panel_log")
-        if self._point_in_rect(global_mouse_pos, insp_min, insp_size):
-            return False
-        if self._point_in_rect(global_mouse_pos, log_min, log_size):
-            return False
-
-        if not dpg.does_item_exist("timeline_scroll"):
-            return False
-
-        # Primary check: rely on DearPyGui hover for scroll or canvas
-        if dpg.is_item_hovered("timeline_scroll") or dpg.is_item_hovered("timeline_canvas"):
-            return True
-
-        # Fallback: geometry check on scroll rect
-        scroll_min, scroll_size = self._safe_get_rect("timeline_scroll")
-        return self._point_in_rect(global_mouse_pos, scroll_min, scroll_size)
-
-    def _on_global_mouse_move(self, sender, app_data):
-        global_pos = dpg.get_mouse_pos(local=False)
-        timeline_hit = self._mouse_hits_timeline(global_pos)
-        blocking_hover, hovered_tags = self._highlight_and_report()
-        self._refresh_mouse_status(global_pos, timeline_hit, hovered_tags, blocking_hover)
-
-    def _highlight_and_report(self):
-        hovered_blocking = False
-        hovered_tags = []
-        for tag, cfg in self._hover_configs.items():
-            if not dpg.does_item_exist(tag):
-                continue
-            is_hover = dpg.is_item_hovered(tag)
-            self._apply_hover_highlight(tag, cfg, is_hover)
-            if is_hover:
-                hovered_tags.append(tag)
-                if tag in self._blocking_hover_tags:
-                    hovered_blocking = True
-        inspector_hover_labels = self._get_hovered_inspector_labels()
-        if inspector_hover_labels:
-            hovered_blocking = True
-            hovered_tags.extend(inspector_hover_labels)
-        return hovered_blocking, hovered_tags
-
-    def _get_hovered_inspector_labels(self):
-        labels = []
-        for inspector in self.inspectors:
-            tag = inspector.tag_tab
-            if not dpg.does_item_exist(tag):
-                continue
-            if dpg.is_item_hovered(tag):
-                target_clip = inspector.clip or self.sequencer.selected_clip
-                if target_clip:
-                    label = target_clip.name or f"Clip {target_clip.type}"
-                else:
-                    label = "Live"
-                labels.append(f"inspector:{label}")
-        return labels
-
-    def _is_any_inspector_hovered(self):
-        return bool(self._get_hovered_inspector_labels())
-
-    def _refresh_mouse_status(self, global_mouse_pos, timeline_hit, hovered_tags, blocking_hover):
-        if not dpg.does_item_exist(self._mouse_status_tag):
-            return
-        tags = ",".join([t for t in hovered_tags if t])
-        status = f"Mouse: {int(global_mouse_pos[0])},{int(global_mouse_pos[1])} | Timeline={timeline_hit} | Blocking={blocking_hover} | Hovering={tags}"
-        try:
-            dpg.set_value(self._mouse_status_tag, status)
-        except Exception:
-            pass
-
-    def _set_mouse_status_visibility(self, visible: bool):
-        self._mouse_status_visible = visible
-        if dpg.does_item_exist(self._mouse_status_tag):
-            dpg.configure_item(self._mouse_status_tag, show=visible)
-        if dpg.does_item_exist("menu_mouse_status"):
-            dpg.set_value("menu_mouse_status", visible)
-
-    def _on_mouse_status_checkbox(self, sender, app_data):
-        self._set_mouse_status_visibility(bool(app_data))
-
-    def _apply_hover_highlight(self, tag, cfg, highlighted):
-        if not dpg.does_item_exist(tag):
-            return
-        colors = cfg.get("hover") if highlighted else cfg.get("default")
-        if not colors:
-            colors = {}
-        bg_color = colors.get("bg")
-        border_color = colors.get("border")
-        try:
-            kwargs = {}
-            if bg_color is not None:
-                kwargs["bg_color"] = bg_color
-            if border_color is not None:
-                kwargs["border_color"] = border_color
-            if kwargs:
-                dpg.configure_item(tag, **kwargs)
-        except Exception:
-            pass
-
-    def _configure_hover_defaults(self):
-        for tag in self._hover_configs.keys():
-            cfg = self._hover_configs.get(tag)
-            if cfg and dpg.does_item_exist(tag):
-                self._apply_hover_highlight(tag, cfg, False)
+    def _is_over_inspector(self):
+        for insp in self.inspectors:
+            if dpg.does_item_exist(insp.tag_tab) and dpg.is_item_hovered(insp.tag_tab):
+                return True
+        return False
 
     def _track_index_from_rel_y(self, rel_y: float) -> int:
         """Map canvas-relative Y into track index; ignore the wheel graph band."""
@@ -1107,10 +991,8 @@ class FeditNativeApp:
         # Track Target for Drop/Drag
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
-        mouse_in_timeline = self._is_mouse_in_timeline_viewport(mpos)
-        track_idx = self._track_index_from_rel_y(rel_y)
-        self.drag_target_track_idx = track_idx if mouse_in_timeline else -1
-        interactive_timeline = mouse_in_timeline or getattr(self.sequencer, 'is_scrubbing', False)
+        self.drag_target_track_idx = self._track_index_from_rel_y(rel_y)
+        over_inspector = self._is_over_inspector()
 
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
@@ -1142,7 +1024,7 @@ class FeditNativeApp:
                         self.log("Pasted Clip")
 
         # DOUBLE CLICK CHECK (Open Inspector)
-        if mouse_in_timeline and dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
+        if not over_inspector and dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
             m_pos = dpg.get_mouse_pos(local=False)
             rx, ry = self.get_canvas_relative_pos(m_pos)
             d_clip = self.get_clip_at_pos(rx, ry)
@@ -1151,27 +1033,20 @@ class FeditNativeApp:
                 self.create_floating_inspector(d_clip)
 
         # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
+        mpos = dpg.get_mouse_pos(local=False)
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         track_h = 80
+        track_idx = self._track_index_from_rel_y(rel_y)
         mouse_left_down = dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
         mouse_left_just_pressed = mouse_left_down and not self.mouse_left_button_down
         self.mouse_left_button_down = mouse_left_down
 
         resize_clip_hover, resize_edge = (None, None)
-        if interactive_timeline and not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
+        if not over_inspector and not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
             resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
 
-        if not interactive_timeline:
-            # Cancel interactions when outside the timeline while keeping the rest of the loop running.
-            if self.sequencer.drag_clip:
-                self.sequencer.drag_clip = None
-            if self.sequencer.resize_clip:
-                self.sequencer.resize_clip = None
-            if hasattr(self.sequencer, 'is_scrubbing'):
-                self.sequencer.is_scrubbing = False
-            self.sequencer.drag_time_offset = 0.0
-            self._set_system_cursor_visible(True)
-        elif mouse_left_down:
-            if mouse_left_just_pressed and resize_clip_hover:
+        if mouse_left_down:
+            if not over_inspector and mouse_left_just_pressed and resize_clip_hover:
                 clip, edge = resize_clip_hover, resize_edge
                 self.sequencer.selected_clip = clip
                 self.sequencer.resize_clip = clip
@@ -1221,7 +1096,7 @@ class FeditNativeApp:
 
                 self.update_inspector_ui()
 
-            elif interactive_timeline:
+            elif dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll") or self.sequencer.is_scrubbing:
                 hover_clip = None
                 if not self.sequencer.is_scrubbing:
                     hover_clip = self.get_clip_at_pos(rel_x, rel_y)
@@ -1403,34 +1278,17 @@ class FeditNativeApp:
             end_x = min(total_w, x + dot_width)
             dpg.draw_line([x, center_y], [end_x, center_y], color=(170, 170, 190, 120), thickness=1, parent="timeline_canvas")
 
-        segments = []
-        current_segment = []
-        prev_time = None
-        gap_threshold = 0.25  # seconds between samples considered a jump
-
+        points = []
         for sample in self.wheel_history:
-            sample_time = sample["time"]
-            x = sample_time * self.sequencer.zoom_x
+            x = sample["time"] * self.sequencer.zoom_x
             if x < 0 or x > total_w:
                 continue
             val = max(-1.0, min(1.0, sample["value"] * gain))
             y = (height / 2) - val * (height / 2 - 6)
+            points.append([x, y])
 
-            if prev_time is not None:
-                dt = sample_time - prev_time
-                if dt < 0 or dt > gap_threshold:
-                    if len(current_segment) >= 2:
-                        segments.append(current_segment)
-                    current_segment = []
-
-            current_segment.append([x, y])
-            prev_time = sample_time
-
-        if len(current_segment) >= 2:
-            segments.append(current_segment)
-
-        for segment in segments:
-            dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+        if len(points) >= 2:
+            dpg.draw_polyline(points, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
 
         if self._should_show_wheel_playhead():
             playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
@@ -1859,7 +1717,7 @@ class FeditNativeApp:
         px = self.sequencer.current_time * self.sequencer.zoom_x
         dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
 
-        if self.show_redlines and self.sweep_markers:
+        if self.sweep_markers:
             for m in self.sweep_markers:
                 mx = m.get("time", 0.0) * self.sequencer.zoom_x
                 phase_txt = f"{m.get('phase', 0)/100.0:.1f}°"
@@ -1938,6 +1796,8 @@ class FeditNativeApp:
         mouse_btn = app_data[0] # [0]=button, [1]=tag
         mpos = dpg.get_mouse_pos(local=False)
         if not self._is_mouse_in_timeline_viewport(mpos):
+            return
+        if self._is_over_inspector():
             return
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
@@ -2103,92 +1963,6 @@ class FeditNativeApp:
             print(f"Cursor Error: {e}")
 
 
-    def load_fonts(self):
-        with dpg.font_registry():
-            # Try to load custom font if exists
-            font_path = "assets/fonts/Inter-Regular.otf"
-            font_bold_path = "assets/fonts/Inter-Bold.otf"
-            
-            # System Fallback (Segoe UI on Windows is standard and clean)
-            sys_font_path = "C:/Windows/Fonts/segoeui.ttf"
-            sys_bold_path = "C:/Windows/Fonts/segoeuib.ttf"
-            
-            used_path = None
-            used_bold = None
-            
-            if os.path.exists(font_path):
-                used_path = font_path
-                used_bold = font_bold_path if os.path.exists(font_bold_path) else None
-            elif os.path.exists(sys_font_path):
-                used_path = sys_font_path
-                used_bold = sys_bold_path if os.path.exists(sys_bold_path) else None
-                
-            if used_path:
-                try:
-                    # Main Font
-                    with dpg.font(used_path, 16) as default_font:
-                        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-                    dpg.bind_font(default_font)
-                    
-                    # Bold Font (if needed later)
-                    if used_bold:
-                        with dpg.font(used_bold, 16) as bold_font:
-                             dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-                    
-                    print(f"Loaded Font: {used_path}")
-                except Exception as e:
-                    print(f"Font Load Error: {e}")
-            else:
-                print("Using Default DPG Font")
-
-    def apply_theme(self, mode):
-        self.current_theme_mode = mode
-        # define colors
-        if mode == "Dark":
-             cols = {
-                 "grid_line": (60, 60, 60, 100),
-                 "track_bg_even": (40, 40, 45, 50),
-                 "track_bg_odd": (35, 35, 40, 50),
-                 "track_border": (60, 60, 60),
-                 "text_track": (200, 200, 200),
-                 "clip_sine": (100, 150, 255),
-                 "clip_const": (150, 255, 100),
-                 "clip_ramp": (255, 150, 100),
-                 "clip_saw": (255, 100, 100),
-                 "ruler_bg": (30, 30, 35),
-                 "ruler_border": (60, 60, 60),
-                 "ruler_line": (100, 100, 100),
-                 "ruler_tick": (150, 150, 150),
-                 "ruler_text": (200, 200, 200),
-                 "playhead": (255, 50, 50),
-                 "playhead_fill": (255, 100, 100),
-             }
-        else:
-             # Light Mode
-             cols = {
-                 "grid_line": (200, 200, 200, 100),
-                 "track_bg_even": (240, 240, 245, 200),
-                 "track_bg_odd": (230, 230, 235, 200),
-                 "track_border": (180, 180, 180),
-                 "text_track": (50, 50, 50),
-                 "clip_sine": (50, 100, 200),
-                 "clip_const": (100, 200, 50),
-                 "clip_ramp": (200, 100, 50),
-                 "clip_saw": (200, 50, 50),
-                 "ruler_bg": (220, 220, 225),
-                 "ruler_border": (180, 180, 180),
-                 "ruler_line": (150, 150, 150),
-                 "ruler_tick": (100, 100, 100),
-                 "ruler_text": (50, 50, 50),
-                 "playhead": (200, 20, 20),
-                 "playhead_fill": (255, 50, 50),
-             }
-        self.theme_colors = cols
-        
-        # Trigger redraw if needed
-        if hasattr(self, 'sequencer'):
-            self.render_timeline()
-
     def setup_ui(self):
         with dpg.theme() as global_theme:
             with dpg.theme_component(dpg.mvAll):
@@ -2227,21 +2001,8 @@ class FeditNativeApp:
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
                 with dpg.menu(label="View"):
-                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
-                    dpg.add_menu_item(
-                        label="Show Redlines",
-                        check=True,
-                        default_value=self.show_redlines,
-                        tag="menu_redlines",
-                        callback=self.toggle_redlines,
-                    )
-                    dpg.add_menu_item(
-                        label="Mouse Status",
-                        tag="menu_mouse_status",
-                        check=True,
-                        default_value=True,
-                        callback=self._on_mouse_status_checkbox,
-                    )
+                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                
                 # --- Device Controls in Menu Bar ---
                 dpg.add_spacer(width=20)
                 dpg.add_combo(tag="device_combo", width=200)
@@ -2283,7 +2044,6 @@ class FeditNativeApp:
             # Global Handlers
             with dpg.handler_registry():
                 dpg.add_mouse_wheel_handler(callback=self.on_mouse_wheel)
-                dpg.add_mouse_move_handler(callback=self._on_global_mouse_move)
                 # dpg.add_key_press_handler(dpg.mvKey_Delete, callback=self.on_key_press)
                 # dpg.add_key_press_handler(dpg.mvKey_Back, callback=self.on_key_press)
 
@@ -2351,22 +2111,21 @@ class FeditNativeApp:
 
                 # Col 2: Timeline
                 with dpg.group(tag="timeline_group"):
-                    # Scroll Window
-                    with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True, no_scroll_with_mouse=True):
-                        with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
-                            pass
+                     # Scroll Window
+                     with dpg.child_window(tag="timeline_scroll", horizontal_scrollbar=True, no_scroll_with_mouse=True):
+                             with dpg.drawlist(width=3000, height=1000, tag="timeline_canvas"):
+                                pass
 
-                    dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
-                    dpg.add_text("", tag=self._mouse_status_tag, parent="timeline_scroll", color=(200, 210, 255))
-
-                    with dpg.item_handler_registry(tag="timeline_click_handler"):
-                        dpg.add_item_clicked_handler(callback=self.canvas_click)
-
-                    dpg.bind_item_handler_registry("timeline_canvas", "timeline_click_handler")
-
-                    try:
-                        dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
-                    except Exception as e: print(f"Init Warning: {e}")
+                     dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
+                     
+                     with dpg.item_handler_registry(tag="timeline_click_handler"):
+                             dpg.add_item_clicked_handler(callback=self.canvas_click)
+                         
+                     dpg.bind_item_handler_registry("timeline_canvas", "timeline_click_handler")
+                         
+                     try:
+                         dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
+                     except Exception as e: print(f"Init Warning: {e}")
 
                 # Col 3: Inspector (Top) & Log (Bottom)
                 with dpg.group():
@@ -2376,14 +2135,11 @@ class FeditNativeApp:
                         # This keeps the look consistent and clean
                         with dpg.tab_bar(tag="inspector_tab_bar"):
                             pass
-            
+                    
                     # Log Section (Bottom Half)
                     with dpg.child_window(tag="panel_log", height=-1):
                         dpg.add_text("System Log")
                         dpg.add_listbox(tag="log_list", num_items=30, width=-1)
-
-                self._configure_hover_defaults()
-                self._set_mouse_status_visibility(self._mouse_status_visible)
 
         # Initialize Live Inspector (Docked in inspector_tab_bar)
         self.create_floating_inspector(None, parent="inspector_tab_bar")
@@ -2392,9 +2148,6 @@ class FeditNativeApp:
         try:
             dpg.set_item_drop_callback("Main", self.on_drop_receive)
         except Exception: pass
-
-    def toggle_redlines(self, sender, app_data, user_data=None):
-        self.show_redlines = bool(app_data)
 
     def run(self):
         # Disable VSync for Haptics
