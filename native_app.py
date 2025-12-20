@@ -578,12 +578,14 @@ class FeditNativeApp:
         clip_scale = clip.magnitude / mag_max
 
         if width <= 0: return []
-        
+
         pixels = int(width)
         step_t = clip.duration / max(1, pixels)
-        
+
         # Hard limit
-        if pixels > 5000: pixels = 5000; step_t = clip.duration / pixels
+        if pixels > 5000:
+            pixels = 5000
+            step_t = clip.duration / pixels
 
         freq = max(clip.frequency, getattr(clip, 'frequency_end', clip.frequency))
         is_aliasing = False
@@ -598,12 +600,9 @@ class FeditNativeApp:
             local_max = 0.0
 
             if is_aliasing:
-                # Aliasing: Draw full height relative to magnitude
                 local_min = -1.0 * clip_scale
                 local_max = 1.0 * clip_scale
             else:
-                # Sub-pixel sampling: Check 10 points to catch peaks accurately
-                # This prevents "pre-aliasing" noise where we miss the sine peak indtermittently
                 local_min = 1.0 # Init inverted
                 local_max = -1.0
                 
@@ -900,6 +899,50 @@ class FeditNativeApp:
         except:
              return 0,0
 
+    def _is_mouse_in_timeline_viewport(self, global_mouse_pos):
+        rects = []
+        if dpg.does_item_exist("timeline_scroll"):
+            rects.append(self._safe_get_rect("timeline_scroll"))
+        if dpg.does_item_exist("timeline_canvas"):
+            rects.append(self._safe_get_rect("timeline_canvas"))
+
+        in_timeline = False
+        for rect_min, rect_size in rects:
+            if rect_min and rect_size:
+                max_x = rect_min[0] + rect_size[0]
+                max_y = rect_min[1] + rect_size[1]
+                if rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y:
+                    in_timeline = True
+                    break
+        if not in_timeline:
+            return False
+
+        # Block hits when inspector column overlaps
+        if self._is_mouse_in_item("panel_inspector", global_mouse_pos):
+            return False
+
+        return True
+
+    def _safe_get_rect(self, tag):
+        try:
+            return dpg.get_item_rect_min(tag), dpg.get_item_rect_size(tag)
+        except Exception:
+            return None, None
+
+    def _is_mouse_in_item(self, tag, global_mouse_pos):
+        rect_min, rect_size = self._safe_get_rect(tag)
+        if rect_min and rect_size:
+            max_x = rect_min[0] + rect_size[0]
+            max_y = rect_min[1] + rect_size[1]
+            return rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y
+        return False
+
+    def _is_over_inspector(self):
+        for insp in self.inspectors:
+            if dpg.does_item_exist(insp.tag_tab) and dpg.is_item_hovered(insp.tag_tab):
+                return True
+        return False
+
     def _track_index_from_rel_y(self, rel_y: float) -> int:
         """Map canvas-relative Y into track index; ignore the wheel graph band."""
         track_h = 80
@@ -949,6 +992,7 @@ class FeditNativeApp:
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         self.drag_target_track_idx = self._track_index_from_rel_y(rel_y)
+        over_inspector = self._is_over_inspector()
 
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
@@ -980,7 +1024,7 @@ class FeditNativeApp:
                         self.log("Pasted Clip")
 
         # DOUBLE CLICK CHECK (Open Inspector)
-        if dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
+        if not over_inspector and dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
             m_pos = dpg.get_mouse_pos(local=False)
             rx, ry = self.get_canvas_relative_pos(m_pos)
             d_clip = self.get_clip_at_pos(rx, ry)
@@ -998,11 +1042,11 @@ class FeditNativeApp:
         self.mouse_left_button_down = mouse_left_down
 
         resize_clip_hover, resize_edge = (None, None)
-        if not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
+        if not over_inspector and not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
             resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
 
         if mouse_left_down:
-            if mouse_left_just_pressed and resize_clip_hover:
+            if not over_inspector and mouse_left_just_pressed and resize_clip_hover:
                 clip, edge = resize_clip_hover, resize_edge
                 self.sequencer.selected_clip = clip
                 self.sequencer.resize_clip = clip
@@ -1259,13 +1303,7 @@ class FeditNativeApp:
 
 
     def _should_show_wheel_playhead(self) -> bool:
-        if self.hide_playhead_until_next_sample:
-            return False
-        if getattr(self.sequencer, 'drag_clip', None) or getattr(self.sequencer, 'resize_clip', None):
-            return False
-        if getattr(self.sequencer, 'is_scrubbing', False):
-            return False
-        return True
+        return not self.hide_playhead_until_next_sample
 
 
     def _throttle_when_idle(self):
@@ -1560,7 +1598,8 @@ class FeditNativeApp:
         """Draws vertical grid lines and time labels based on current zoom."""
         target_px = 100.0
         ideal_dt = target_px / max(0.1, self.sequencer.zoom_x)
-        grid_time = self._nice_grid_interval(ideal_dt)
+        auto_grid_time = self._nice_grid_interval(ideal_dt)
+        grid_time = self.manual_timebase_value if (self.manual_timebase_override and self.manual_timebase_value) else auto_grid_time
 
         if dpg.does_item_exist("input_timebase"):
              if not self.manual_timebase_override and not dpg.is_item_active("input_timebase"):
@@ -1569,22 +1608,45 @@ class FeditNativeApp:
              elif not self.manual_timebase_override:
                  self.manual_timebase_value = grid_time
 
-        t = 0.0
+        scroll_x = 0
+        scroll_w = total_w
+        pad_px = 200
+        if dpg.does_item_exist("timeline_scroll"):
+            try:
+                scroll_x = dpg.get_x_scroll("timeline_scroll")
+            except:
+                scroll_x = 0
+            rect = dpg.get_item_rect_size("timeline_scroll")
+            if rect:
+                scroll_w = rect[0]
+
+        start_px = max(0, scroll_x - pad_px)
+        end_px = min(total_w, scroll_x + scroll_w + pad_px)
+        t = math.floor((start_px / self.sequencer.zoom_x) / grid_time) * grid_time if grid_time > 0 else 0.0
+        lines_drawn = 0
+        max_lines = 600
         while True:
             x = t * self.sequencer.zoom_x
-            if x > total_w:
+            if x > end_px or lines_drawn >= max_lines:
                 break
-
-            color = (60, 60, 60, 100)
-            thickness = 1
-
-            dpg.draw_line([x, 0], [x, total_h], color=color, thickness=thickness, parent="timeline_canvas")
-
+            if x >= start_px:
+                color = (60, 60, 60, 100)
+                thickness = 1
+                dpg.draw_line([x, 0], [x, total_h], color=color, thickness=thickness, parent="timeline_canvas")
+                lines_drawn += 1
             t += grid_time
 
     def _nice_grid_interval(self, ideal_dt: float) -> float:
         if ideal_dt <= 0:
             return 0.01
+        fine_threshold = 0.08
+        fine_steps = (0.01, 0.02, 0.05)
+        if ideal_dt <= fine_threshold:
+            for step in reversed(fine_steps):
+                if ideal_dt >= step:
+                    return step
+            return fine_steps[0]
+
         power = math.floor(math.log10(ideal_dt))
         base = 10 ** power
         frac = ideal_dt / base
@@ -1733,6 +1795,10 @@ class FeditNativeApp:
     def canvas_click(self, sender, app_data):
         mouse_btn = app_data[0] # [0]=button, [1]=tag
         mpos = dpg.get_mouse_pos(local=False)
+        if not self._is_mouse_in_timeline_viewport(mpos):
+            return
+        if self._is_over_inspector():
+            return
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
         track_h = 80
@@ -1846,47 +1912,15 @@ class FeditNativeApp:
         if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
             self.manual_timebase_override = False
             self.manual_timebase_value = None
-            # Get Mouse Time
-            mouse_x_screen = dpg.get_mouse_pos(local=False)[0]
-            # Offset from scroll window
-            try:
-                win_pos = dpg.get_item_pos("timeline_scroll") 
-                # Note: get_item_pos returns [x,y]. Mouse is global.
-                # Scoll offset x
-                scroll_x = dpg.get_x_scroll("timeline_scroll")
-                
-                # Mouse X relative to content 0
-                # mouse_in_content = (mouse_x - win_x) + scroll_x
-                # Simplified: timeline_canvas starts at 0,0 of child window content.
-                # Warning: win_pos might be unstable or title bar offset.
-                # Let's use get_item_rect_min of the scroll window
-                r_min = dpg.get_item_rect_min("timeline_scroll")
-                mouse_rel_x = mouse_x_screen - r_min[0] + scroll_x
-            except:
-                mouse_rel_x = 0
-            
-            # Calculate Time
-            t_mouse = max(0.0, mouse_rel_x / self.sequencer.zoom_x)
-            
             # Zoom
             scale_factor = 1.15
             if app_data > 0:
                 self.sequencer.zoom_x *= scale_factor
             elif app_data < 0:
                 self.sequencer.zoom_x /= scale_factor
-            
+
             # Clamp settings
             self.sequencer.zoom_x = max(10.0, min(50000.0, self.sequencer.zoom_x))
-            
-            # Restore Scroll to keep t_mouse at mouse_rel_x location on screen
-            # new_mouse_rel_x (in pixels) = t_mouse * new_zoom
-            # new_scroll_x = new_mouse_rel_x - (mouse_x_screen - r_min[0])
-            try:
-                new_pixel_x = t_mouse * self.sequencer.zoom_x
-                screen_offset = mouse_x_screen - r_min[0]
-                new_scroll_x = max(0.0, new_pixel_x - screen_offset)
-                dpg.set_x_scroll("timeline_scroll", new_scroll_x)
-            except: pass
             
             # Prevent Vertical Scroll Drift?
             # If content fits, ensure Y scroll is 0?
