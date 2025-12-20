@@ -906,20 +906,12 @@ class FeditNativeApp:
         if dpg.does_item_exist("timeline_canvas"):
             rects.append(self._safe_get_rect("timeline_canvas"))
 
-        in_timeline = False
         for rect_min, rect_size in rects:
             if rect_min and rect_size:
                 max_x = rect_min[0] + rect_size[0]
                 max_y = rect_min[1] + rect_size[1]
                 if rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y:
-                    in_timeline = True
-                    break
-        if not in_timeline:
-            return False
-
-        # Block hits when inspector column overlaps
-        if self._is_mouse_in_item("panel_inspector", global_mouse_pos):
-            return False
+                    return True
 
         return True
 
@@ -928,20 +920,6 @@ class FeditNativeApp:
             return dpg.get_item_rect_min(tag), dpg.get_item_rect_size(tag)
         except Exception:
             return None, None
-
-    def _is_mouse_in_item(self, tag, global_mouse_pos):
-        rect_min, rect_size = self._safe_get_rect(tag)
-        if rect_min and rect_size:
-            max_x = rect_min[0] + rect_size[0]
-            max_y = rect_min[1] + rect_size[1]
-            return rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y
-        return False
-
-    def _is_over_inspector(self):
-        for insp in self.inspectors:
-            if dpg.does_item_exist(insp.tag_tab) and dpg.is_item_hovered(insp.tag_tab):
-                return True
-        return False
 
     def _track_index_from_rel_y(self, rel_y: float) -> int:
         """Map canvas-relative Y into track index; ignore the wheel graph band."""
@@ -992,7 +970,6 @@ class FeditNativeApp:
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         self.drag_target_track_idx = self._track_index_from_rel_y(rel_y)
-        over_inspector = self._is_over_inspector()
 
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
@@ -1024,7 +1001,7 @@ class FeditNativeApp:
                         self.log("Pasted Clip")
 
         # DOUBLE CLICK CHECK (Open Inspector)
-        if not over_inspector and dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
+        if dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
             m_pos = dpg.get_mouse_pos(local=False)
             rx, ry = self.get_canvas_relative_pos(m_pos)
             d_clip = self.get_clip_at_pos(rx, ry)
@@ -1042,11 +1019,11 @@ class FeditNativeApp:
         self.mouse_left_button_down = mouse_left_down
 
         resize_clip_hover, resize_edge = (None, None)
-        if not over_inspector and not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
+        if not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
             resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
 
         if mouse_left_down:
-            if not over_inspector and mouse_left_just_pressed and resize_clip_hover:
+            if mouse_left_just_pressed and resize_clip_hover:
                 clip, edge = resize_clip_hover, resize_edge
                 self.sequencer.selected_clip = clip
                 self.sequencer.resize_clip = clip
@@ -1278,17 +1255,34 @@ class FeditNativeApp:
             end_x = min(total_w, x + dot_width)
             dpg.draw_line([x, center_y], [end_x, center_y], color=(170, 170, 190, 120), thickness=1, parent="timeline_canvas")
 
-        points = []
+        segments = []
+        current_segment = []
+        prev_time = None
+        gap_threshold = 0.25  # seconds between samples considered a jump
+
         for sample in self.wheel_history:
-            x = sample["time"] * self.sequencer.zoom_x
+            sample_time = sample["time"]
+            x = sample_time * self.sequencer.zoom_x
             if x < 0 or x > total_w:
                 continue
             val = max(-1.0, min(1.0, sample["value"] * gain))
             y = (height / 2) - val * (height / 2 - 6)
-            points.append([x, y])
 
-        if len(points) >= 2:
-            dpg.draw_polyline(points, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+            if prev_time is not None:
+                dt = sample_time - prev_time
+                if dt < 0 or dt > gap_threshold:
+                    if len(current_segment) >= 2:
+                        segments.append(current_segment)
+                    current_segment = []
+
+            current_segment.append([x, y])
+            prev_time = sample_time
+
+        if len(current_segment) >= 2:
+            segments.append(current_segment)
+
+        for segment in segments:
+            dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
 
         if self._should_show_wheel_playhead():
             playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
@@ -1796,8 +1790,6 @@ class FeditNativeApp:
         mouse_btn = app_data[0] # [0]=button, [1]=tag
         mpos = dpg.get_mouse_pos(local=False)
         if not self._is_mouse_in_timeline_viewport(mpos):
-            return
-        if self._is_over_inspector():
             return
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
