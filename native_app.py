@@ -415,6 +415,7 @@ class FeditNativeApp:
         self._console_opened = False
         self.sweep_markers = []  # [{"time": float, "phase": int}]
         self.wheel_graph_height = 150
+        self._wheel_graph_visible = True
         self.wheel_graph_gain = 1.0
         self.wheel_history = deque()
         self.wheel_history_limit = None
@@ -424,6 +425,12 @@ class FeditNativeApp:
         self.manual_timebase_value = None
         self.show_redlines = True
         self.mouse_left_button_down = False
+        self.highlighted_clip_ids = set()
+        self.multi_selected_clips = []
+        self.multi_select_box_active = False
+        self.multi_select_box_start = None
+        self.multi_select_box_end = None
+        self._highlight_drag_last_clip_id = None
         self._blocking_hover_tags = ("panel_inspector", "panel_log")
         self._hover_configs = {
             "panel_inspector": {
@@ -697,6 +704,7 @@ class FeditNativeApp:
             with open(path, "r") as f:
                 data = json.load(f)
             self.sequencer.load_from_dict(data)
+            self.highlighted_clip_ids.clear()
             self.log(f"Loaded: {os.path.basename(path)}")
         except Exception as e:
             self.log(f"Load Failed: {e}")
@@ -1034,6 +1042,13 @@ class FeditNativeApp:
     def _on_mouse_status_checkbox(self, sender, app_data):
         self._set_mouse_status_visibility(bool(app_data))
 
+    def _on_wheel_graph_checkbox(self, sender, app_data):
+        self._wheel_graph_visible = bool(app_data)
+        if dpg.does_item_exist("menu_wheel_graph"):
+            dpg.set_value("menu_wheel_graph", self._wheel_graph_visible)
+        if hasattr(self, 'sequencer'):
+            self.render_timeline()
+
     def _apply_hover_highlight(self, tag, cfg, highlighted):
         if not dpg.does_item_exist(tag):
             return
@@ -1062,9 +1077,13 @@ class FeditNativeApp:
     def _track_index_from_rel_y(self, rel_y: float) -> int:
         """Map canvas-relative Y into track index; ignore the wheel graph band."""
         track_h = 80
-        if rel_y < self.wheel_graph_height:
+        height_offset = self._active_wheel_graph_height()
+        if rel_y < height_offset:
             return -1
-        return int((rel_y - self.wheel_graph_height) // track_h)
+        return int((rel_y - height_offset) // track_h)
+
+    def _active_wheel_graph_height(self) -> float:
+        return self.wheel_graph_height if self._wheel_graph_visible else 0
 
     def get_clip_at_pos(self, rel_x, rel_y):
         track_idx = self._track_index_from_rel_y(rel_y)
@@ -1103,6 +1122,56 @@ class FeditNativeApp:
                  return best_clip, best_edge
         return None, None
 
+    def _get_clips_in_rect(self, rect_min, rect_max):
+        if rect_min is None or rect_max is None:
+            return []
+        x_min, y_min = rect_min
+        x_max, y_max = rect_max
+        selected = []
+        track_height = 80
+        height_offset = self._active_wheel_graph_height()
+        for idx, track in enumerate(self.sequencer.tracks):
+            clip_top = height_offset + idx * track_height + 20
+            clip_bottom = height_offset + (idx + 1) * track_height - 5
+            if clip_bottom < y_min or clip_top > y_max:
+                continue
+            for clip in track.clips:
+                clip_start_px = clip.start_time * self.sequencer.zoom_x
+                clip_end_px = clip_start_px + clip.duration * self.sequencer.zoom_x
+                if clip_end_px < x_min or clip_start_px > x_max:
+                    continue
+                selected.append(clip)
+        return selected
+
+    def _update_multi_selection_rect(self):
+        if not self.multi_select_box_start or not self.multi_select_box_end:
+            return
+        x0, y0 = self.multi_select_box_start
+        x1, y1 = self.multi_select_box_end
+        rect_min = (min(x0, x1), min(y0, y1))
+        rect_max = (max(x0, x1), max(y0, y1))
+        self.multi_selected_clips = self._get_clips_in_rect(rect_min, rect_max)
+
+    def _is_ctrl_down(self) -> bool:
+        return dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+
+    def _toggle_clip_highlight(self, clip: Clip):
+        clip_id = clip.id
+        clip_label = clip.name or clip.type
+        if clip_id in self.highlighted_clip_ids:
+            self.highlighted_clip_ids.remove(clip_id)
+            self.log(f"Unhighlighted {clip_label}")
+        else:
+            self.highlighted_clip_ids.add(clip_id)
+            self.log(f"Highlighted {clip_label}")
+
+    def _set_clip_highlight(self, clip: Clip):
+        clip_id = clip.id
+        if clip_id not in self.highlighted_clip_ids or len(self.highlighted_clip_ids) > 1:
+            self.highlighted_clip_ids.clear()
+            self.highlighted_clip_ids.add(clip_id)
+            self.log(f"Highlighted {clip.name or clip.type}")
+
     def update_loop(self):
         # Track Target for Drop/Drag
         mpos = dpg.get_mouse_pos(local=False)
@@ -1111,11 +1180,13 @@ class FeditNativeApp:
         track_idx = self._track_index_from_rel_y(rel_y)
         self.drag_target_track_idx = track_idx if mouse_in_timeline else -1
         interactive_timeline = mouse_in_timeline or getattr(self.sequencer, 'is_scrubbing', False)
+        ctrl_down = self._is_ctrl_down()
 
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
             if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_focused("timeline_scroll"):
-                self.delete_selected_clip()
+                if not self.delete_multi_selected_clips():
+                    self.delete_selected_clip()
 
         if dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl):
             if dpg.is_key_pressed(dpg.mvKey_C):
@@ -1155,6 +1226,9 @@ class FeditNativeApp:
         mouse_left_down = dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
         mouse_left_just_pressed = mouse_left_down and not self.mouse_left_button_down
         self.mouse_left_button_down = mouse_left_down
+        if mouse_left_just_pressed and not ctrl_down:
+            self.highlighted_clip_ids.clear()
+            self.multi_selected_clips = []
 
         resize_clip_hover, resize_edge = (None, None)
         if interactive_timeline and not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
@@ -1169,101 +1243,126 @@ class FeditNativeApp:
             if hasattr(self.sequencer, 'is_scrubbing'):
                 self.sequencer.is_scrubbing = False
             self.sequencer.drag_time_offset = 0.0
+            self._highlight_drag_last_clip_id = None
             self._set_system_cursor_visible(True)
+            if self.multi_select_box_active:
+                self.multi_select_box_active = False
+                self.multi_select_box_start = None
+                self.multi_select_box_end = None
         elif mouse_left_down:
-            if mouse_left_just_pressed and resize_clip_hover:
-                clip, edge = resize_clip_hover, resize_edge
-                self.sequencer.selected_clip = clip
-                self.sequencer.resize_clip = clip
-                self.sequencer.resize_edge = edge
-                self.sequencer.resize_initial_dur = clip.duration
-                self.sequencer.resize_initial_time = clip.start_time
-                self.update_inspector_ui()
-                return
+            if mouse_left_just_pressed and ctrl_down and mouse_in_timeline:
+                self.multi_select_box_active = True
+                self.multi_select_box_start = (rel_x, rel_y)
+                self.multi_select_box_end = (rel_x, rel_y)
+                self.multi_selected_clips = []
+            if self.multi_select_box_active:
+                self.multi_select_box_end = (rel_x, rel_y)
+                self._update_multi_selection_rect()
+            else:
+                if mouse_left_just_pressed and resize_clip_hover:
+                    clip, edge = resize_clip_hover, resize_edge
+                    self.sequencer.selected_clip = clip
+                    self.sequencer.resize_clip = clip
+                    self.sequencer.resize_edge = edge
+                    self.sequencer.resize_initial_dur = clip.duration
+                    self.sequencer.resize_initial_time = clip.start_time
+                    self.update_inspector_ui()
+                    return
 
-            if self.sequencer.resize_clip:
-                clip = self.sequencer.resize_clip
-                track = self.sequencer.tracks[clip.track_index]
-                cur_mouse_t = rel_x / self.sequencer.zoom_x
+                if self.sequencer.resize_clip:
+                    clip = self.sequencer.resize_clip
+                    track = self.sequencer.tracks[clip.track_index]
+                    cur_mouse_t = rel_x / self.sequencer.zoom_x
 
-                if self.sequencer.resize_edge == "right":
-                    desired_dur = max(0.1, cur_mouse_t - clip.start_time)
-                    clip.duration = self._limit_right_resize(track, clip, desired_dur)
-                elif self.sequencer.resize_edge == "left":
-                    old_end = self.sequencer.resize_initial_time + self.sequencer.resize_initial_dur
-                    desired_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
-                    new_start = self._limit_left_resize(track, clip, desired_start, old_end)
-                    clip.start_time = new_start
-                    clip.duration = old_end - new_start
+                    if self.sequencer.resize_edge == "right":
+                        desired_dur = max(0.1, cur_mouse_t - clip.start_time)
+                        clip.duration = self._limit_right_resize(track, clip, desired_dur)
+                    elif self.sequencer.resize_edge == "left":
+                        old_end = self.sequencer.resize_initial_time + self.sequencer.resize_initial_dur
+                        desired_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
+                        new_start = self._limit_left_resize(track, clip, desired_start, old_end)
+                        clip.start_time = new_start
+                        clip.duration = old_end - new_start
 
-                self.update_inspector_ui()
+                    self.update_inspector_ui()
 
-            elif self.sequencer.drag_clip:
-                pointer_time = rel_x / max(1.0, self.sequencer.zoom_x)
-                new_t = max(0.0, pointer_time + self.sequencer.drag_time_offset)
+                elif self.sequencer.drag_clip:
+                    pointer_time = rel_x / max(1.0, self.sequencer.zoom_x)
+                    new_t = max(0.0, pointer_time + self.sequencer.drag_time_offset)
 
-                new_track_idx = self._track_index_from_rel_y(rel_y)
+                    new_track_idx = self._track_index_from_rel_y(rel_y)
 
-                clip = self.sequencer.drag_clip
-                clip.start_time = new_t
+                    clip = self.sequencer.drag_clip
+                    clip.start_time = new_t
 
-                if 0 <= new_track_idx < len(self.sequencer.tracks):
-                    if clip.track_index != new_track_idx:
-                        old_track = self.sequencer.tracks[clip.track_index]
-                        if clip in old_track.clips:
-                            old_track.clips.remove(clip)
-                        clip.track_index = new_track_idx
-                        self.sequencer.tracks[new_track_idx].clips.append(clip)
+                    if 0 <= new_track_idx < len(self.sequencer.tracks):
+                        if clip.track_index != new_track_idx:
+                            old_track = self.sequencer.tracks[clip.track_index]
+                            if clip in old_track.clips:
+                                old_track.clips.remove(clip)
+                            clip.track_index = new_track_idx
+                            self.sequencer.tracks[new_track_idx].clips.append(clip)
 
-                    active_track = self.sequencer.tracks[clip.track_index]
-                    snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
-                    clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
+                        active_track = self.sequencer.tracks[clip.track_index]
+                        snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
+                        clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
 
-                self.update_inspector_ui()
+                    self.update_inspector_ui()
 
-            elif interactive_timeline:
-                hover_clip = None
-                if not self.sequencer.is_scrubbing:
-                    hover_clip = self.get_clip_at_pos(rel_x, rel_y)
+                elif interactive_timeline:
+                    hover_clip = None
+                    if not self.sequencer.is_scrubbing:
+                        hover_clip = self.get_clip_at_pos(rel_x, rel_y)
 
-                if mouse_left_just_pressed:
-                    if hover_clip and not self.sequencer.is_scrubbing:
-                        self.sequencer.selected_clip = hover_clip
-                        self.update_inspector_ui()
+                    if mouse_left_just_pressed:
+                        if hover_clip and not self.sequencer.is_scrubbing:
+                            if ctrl_down:
+                                self._highlight_drag_last_clip_id = hover_clip.id
+                                self._toggle_clip_highlight(hover_clip)
+                            else:
+                                self._set_clip_highlight(hover_clip)
+                                self.sequencer.selected_clip = hover_clip
+                                self.update_inspector_ui()
 
-                        clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
-                        clip_px_end = (hover_clip.start_time + hover_clip.duration) * self.sequencer.zoom_x
-                        edge_threshold = self.resize_threshold_px
+                                clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
+                                clip_px_end = (hover_clip.start_time + hover_clip.duration) * self.sequencer.zoom_x
+                                edge_threshold = self.resize_threshold_px
 
-                        if abs(rel_x - clip_px_start) < edge_threshold:
-                            self.sequencer.resize_clip = hover_clip
-                            self.sequencer.resize_edge = "left"
-                            self.sequencer.resize_initial_dur = hover_clip.duration
-                            self.sequencer.resize_initial_time = hover_clip.start_time
-                        elif abs(rel_x - clip_px_end) < edge_threshold:
-                            self.sequencer.resize_clip = hover_clip
-                            self.sequencer.resize_edge = "right"
-                            self.sequencer.resize_initial_dur = hover_clip.duration
-                            self.sequencer.resize_initial_time = hover_clip.start_time
-                        else:
-                            self.sequencer.drag_clip = hover_clip
-                            mouse_time = rel_x / max(1.0, self.sequencer.zoom_x)
-                            self.sequencer.drag_time_offset = hover_clip.start_time - mouse_time
-                    else:
-                        was_scrubbing = self.sequencer.is_scrubbing
-                        self.sequencer.is_scrubbing = True
+                                if abs(rel_x - clip_px_start) < edge_threshold:
+                                    self.sequencer.resize_clip = hover_clip
+                                    self.sequencer.resize_edge = "left"
+                                    self.sequencer.resize_initial_dur = hover_clip.duration
+                                    self.sequencer.resize_initial_time = hover_clip.start_time
+                                elif abs(rel_x - clip_px_end) < edge_threshold:
+                                    self.sequencer.resize_clip = hover_clip
+                                    self.sequencer.resize_edge = "right"
+                                    self.sequencer.resize_initial_dur = hover_clip.duration
+                                    self.sequencer.resize_initial_time = hover_clip.start_time
+                                else:
+                                    self.sequencer.drag_clip = hover_clip
+                                    mouse_time = rel_x / max(1.0, self.sequencer.zoom_x)
+                                    self.sequencer.drag_time_offset = hover_clip.start_time - mouse_time
+                        elif not ctrl_down:
+                            self.highlighted_clip_ids.clear()
+                            self.multi_selected_clips = []
+                            was_scrubbing = self.sequencer.is_scrubbing
+                            self.sequencer.is_scrubbing = True
+                            new_t = max(0.0, rel_x / self.sequencer.zoom_x)
+                            if new_t < 0.05:
+                                new_t = 0.0
+                            self.sequencer.current_time = new_t
+                            if not was_scrubbing:
+                                self.sequencer.selected_clip = None
+                                self.update_inspector_ui()
+                    elif ctrl_down and hover_clip:
+                        if hover_clip.id != self._highlight_drag_last_clip_id:
+                            self._highlight_drag_last_clip_id = hover_clip.id
+                            self._toggle_clip_highlight(hover_clip)
+                    elif self.sequencer.is_scrubbing:
                         new_t = max(0.0, rel_x / self.sequencer.zoom_x)
                         if new_t < 0.05:
                             new_t = 0.0
                         self.sequencer.current_time = new_t
-                        if not was_scrubbing:
-                            self.sequencer.selected_clip = None
-                            self.update_inspector_ui()
-                elif self.sequencer.is_scrubbing:
-                    new_t = max(0.0, rel_x / self.sequencer.zoom_x)
-                    if new_t < 0.05:
-                        new_t = 0.0
-                    self.sequencer.current_time = new_t
         else:
             # Mouse Up - Release Drag/Resize/Scrub
             if self.sequencer.drag_clip:
@@ -1273,6 +1372,11 @@ class FeditNativeApp:
             if hasattr(self.sequencer, 'is_scrubbing'):
                 self.sequencer.is_scrubbing = False
             self.sequencer.drag_time_offset = 0.0
+            self._highlight_drag_last_clip_id = None
+            if self.multi_select_box_active:
+                self.multi_select_box_active = False
+                self.multi_select_box_start = None
+                self.multi_select_box_end = None
         
         if self.sequencer.is_playing:
             now = time.time()
@@ -1385,6 +1489,8 @@ class FeditNativeApp:
         self.hide_playhead_until_next_sample = False
 
     def _draw_wheel_graph(self, total_w: float):
+        if not self._wheel_graph_visible:
+            return
         height = max(0, self.wheel_graph_height)
         if height <= 0:
             return
@@ -1806,19 +1912,20 @@ class FeditNativeApp:
         if dpg.does_item_exist("timeline_canvas"):
             dpg.delete_item("timeline_canvas", children_only=True)
 
-        y_offset = self.wheel_graph_height
+        active_graph_height = self._active_wheel_graph_height()
+        y_offset = active_graph_height
         track_height = 80
         total_w = max(3000, int(self.sequencer.zoom_x * 60))
-        total_h = int(self.wheel_graph_height + len(self.sequencer.tracks) * track_height)
+        total_h = int(active_graph_height + len(self.sequencer.tracks) * track_height)
         dpg.configure_item("timeline_canvas", width=total_w, height=total_h)
         self.render_grid(total_w, total_h)
         
-        if self.wheel_graph_height > 0:
+        if self._wheel_graph_visible and active_graph_height > 0:
             self._draw_wheel_graph(total_w)
 
         for i, track in enumerate(self.sequencer.tracks):
             is_target = (i == self.drag_target_track_idx)
-            
+
             bg_col = (40, 40, 45, 50) if i % 2 == 0 else (35, 35, 40, 50)
             if i == self.drag_target_track_idx:
                 bg_col = (60, 60, 80, 100)
@@ -1839,9 +1946,19 @@ class FeditNativeApp:
                 if clip.type == "Sawtooth":
                     base_col = (255, 150, 50)
 
-                border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
-                
-                dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
+                is_highlighted = clip.id in self.highlighted_clip_ids
+                is_multi_selected = clip in self.multi_selected_clips
+                default_fill = (base_col[0], base_col[1], base_col[2], 150)
+                highlight_border = (255, 220, 110, 220)
+                highlight_fill = (255, 220, 110, 120)
+                if is_highlighted or is_multi_selected:
+                    border_col = highlight_border
+                    fill_color = highlight_fill
+                else:
+                    border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
+                    fill_color = default_fill
+
+                dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=fill_color, parent="timeline_canvas")
                 dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=13, parent="timeline_canvas")
 
                 wave_points = self._clip_wave_points(
@@ -1865,6 +1982,13 @@ class FeditNativeApp:
                 phase_txt = f"{m.get('phase', 0)/100.0:.1f}°"
                 dpg.draw_line([mx, 0], [mx, y_offset], color=(200, 50, 50, 120), thickness=1, parent="timeline_canvas")
                 dpg.draw_text([mx + 4, 8], phase_txt, size=12, color=(255, 120, 120), parent="timeline_canvas")
+
+        if self.multi_select_box_active and self.multi_select_box_start and self.multi_select_box_end:
+            x0 = min(self.multi_select_box_start[0], self.multi_select_box_end[0])
+            y0 = min(self.multi_select_box_start[1], self.multi_select_box_end[1])
+            x1 = max(self.multi_select_box_start[0], self.multi_select_box_end[0])
+            y1 = max(self.multi_select_box_start[1], self.multi_select_box_end[1])
+            dpg.draw_rectangle([x0, y0], [x1, y1], color=(130, 180, 255, 220), fill=(90, 140, 255, 90), thickness=1, parent="timeline_canvas")
 
     def _draw_resize_cursor(self, x, y):
         """Draws a custom double-headed arrow cursor at (x,y)."""
@@ -1907,9 +2031,27 @@ class FeditNativeApp:
         dpg.draw_line([x - shaft_len, y], [x + shaft_len, y], color=col, thickness=shaft_w, parent="timeline_canvas")
 
     def delete_selected_clip(self):
-            self.sequencer.delete_clip(self.sequencer.selected_clip)
-            self.sequencer.selected_clip = None
-            self.update_inspector_ui()
+        clip = self.sequencer.selected_clip
+        if not clip:
+            return
+        self.highlighted_clip_ids.discard(clip.id)
+        self.sequencer.delete_clip(clip)
+        self.sequencer.selected_clip = None
+        self.update_inspector_ui()
+
+    def delete_multi_selected_clips(self):
+        if not self.multi_selected_clips:
+            return False
+        deleted = []
+        for clip in list(self.multi_selected_clips):
+            deleted.append(clip)
+            self.highlighted_clip_ids.discard(clip.id)
+            self.sequencer.delete_clip(clip)
+        self.multi_selected_clips = []
+        self.sequencer.selected_clip = None
+        self.update_inspector_ui()
+        self.log(f"Deleted {len(deleted)} clips")
+        return True
 
     def on_drop_receive(self, sender, app_data):
         print(f"DEBUG DROP: Sender={sender}, Data={app_data}")
@@ -2064,7 +2206,7 @@ class FeditNativeApp:
             
             # Prevent Vertical Scroll Drift?
             # If content fits, ensure Y scroll is 0?
-            total_h = self.wheel_graph_height + len(self.sequencer.tracks) * 80
+            total_h = self._active_wheel_graph_height() + len(self.sequencer.tracks) * 80
             win_h = dpg.get_item_height("timeline_scroll")
             if total_h <= win_h:
                 dpg.set_y_scroll("timeline_scroll", 0)
@@ -2234,6 +2376,13 @@ class FeditNativeApp:
                         default_value=self.show_redlines,
                         tag="menu_redlines",
                         callback=self.toggle_redlines,
+                    )
+                    dpg.add_menu_item(
+                        label="Wheel Graph",
+                        check=True,
+                        default_value=self._wheel_graph_visible,
+                        tag="menu_wheel_graph",
+                        callback=self._on_wheel_graph_checkbox,
                     )
                     dpg.add_menu_item(
                         label="Mouse Status",
