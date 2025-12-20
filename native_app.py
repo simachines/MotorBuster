@@ -152,7 +152,7 @@ class FeditSequencer:
         self.zoom_x = 50.0
         self.selected_clip: Clip = None
         self.drag_clip: Clip = None
-        self.drag_offset: float = 0.0
+        self.drag_time_offset: float = 0.0
         self.resize_clip: Clip = None
         self.resize_edge: str = None
         self.resize_initial_time: float = 0.0
@@ -419,10 +419,12 @@ class FeditNativeApp:
         self.wheel_graph_height = 150
         self.wheel_graph_gain = 1.0
         self.wheel_history = deque()
-        self.wheel_history_span = 12.0
-        self.wheel_min_raw = None
-        self.wheel_max_raw = None
-        self.wheel_span_floor = 8000.0
+        self.wheel_history_limit = None
+        self.wheel_axis_scale = 32767.0
+        self.hide_playhead_until_next_sample = False
+        self.manual_timebase_override = False
+        self.manual_timebase_value = None
+        self.mouse_left_button_down = False
         
         dpg.create_context()
         self.load_fonts()
@@ -578,12 +580,14 @@ class FeditNativeApp:
         clip_scale = clip.magnitude / mag_max
 
         if width <= 0: return []
-        
+
         pixels = int(width)
         step_t = clip.duration / max(1, pixels)
-        
+
         # Hard limit
-        if pixels > 5000: pixels = 5000; step_t = clip.duration / pixels
+        if pixels > 5000:
+            pixels = 5000
+            step_t = clip.duration / pixels
 
         freq = max(clip.frequency, getattr(clip, 'frequency_end', clip.frequency))
         is_aliasing = False
@@ -598,12 +602,9 @@ class FeditNativeApp:
             local_max = 0.0
 
             if is_aliasing:
-                # Aliasing: Draw full height relative to magnitude
                 local_min = -1.0 * clip_scale
                 local_max = 1.0 * clip_scale
             else:
-                # Sub-pixel sampling: Check 10 points to catch peaks accurately
-                # This prevents "pre-aliasing" noise where we miss the sine peak indtermittently
                 local_min = 1.0 # Init inverted
                 local_max = -1.0
                 
@@ -900,6 +901,28 @@ class FeditNativeApp:
         except:
              return 0,0
 
+    def _is_mouse_in_timeline_viewport(self, global_mouse_pos):
+        rects = []
+        if dpg.does_item_exist("timeline_scroll"):
+            rects.append(self._safe_get_rect("timeline_scroll"))
+        if dpg.does_item_exist("timeline_canvas"):
+            rects.append(self._safe_get_rect("timeline_canvas"))
+
+        for rect_min, rect_size in rects:
+            if rect_min and rect_size:
+                max_x = rect_min[0] + rect_size[0]
+                max_y = rect_min[1] + rect_size[1]
+                if rect_min[0] <= global_mouse_pos[0] <= max_x and rect_min[1] <= global_mouse_pos[1] <= max_y:
+                    return True
+
+        return True
+
+    def _safe_get_rect(self, tag):
+        try:
+            return dpg.get_item_rect_min(tag), dpg.get_item_rect_size(tag)
+        except Exception:
+            return None, None
+
     def _track_index_from_rel_y(self, rel_y: float) -> int:
         """Map canvas-relative Y into track index; ignore the wheel graph band."""
         track_h = 80
@@ -920,202 +943,181 @@ class FeditNativeApp:
         return None
 
     def _get_resize_hover(self, track_idx, rel_x):
-        """Check if mouse is hovering over a clip edge for resizing. Returns (clip, edge_type) or (None, None)."""
+        """Check for the closest clip edge within the resize threshold and prefer the selected clip."""
         if 0 <= track_idx < len(self.sequencer.tracks):
              track = self.sequencer.tracks[track_idx]
              threshold = self.resize_threshold_px
-             
+             best_clip = None
+             best_edge = None
+             best_score = (threshold, 1)
+             selected_clip = self.sequencer.selected_clip
+             zoom = self.sequencer.zoom_x
              for clip in track.clips:
-                 clip_px_start = clip.start_time * self.sequencer.zoom_x
-                 clip_px_end = (clip.start_time + clip.duration) * self.sequencer.zoom_x
-                 
-                 if abs(rel_x - clip_px_end) < threshold:
-                     return clip, "right"
-                 if abs(rel_x - clip_px_start) < threshold:
-                     return clip, "left"
+                 start_px = clip.start_time * zoom
+                 end_px = (clip.start_time + clip.duration) * zoom
+                 for edge_pos, edge_name in ((start_px, "left"), (end_px, "right")):
+                     delta = abs(rel_x - edge_pos)
+                     if delta < threshold:
+                         score = (delta, 0 if clip is selected_clip else 1)
+                         if score < best_score:
+                             best_score = score
+                             best_clip = clip
+                             best_edge = edge_name
+             if best_clip:
+                 return best_clip, best_edge
         return None, None
 
     def update_loop(self):
         # Track Target for Drop/Drag
         mpos = dpg.get_mouse_pos(local=False)
-        rx, ry = self.get_canvas_relative_pos(mpos)
-        mpos = dpg.get_mouse_pos(local=False)
-        rx, ry = self.get_canvas_relative_pos(mpos)
-        self.drag_target_track_idx = self._track_index_from_rel_y(ry)
-        
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        self.drag_target_track_idx = self._track_index_from_rel_y(rel_y)
+
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
-            # Check if we are focused on timeline or canvas to avoid deleting while typing
-            # Using simple hover check for now as focus might be tricky
             if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_focused("timeline_scroll"):
-                 self.delete_selected_clip()
+                self.delete_selected_clip()
 
-        # COPY / PASTE (Ctrl+C, Ctrl+V)
         if dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl):
             if dpg.is_key_pressed(dpg.mvKey_C):
                 if self.sequencer.selected_clip:
-                    # Deep copy via dictionary serialization
                     self.sequencer.clipboard = self.sequencer.selected_clip.to_dict()
                     self.log(f"Copied {self.sequencer.selected_clip.name or 'Clip'}")
-            
+
             if dpg.is_key_pressed(dpg.mvKey_V):
                 if self.sequencer.clipboard:
-                    # Create new clip logic
                     data = self.sequencer.clipboard
                     new_clip = Clip.from_dict(data)
-                    # New ID
                     new_clip.id = str(uuid.uuid4())
-                    # Position at playhead
                     new_clip.start_time = self.sequencer.current_time
-                    
-                    # Target Track (Same as original if possible, or try to respect selected track if implementing)
-                    # For now: Same track
+
                     target_t_idx = new_clip.track_index
                     if 0 <= target_t_idx < len(self.sequencer.tracks):
                         t = self.sequencer.tracks[target_t_idx]
                         t.clips.append(new_clip)
-                        # Fix overlaps
-                        # snapped_start = self._snap_to_edges(t, new_clip, new_clip.start_time) # Optional snap
-                        # Avoiding overlap on paste might be abrupt; standard DAW lets you paste on top sometimes.
-                        # But our engine is monophonic per track-slot logically in the UI visuals often.
-                        # Let's use the overlap avoidance to keep it clean.
                         actual_start = self._avoid_overlap_on_drag(t, new_clip, new_clip.start_time)
                         new_clip.start_time = actual_start
-                        
+
                         self.sequencer.selected_clip = new_clip
                         self.update_inspector_ui()
                         self.log("Pasted Clip")
 
         # DOUBLE CLICK CHECK (Open Inspector)
         if dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
-             m_pos = dpg.get_mouse_pos(local=False)
-             rx, ry = self.get_canvas_relative_pos(m_pos)
-             d_clip = self.get_clip_at_pos(rx, ry)
-             if d_clip:
-                 self.sequencer.selected_clip = d_clip
-                 # Open a dedicated Locked Inspector Tab on Double Click
-                 self.create_floating_inspector(d_clip)
+            m_pos = dpg.get_mouse_pos(local=False)
+            rx, ry = self.get_canvas_relative_pos(m_pos)
+            d_clip = self.get_clip_at_pos(rx, ry)
+            if d_clip:
+                self.sequencer.selected_clip = d_clip
+                self.create_floating_inspector(d_clip)
 
         # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
-        # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
-        
-        # Cursor Logic
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         track_h = 80
         track_idx = self._track_index_from_rel_y(rel_y)
-        
-        resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
-        
-        if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
+        mouse_left_down = dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
+        mouse_left_just_pressed = mouse_left_down and not self.mouse_left_button_down
+        self.mouse_left_button_down = mouse_left_down
 
-             # PRIORITIZE RESIZE WHEN EDGE HOVER IS ACTIVE
-             if resize_clip_hover:
-                 clip, edge = resize_clip_hover, resize_edge
-                 self.sequencer.selected_clip = clip
-                 self.sequencer.resize_clip = clip
-                 self.sequencer.resize_edge = edge
-                 self.sequencer.resize_initial_dur = clip.duration
-                 self.sequencer.resize_initial_time = clip.start_time
-                 self.update_inspector_ui()
-                 return
-             
-             # 1. CONTINUE RESIZING
-             if self.sequencer.resize_clip:
-                 clip = self.sequencer.resize_clip
-                 track = self.sequencer.tracks[clip.track_index]
-                 cur_mouse_t = rel_x / self.sequencer.zoom_x
-                 
-                 if self.sequencer.resize_edge == "right":
-                     desired_dur = max(0.1, cur_mouse_t - clip.start_time)
-                     clip.duration = self._limit_right_resize(track, clip, desired_dur)
-                 elif self.sequencer.resize_edge == "left":
-                     # Limit: cannot pull start past end
-                     old_end = self.sequencer.resize_initial_time + self.sequencer.resize_initial_dur
-                     desired_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
-                     new_start = self._limit_left_resize(track, clip, desired_start, old_end)
-                     clip.start_time = new_start
-                     clip.duration = old_end - new_start
-                     
-                 # Update UI while resizing
-                 self.update_inspector_ui()
+        resize_clip_hover, resize_edge = (None, None)
+        if not self.sequencer.drag_clip and not self.sequencer.resize_clip and not getattr(self.sequencer, 'is_scrubbing', False):
+            resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
 
-             # 2. CONTINUE DRAGGING
-             elif self.sequencer.drag_clip:
-                  # Calculate new time/track
-                  new_px = rel_x - self.sequencer.drag_offset
-                  new_t = max(0.0, new_px / self.sequencer.zoom_x)
-                  
-                  new_track_idx = self._track_index_from_rel_y(rel_y)
-                  
-                  # Update clip
-                  clip = self.sequencer.drag_clip
-                  clip.start_time = new_t
-                  
-                  # Move track if changed
-                  if 0 <= new_track_idx < len(self.sequencer.tracks):
-                      if clip.track_index != new_track_idx:
-                          # Remove from old
-                          old_track = self.sequencer.tracks[clip.track_index]
-                          if clip in old_track.clips:
-                              old_track.clips.remove(clip)
-                          # Add to new
-                          clip.track_index = new_track_idx
-                          self.sequencer.tracks[new_track_idx].clips.append(clip)
-                          
-                      # Snap to nearby clip edges and prevent overlaps on the active track
-                      active_track = self.sequencer.tracks[clip.track_index]
-                      snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
-                      clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
-                  
-                  self.update_inspector_ui()
-                          
-             # 3. INITIALIZE INTERACTION (Select / Init Drag / Init Resize / Seek / Scrub)
-             elif dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll") or self.sequencer.is_scrubbing:
-                 
-                 # Check if over a clip (Only if not already scrubbing)
-                 hover_clip = None
-                 if not self.sequencer.is_scrubbing:
-                     hover_clip = self.get_clip_at_pos(rel_x, rel_y)
-                 
-                 if hover_clip and not self.sequencer.is_scrubbing:
-                     # HIT CLIP -> Select & Init Drag/Resize
-                     self.sequencer.selected_clip = hover_clip
-                     self.update_inspector_ui()
-                     
-                     # Check Edges for Resize
-                     clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
-                     clip_px_end = (hover_clip.start_time + hover_clip.duration) * self.sequencer.zoom_x
-                     edge_threshold = self.resize_threshold_px
-                     
-                     if abs(rel_x - clip_px_start) < edge_threshold:
-                         self.sequencer.resize_clip = hover_clip
-                         self.sequencer.resize_edge = "left"
-                         self.sequencer.resize_initial_dur = hover_clip.duration
-                         self.sequencer.resize_initial_time = hover_clip.start_time
-                     elif abs(rel_x - clip_px_end) < edge_threshold:
-                         self.sequencer.resize_clip = hover_clip
-                         self.sequencer.resize_edge = "right"
-                         self.sequencer.resize_initial_dur = hover_clip.duration
-                         self.sequencer.resize_initial_time = hover_clip.start_time
-                     else:
-                         # Init Drag
-                         self.sequencer.drag_clip = hover_clip
-                         self.sequencer.drag_offset = rel_x - clip_px_start
-                         
-                 else:
-                     # HIT EMPTY or SCRUBBING -> Seek & Deselect
-                     self.sequencer.is_scrubbing = True # Enable sticky scrubbing
-                     
-                     new_t = max(0.0, rel_x / self.sequencer.zoom_x)
-                     if new_t < 0.05: new_t = 0.0 # Snap to zero (Main feature)
-                     
-                     self.sequencer.current_time = new_t
-                     
-                     if not self.sequencer.is_scrubbing: # Only clear on initial click
-                        self.sequencer.selected_clip = None
+        if mouse_left_down:
+            if mouse_left_just_pressed and resize_clip_hover:
+                clip, edge = resize_clip_hover, resize_edge
+                self.sequencer.selected_clip = clip
+                self.sequencer.resize_clip = clip
+                self.sequencer.resize_edge = edge
+                self.sequencer.resize_initial_dur = clip.duration
+                self.sequencer.resize_initial_time = clip.start_time
+                self.update_inspector_ui()
+                return
+
+            if self.sequencer.resize_clip:
+                clip = self.sequencer.resize_clip
+                track = self.sequencer.tracks[clip.track_index]
+                cur_mouse_t = rel_x / self.sequencer.zoom_x
+
+                if self.sequencer.resize_edge == "right":
+                    desired_dur = max(0.1, cur_mouse_t - clip.start_time)
+                    clip.duration = self._limit_right_resize(track, clip, desired_dur)
+                elif self.sequencer.resize_edge == "left":
+                    old_end = self.sequencer.resize_initial_time + self.sequencer.resize_initial_dur
+                    desired_start = min(old_end - 0.1, max(0.0, cur_mouse_t))
+                    new_start = self._limit_left_resize(track, clip, desired_start, old_end)
+                    clip.start_time = new_start
+                    clip.duration = old_end - new_start
+
+                self.update_inspector_ui()
+
+            elif self.sequencer.drag_clip:
+                pointer_time = rel_x / max(1.0, self.sequencer.zoom_x)
+                new_t = max(0.0, pointer_time + self.sequencer.drag_time_offset)
+
+                new_track_idx = self._track_index_from_rel_y(rel_y)
+
+                clip = self.sequencer.drag_clip
+                clip.start_time = new_t
+
+                if 0 <= new_track_idx < len(self.sequencer.tracks):
+                    if clip.track_index != new_track_idx:
+                        old_track = self.sequencer.tracks[clip.track_index]
+                        if clip in old_track.clips:
+                            old_track.clips.remove(clip)
+                        clip.track_index = new_track_idx
+                        self.sequencer.tracks[new_track_idx].clips.append(clip)
+
+                    active_track = self.sequencer.tracks[clip.track_index]
+                    snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
+                    clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
+
+                self.update_inspector_ui()
+
+            elif dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll") or self.sequencer.is_scrubbing:
+                hover_clip = None
+                if not self.sequencer.is_scrubbing:
+                    hover_clip = self.get_clip_at_pos(rel_x, rel_y)
+
+                if mouse_left_just_pressed:
+                    if hover_clip and not self.sequencer.is_scrubbing:
+                        self.sequencer.selected_clip = hover_clip
                         self.update_inspector_ui()
 
+                        clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
+                        clip_px_end = (hover_clip.start_time + hover_clip.duration) * self.sequencer.zoom_x
+                        edge_threshold = self.resize_threshold_px
+
+                        if abs(rel_x - clip_px_start) < edge_threshold:
+                            self.sequencer.resize_clip = hover_clip
+                            self.sequencer.resize_edge = "left"
+                            self.sequencer.resize_initial_dur = hover_clip.duration
+                            self.sequencer.resize_initial_time = hover_clip.start_time
+                        elif abs(rel_x - clip_px_end) < edge_threshold:
+                            self.sequencer.resize_clip = hover_clip
+                            self.sequencer.resize_edge = "right"
+                            self.sequencer.resize_initial_dur = hover_clip.duration
+                            self.sequencer.resize_initial_time = hover_clip.start_time
+                        else:
+                            self.sequencer.drag_clip = hover_clip
+                            mouse_time = rel_x / max(1.0, self.sequencer.zoom_x)
+                            self.sequencer.drag_time_offset = hover_clip.start_time - mouse_time
+                    else:
+                        was_scrubbing = self.sequencer.is_scrubbing
+                        self.sequencer.is_scrubbing = True
+                        new_t = max(0.0, rel_x / self.sequencer.zoom_x)
+                        if new_t < 0.05:
+                            new_t = 0.0
+                        self.sequencer.current_time = new_t
+                        if not was_scrubbing:
+                            self.sequencer.selected_clip = None
+                            self.update_inspector_ui()
+                elif self.sequencer.is_scrubbing:
+                    new_t = max(0.0, rel_x / self.sequencer.zoom_x)
+                    if new_t < 0.05:
+                        new_t = 0.0
+                    self.sequencer.current_time = new_t
         else:
             # Mouse Up - Release Drag/Resize/Scrub
             if self.sequencer.drag_clip:
@@ -1124,6 +1126,7 @@ class FeditNativeApp:
                 self.sequencer.resize_clip = None
             if hasattr(self.sequencer, 'is_scrubbing'):
                 self.sequencer.is_scrubbing = False
+            self.sequencer.drag_time_offset = 0.0
         
         if self.sequencer.is_playing:
             now = time.time()
@@ -1214,32 +1217,26 @@ class FeditNativeApp:
 
         # Always sample wheel position regardless of playback state so the overlay stays populated
         self._record_wheel_sample(self.sequencer.current_time)
+        self._throttle_when_idle()
 
     def _record_wheel_sample(self, current_time: float):
+        if self.sequencer.drag_clip or self.sequencer.resize_clip or getattr(self.sequencer, 'is_scrubbing', False):
+            return
         raw = engine.get_axis_value(-1)
         if raw is None:
             return
-        # Track observed extremes and normalize around the midpoint of min/max instead of zero-baseline.
-        if self.wheel_min_raw is None or raw < self.wheel_min_raw:
-            self.wheel_min_raw = raw
-        if self.wheel_max_raw is None or raw > self.wheel_max_raw:
-            self.wheel_max_raw = raw
-
-        span_half = (self.wheel_max_raw - self.wheel_min_raw) / 2.0 if self.wheel_max_raw is not None and self.wheel_min_raw is not None else 0.0
-        span_half = max(self.wheel_span_floor, span_half)
-        mid = (self.wheel_max_raw + self.wheel_min_raw) / 2.0 if self.wheel_max_raw is not None and self.wheel_min_raw is not None else 0.0
-
-        norm = (raw - mid) / span_half if span_half else 0.0
+        axis_scale = self.wheel_axis_scale if self.wheel_axis_scale else 32767.0
+        norm = raw / axis_scale
         norm = max(-1.0, min(1.0, norm))
         self.wheel_history.append({"time": current_time, "value": norm})
-        cutoff = current_time - self.wheel_history_span
-        while self.wheel_history and self.wheel_history[0]["time"] < cutoff:
-            self.wheel_history.popleft()
+        if self.wheel_history_limit and len(self.wheel_history) > self.wheel_history_limit:
+            while len(self.wheel_history) > self.wheel_history_limit:
+                self.wheel_history.popleft()
+        self.hide_playhead_until_next_sample = False
 
     def _clear_wheel_history(self):
         self.wheel_history.clear()
-        self.wheel_min_raw = None
-        self.wheel_max_raw = None
+        self.hide_playhead_until_next_sample = False
 
     def _draw_wheel_graph(self, total_w: float):
         height = max(0, self.wheel_graph_height)
@@ -1250,27 +1247,67 @@ class FeditNativeApp:
 
         dpg.draw_rectangle([0, 0], [total_w, height], color=(40, 40, 50, 220), fill=(20, 20, 25, 190), parent="timeline_canvas")
 
-        points = []
+        center_y = height / 2
+        if total_w > 0:
+            dpg.draw_line([0, center_y], [total_w, center_y], color=(100, 110, 140, 200), thickness=1, parent="timeline_canvas")
+        dot_width = 6
+        dot_gap = 10
+        int_width = max(0, int(total_w))
+        for x in range(0, int_width, dot_gap):
+            end_x = min(total_w, x + dot_width)
+            dpg.draw_line([x, center_y], [end_x, center_y], color=(170, 170, 190, 120), thickness=1, parent="timeline_canvas")
+
+        segments = []
+        current_segment = []
+        prev_time = None
+        gap_threshold = 0.25  # seconds between samples considered a jump
+
         for sample in self.wheel_history:
-            x = sample["time"] * self.sequencer.zoom_x
+            sample_time = sample["time"]
+            x = sample_time * self.sequencer.zoom_x
             if x < 0 or x > total_w:
                 continue
             val = max(-1.0, min(1.0, sample["value"] * gain))
             y = (height / 2) - val * (height / 2 - 6)
-            points.append([x, y])
 
-        if len(points) >= 2:
-            dpg.draw_polyline(points, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+            if prev_time is not None:
+                dt = sample_time - prev_time
+                if dt < 0 or dt > gap_threshold:
+                    if len(current_segment) >= 2:
+                        segments.append(current_segment)
+                    current_segment = []
 
-        playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
-        dpg.draw_line([playhead_x, 0], [playhead_x, height], color=(255, 60, 60), thickness=1, parent="timeline_canvas")
+            current_segment.append([x, y])
+            prev_time = sample_time
 
-        latest = self.wheel_history[-1] if self.wheel_history else None
-        if latest:
-            val = max(-1.0, min(1.0, latest["value"] * gain))
-            y = (height / 2) - val * (height / 2 - 6)
-            dpg.draw_circle([playhead_x, y], 4, color=(255, 150, 60), fill=(255, 150, 60), parent="timeline_canvas")
-            dpg.draw_text([4, 4], f"Wheel: {latest['value']*100:.1f}%", size=12, color=(220, 220, 255), parent="timeline_canvas")
+        if len(current_segment) >= 2:
+            segments.append(current_segment)
+
+        for segment in segments:
+            dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+
+        if self._should_show_wheel_playhead():
+            playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
+            dpg.draw_line([playhead_x, 0], [playhead_x, height], color=(255, 60, 60), thickness=1, parent="timeline_canvas")
+
+            latest = self.wheel_history[-1] if self.wheel_history else None
+            if latest:
+                val = max(-1.0, min(1.0, latest["value"] * gain))
+                y = (height / 2) - val * (height / 2 - 6)
+                dpg.draw_circle([playhead_x, y], 4, color=(255, 150, 60), fill=(255, 150, 60), parent="timeline_canvas")
+                dpg.draw_text([4, 4], f"Wheel: {latest['value']*100:.1f}%", size=12, color=(220, 220, 255), parent="timeline_canvas")
+
+
+    def _should_show_wheel_playhead(self) -> bool:
+        return not self.hide_playhead_until_next_sample
+
+
+    def _throttle_when_idle(self):
+        if self.sequencer.is_playing:
+            return
+        if self.sequencer.drag_clip or self.sequencer.resize_clip or getattr(self.sequencer, 'is_scrubbing', False):
+            return
+        time.sleep(0.003)
 
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
@@ -1555,120 +1592,127 @@ class FeditNativeApp:
     # --- Rendering ---
     def render_grid(self, total_w, total_h):
         """Draws vertical grid lines and time labels based on current zoom."""
-        # Calculate grid spacing (time)
-        # We want approx 10 divisions per screen or readable intervals
-        # Let's try 1s, 0.1s, 0.01s based on zoom
-        
-        # Determine strict power of 10 spacing
         target_px = 100.0
         ideal_dt = target_px / max(0.1, self.sequencer.zoom_x)
-        power = math.floor(math.log10(ideal_dt))
-        base = 10 ** power
-        
-        # Candidates: 1*base, 2*base, 5*base, 10*base
-        candidates = [base, 2*base, 5*base, 10*base]
-        # Pick closest
-        grid_time = base
-        min_dist = 999999.0
-        for c in candidates:
-             dist = abs(c - ideal_dt)
-             if dist < min_dist:
-                 min_dist = dist
-                 grid_time = c
-        
-        # Update Time Base Display input
+        auto_grid_time = self._nice_grid_interval(ideal_dt)
+        grid_time = self.manual_timebase_value if (self.manual_timebase_override and self.manual_timebase_value) else auto_grid_time
+
         if dpg.does_item_exist("input_timebase"):
-             # Avoid infinite loop if user is typing
-             if not dpg.is_item_active("input_timebase"):
+             if not self.manual_timebase_override and not dpg.is_item_active("input_timebase"):
                  dpg.set_value("input_timebase", grid_time)
-        
-        # Draw Lines
-        start_t = 0.0
-        # For optimization, we could start from scroll position, but we don't track scroll X easily yet.
-        # Just draw visible range? We blindly draw 3000px width for now.
-        
-        x = 0
-        t = 0.0
-        while x < total_w:
+                 self.manual_timebase_value = grid_time
+             elif not self.manual_timebase_override:
+                 self.manual_timebase_value = grid_time
+
+        scroll_x = 0
+        scroll_w = total_w
+        pad_px = 200
+        if dpg.does_item_exist("timeline_scroll"):
+            try:
+                scroll_x = dpg.get_x_scroll("timeline_scroll")
+            except:
+                scroll_x = 0
+            rect = dpg.get_item_rect_size("timeline_scroll")
+            if rect:
+                scroll_w = rect[0]
+
+        start_px = max(0, scroll_x - pad_px)
+        end_px = min(total_w, scroll_x + scroll_w + pad_px)
+        t = math.floor((start_px / self.sequencer.zoom_x) / grid_time) * grid_time if grid_time > 0 else 0.0
+        lines_drawn = 0
+        max_lines = 600
+        while True:
             x = t * self.sequencer.zoom_x
-            if x > total_w: break
-            
-            color = (60, 60, 60, 100)
-            thickness = 1
-            
-            # Major lines every 10 steps?
-            # if i % 10 == 0: color = (80,80,80,150)
-            
-            dpg.draw_line([x, 0], [x, total_h], color=color, thickness=thickness, parent="timeline_canvas")
-            # dpg.draw_text([x + 2, 0], f"{t:.2g}s", size=10, color=(150, 150, 150), parent="timeline_canvas") # User requested removal
-            
+            if x > end_px or lines_drawn >= max_lines:
+                break
+            if x >= start_px:
+                color = (60, 60, 60, 100)
+                thickness = 1
+                dpg.draw_line([x, 0], [x, total_h], color=color, thickness=thickness, parent="timeline_canvas")
+                lines_drawn += 1
             t += grid_time
 
+    def _nice_grid_interval(self, ideal_dt: float) -> float:
+        if ideal_dt <= 0:
+            return 0.01
+        fine_threshold = 0.08
+        fine_steps = (0.01, 0.02, 0.05)
+        if ideal_dt <= fine_threshold:
+            for step in reversed(fine_steps):
+                if ideal_dt >= step:
+                    return step
+            return fine_steps[0]
+
+        power = math.floor(math.log10(ideal_dt))
+        base = 10 ** power
+        frac = ideal_dt / base
+        if frac < 1.5:
+            nice = 1
+        elif frac < 3:
+            nice = 2
+        elif frac < 7:
+            nice = 5
+        else:
+            nice = 10
+        return nice * base
+
     def render_timeline(self):
-        dpg.delete_item("timeline_canvas", children_only=True, slot=2)
-        
+        if dpg.does_item_exist("timeline_canvas"):
+            dpg.delete_item("timeline_canvas", children_only=True)
+
         y_offset = self.wheel_graph_height
         track_height = 80
-        total_w = max(3000, int(self.sequencer.zoom_x * 60)) # Dynamic width
-        # Ensure canvas is large enough
+        total_w = max(3000, int(self.sequencer.zoom_x * 60))
         total_h = int(self.wheel_graph_height + len(self.sequencer.tracks) * track_height)
-        dpg.configure_item("timeline_canvas", width=total_w, height=total_h) 
-        # Setting height ensures that if we zoom out, canvas shrinks, scrollbar disappears.
-        
-        # Render Grid Background
+        dpg.configure_item("timeline_canvas", width=total_w, height=total_h)
         self.render_grid(total_w, total_h)
         
         if self.wheel_graph_height > 0:
             self._draw_wheel_graph(total_w)
 
         for i, track in enumerate(self.sequencer.tracks):
-             # Highlight if target
-             is_target = (i == self.drag_target_track_idx) 
-             # Simplify: Just check if valid index and dragging/dropping might happen.
-             # Actually, just always highlight current hover track slightly? 
-             # User said "highlight only the target track (not whole window)" during drag and drop.
-             
-             bg_col = (40, 40, 45, 50) if i % 2 == 0 else (35, 35, 40, 50)
-             if i == self.drag_target_track_idx:
-                 bg_col = (60, 60, 80, 100) # Highlight
+            is_target = (i == self.drag_target_track_idx)
+            
+            bg_col = (40, 40, 45, 50) if i % 2 == 0 else (35, 35, 40, 50)
+            if i == self.drag_target_track_idx:
+                bg_col = (60, 60, 80, 100)
 
-             # Draw track lane bg (transparent to show grid potentially, or grid on top?)
-             # Grid is drawn first, so BG must be transparent.
-             dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
-             dpg.draw_line([0, y_offset + track_height], [total_w, y_offset+track_height], color=(60, 60, 60), parent="timeline_canvas")
-             dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
-             
-             for clip in track.clips:
-                 x_start = clip.start_time * self.sequencer.zoom_x
-                 width = clip.duration * self.sequencer.zoom_x
-                 
-                 base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
-                 if clip.type == "Constant": base_col = (100, 255, 100)
-                 if clip.type == "Ramp": base_col = (255, 255, 100)
-                 if clip.type == "Sawtooth": base_col = (255, 150, 50)
+            dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
+            dpg.draw_line([0, y_offset + track_height], [total_w, y_offset + track_height], color=(60, 60, 60), parent="timeline_canvas")
+            dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
+            
+            for clip in track.clips:
+                x_start = clip.start_time * self.sequencer.zoom_x
+                width = clip.duration * self.sequencer.zoom_x
+                
+                base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
+                if clip.type == "Constant":
+                    base_col = (100, 255, 100)
+                if clip.type == "Ramp":
+                    base_col = (255, 255, 100)
+                if clip.type == "Sawtooth":
+                    base_col = (255, 150, 50)
 
-                 border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
-                 
-                 dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
-                 dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=13, parent="timeline_canvas")
+                border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
+                
+                dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
+                dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=13, parent="timeline_canvas")
 
-                 # Waveform preview
-                 wave_points = self._clip_wave_points(
-                     clip,
-                     x_start + 4,
-                     max(4.0, width - 8),
-                     y_offset + 28,
-                     y_offset + track_height - 12,
-                     samples= max(20, int(width / 6))
-                 )
-                 dpg.draw_polyline(wave_points, color=(240, 240, 240, 220), thickness=2, parent="timeline_canvas")
+                wave_points = self._clip_wave_points(
+                    clip,
+                    x_start + 4,
+                    max(4.0, width - 8),
+                    y_offset + 28,
+                    y_offset + track_height - 12,
+                    samples=max(20, int(width / 6))
+                )
+                dpg.draw_polyline(wave_points, color=(240, 240, 240, 220), thickness=2, parent="timeline_canvas")
 
-             y_offset += track_height
-        
+            y_offset += track_height
+
         px = self.sequencer.current_time * self.sequencer.zoom_x
         dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
 
-        # Sweep markers (phase at each frequency update)
         if self.sweep_markers:
             for m in self.sweep_markers:
                 mx = m.get("time", 0.0) * self.sequencer.zoom_x
@@ -1747,6 +1791,8 @@ class FeditNativeApp:
     def canvas_click(self, sender, app_data):
         mouse_btn = app_data[0] # [0]=button, [1]=tag
         mpos = dpg.get_mouse_pos(local=False)
+        if not self._is_mouse_in_timeline_viewport(mpos):
+            return
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
         
         track_h = 80
@@ -1858,47 +1904,17 @@ class FeditNativeApp:
         # app_data is value
         # Lock view to tracks: Only zoom if hovering timeline
         if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
-            # Get Mouse Time
-            mouse_x_screen = dpg.get_mouse_pos(local=False)[0]
-            # Offset from scroll window
-            try:
-                win_pos = dpg.get_item_pos("timeline_scroll") 
-                # Note: get_item_pos returns [x,y]. Mouse is global.
-                # Scoll offset x
-                scroll_x = dpg.get_x_scroll("timeline_scroll")
-                
-                # Mouse X relative to content 0
-                # mouse_in_content = (mouse_x - win_x) + scroll_x
-                # Simplified: timeline_canvas starts at 0,0 of child window content.
-                # Warning: win_pos might be unstable or title bar offset.
-                # Let's use get_item_rect_min of the scroll window
-                r_min = dpg.get_item_rect_min("timeline_scroll")
-                mouse_rel_x = mouse_x_screen - r_min[0] + scroll_x
-            except:
-                mouse_rel_x = 0
-            
-            # Calculate Time
-            t_mouse = max(0.0, mouse_rel_x / self.sequencer.zoom_x)
-            
+            self.manual_timebase_override = False
+            self.manual_timebase_value = None
             # Zoom
             scale_factor = 1.15
             if app_data > 0:
                 self.sequencer.zoom_x *= scale_factor
             elif app_data < 0:
                 self.sequencer.zoom_x /= scale_factor
-            
+
             # Clamp settings
             self.sequencer.zoom_x = max(10.0, min(50000.0, self.sequencer.zoom_x))
-            
-            # Restore Scroll to keep t_mouse at mouse_rel_x location on screen
-            # new_mouse_rel_x (in pixels) = t_mouse * new_zoom
-            # new_scroll_x = new_mouse_rel_x - (mouse_x_screen - r_min[0])
-            try:
-                new_pixel_x = t_mouse * self.sequencer.zoom_x
-                screen_offset = mouse_x_screen - r_min[0]
-                new_scroll_x = max(0.0, new_pixel_x - screen_offset)
-                dpg.set_x_scroll("timeline_scroll", new_scroll_x)
-            except: pass
             
             # Prevent Vertical Scroll Drift?
             # If content fits, ensure Y scroll is 0?
@@ -1914,6 +1930,8 @@ class FeditNativeApp:
         if app_data <= 0.00001: return
         target_px = 100.0
         self.sequencer.zoom_x = target_px / app_data
+        self.manual_timebase_override = True
+        self.manual_timebase_value = app_data
         
 
     def _set_system_cursor_visible(self, visible: bool):
