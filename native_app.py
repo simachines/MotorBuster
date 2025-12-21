@@ -400,6 +400,7 @@ class InspectorPanel:
 
 # --- Application ---
 class FeditNativeApp:
+    UPDATE_LENGTH_BUFFER_MS = 10
     def __init__(self):
         self.sequencer = FeditSequencer()
         self.sequencer.is_scrubbing = False # New state for playhead dragging
@@ -1596,7 +1597,7 @@ class FeditNativeApp:
             def start_new_effect(start_phase=-1):
                 if not current_clip:
                     return -1
-                dur_ms = int(current_clip.duration * 1000)
+                dur_ms = int(current_clip.duration * 1000) + self.UPDATE_LENGTH_BUFFER_MS
                 eff_mag = int(current_clip.magnitude * global_gain)
 
                 # Build descriptor for engine.play_descriptor
@@ -1711,8 +1712,6 @@ class FeditNativeApp:
 
                         if should_send:
                              effect_len_ms = int(max(0.0, current_clip.duration - t_local) * 1000)
-
-                             # Calculate continuous phase from clip start to preserve direction on each update
                              t_elapsed = t_local
                              start_f = current_clip.frequency
                              end_f = current_clip.frequency_end if is_sweep else start_f
