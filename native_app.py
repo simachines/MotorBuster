@@ -1389,7 +1389,10 @@ class FeditNativeApp:
                             if new_t < 0.05:
                                 new_t = 0.0
                             self.sequencer.current_time = new_t
-                            self._trigger_scrub_haptics(new_t)
+                            # Only trigger haptics if position changed
+                            if not hasattr(self, '_last_scrub_position') or abs(new_t - self._last_scrub_position) > 1e-6:
+                                self._last_scrub_position = new_t
+                                self._trigger_scrub_haptics(new_t)
                             if not was_scrubbing:
                                 self.sequencer.selected_clip = None
                                 self.update_inspector_ui()
@@ -1402,7 +1405,10 @@ class FeditNativeApp:
                         if new_t < 0.05:
                             new_t = 0.0
                         self.sequencer.current_time = new_t
-                        self._trigger_scrub_haptics(new_t)
+                        # Only trigger haptics if position changed
+                        if not hasattr(self, '_last_scrub_position') or abs(new_t - self._last_scrub_position) > 1e-6:
+                            self._last_scrub_position = new_t
+                            self._trigger_scrub_haptics(new_t)
         else:
             # Mouse Up - Release Drag/Resize/Scrub
             if self.sequencer.drag_clip:
@@ -1413,6 +1419,9 @@ class FeditNativeApp:
                 self.sequencer.is_scrubbing = False
             self.sequencer.drag_time_offset = 0.0
             self._highlight_drag_last_clip_id = None
+            # Reset scrub position tracking
+            if hasattr(self, '_last_scrub_position'):
+                delattr(self, '_last_scrub_position')
             if self.multi_select_box_active:
                 self.multi_select_box_active = False
                 self.multi_select_box_start = None
