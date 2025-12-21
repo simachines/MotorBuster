@@ -1605,73 +1605,51 @@ class FeditNativeApp:
         time.sleep(0.003)
 
     def _trigger_scrub_haptics(self, time_s: float):
-        """Send a single-shot haptic update for the clip under simple scrubbing."""
+        """Reset playback state when scrubbing so normal sequencer logic handles it correctly."""
         # Only trigger haptics if actually playing
         if not self.sequencer.is_playing:
             return
         
-        # Simple throttle: Don't spam if we just sent one
+        # Simple throttle: Don't spam resets
         now = time.time()
         if hasattr(self, '_last_scrub_haptic_time'):
-            if now - self._last_scrub_haptic_time < 0.03: # 30ms throttle
+            if now - self._last_scrub_haptic_time < 0.05: # 50ms throttle for state reset
                 return
         self._last_scrub_haptic_time = now
 
-        # Find top-most clip at time_s
-        target_clip = None
+        # PROPER FIX: Reset all track states so process_sequencer_logic treats 
+        # the new position as a fresh start. This prevents conflicts between
+        # scrub-initiated effects and normal playback transitions.
+        
+        # Stop all current effects
+        engine.stop_effect()
+        self.log_api("stop_effect", {"scope": "all", "reason": "scrub"})
+        
+        # Reset all track states - this forces process_sequencer_logic to 
+        # re-evaluate and start fresh from the new playhead position
+        for track_idx in list(self.track_states.keys()):
+            self.track_states[track_idx] = {
+                'effect_id': -1,
+                'clip_id': None,
+                'clip_type': None,
+                'chain_end_time': None,
+                'effect_start_time': None,
+                'hw_start_time': None,
+                'phase_acc': 0.0,
+                'last_sweep_update_local': None,
+                'last_sent_freq': None,
+                'last_mag': None,
+                'last_freq': None,
+                'clip_was_infinite': False,
+            }
+        
+        # Clear clip active effect IDs
         for track in self.sequencer.tracks:
-            c = self.sequencer.get_clip_at(self.sequencer.tracks.index(track), time_s)
-            if c:
-                target_clip = c
-                break # Priority to top tracks? Or active track? Currently just first found.
+            for clip in track.clips:
+                clip.active_effect_id = -1
         
-        if not target_clip:
-            # Maybe stop effect?
-            return
-
-        # Prepare description
-        # Similar to start_new_effect but just for immediate feedback
-        eff_mag = int(target_clip.magnitude) # Use 100% of clip mag? Or scaled?
-        
-        # Calculate Phase for current time if Sine
-        phase_payload = 0
-        current_freq = target_clip.frequency
-        
-        if target_clip.type == "Sine":
-            start_f = target_clip.frequency
-            end_f = getattr(target_clip, 'frequency_end', start_f) if target_clip.sweep_enabled else start_f
-            t_local = max(0.0, time_s - target_clip.start_time)
-            k = (end_f - start_f) / max(1e-6, target_clip.duration)
-            
-            # Phase Integral: (start_f * t + 0.5 * k * t^2)
-            # Add Clip Start Phase
-            start_deg = getattr(target_clip, "start_phase", 0)
-            norm_phase = (start_deg/360.0 + start_f * t_local + 0.5 * k * t_local * t_local) % 1.0
-            phase_payload = int(norm_phase * 36000)
-            
-            if target_clip.sweep_enabled:
-                 progress = min(1.0, t_local / target_clip.duration)
-                 current_freq = start_f + (end_f - start_f) * progress
-
-        desc = {
-            "type": target_clip.type.lower(),
-            "frequency_hz": float(current_freq),
-            "magnitude": eff_mag,
-            "length_ms": 100, # Short burst for scrubbing sensation
-            "phase": phase_payload,
-            "start_mag": getattr(target_clip, 'start_mag', -10000),
-            "end_mag": getattr(target_clip, 'end_mag', 10000),
-             # Direction defaults..
-        }
-        
-        # Mapping Types
-        tm = {"Sine":"sine","Square":"square","Triangle":"triangle","SawtoothUp":"sawtoothup",
-              "SawtoothDown":"sawtoothdown","Constant":"constant","Ramp":"ramp",
-              "Spring":"spring","Damper":"damper","Inertia":"inertia","Friction":"friction"}
-        if target_clip.type in tm:
-            desc['type'] = tm[target_clip.type]
-            
-        engine.play_descriptor(desc)
+        # Let process_sequencer_logic handle starting effects at the new position
+        # on the next frame - it will use start_new_effect with proper state management
 
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
