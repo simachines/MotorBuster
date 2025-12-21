@@ -477,6 +477,13 @@ class FeditNativeApp:
         self.stats_sum = 0.0
         self.stats_count = 0
 
+    @staticmethod
+    def _clip_is_infinite(clip: Clip | None) -> bool:
+        if not clip:
+            return False
+        duration = clip.duration
+        return duration <= 0.0 or math.isinf(duration)
+
 
     # --- Clip helpers ---
     def _snap_to_edges(self, track: Track, clip: Clip, candidate_time: float, snap_px: float = 8.0) -> float:
@@ -1582,6 +1589,7 @@ class FeditNativeApp:
                     'last_sent_freq': None,
                     'last_mag': None,
                     'last_freq': None,
+                    'clip_was_infinite': False,
                 }
             
             state = self.track_states[t_idx]
@@ -1597,8 +1605,13 @@ class FeditNativeApp:
             def start_new_effect(start_phase=-1):
                 if not current_clip:
                     return -1
-                dur_ms = int(current_clip.duration * 1000) + self.UPDATE_LENGTH_BUFFER_MS
+                clip_start = current_clip.start_time
+                clip_end = clip_start + current_clip.duration
+                playhead = max(cur_t, clip_start)
+                remaining_ms = int(max(0.0, clip_end - playhead) * 1000)
+                dur_ms = remaining_ms + self.UPDATE_LENGTH_BUFFER_MS
                 eff_mag = int(current_clip.magnitude * global_gain)
+                state['clip_was_infinite'] = self._clip_is_infinite(current_clip)
 
                 # Build descriptor for engine.play_descriptor
                 type_map = {
@@ -1655,7 +1668,7 @@ class FeditNativeApp:
 
                 self.log_api("play_descriptor", desc)
                 new_id = engine.play_descriptor(desc)
-                state['effect_start_time'] = current_clip.start_time
+                state['effect_start_time'] = playhead
                 state['last_sweep_update_local'] = None
                 # Initialize tracking so the first continuation tick doesn't immediately trigger an update
                 state['last_mag'] = current_clip.magnitude
@@ -1777,6 +1790,7 @@ class FeditNativeApp:
                 
                 # Try Transfer (Reuse Effect)
                 transferred = False
+                should_stop_old = state.get('clip_was_infinite', False)
                 if eff_id != -1 and current_clip and prev_ctype == current_clip.type == "Sine":
                     # Reuse the sine effect via update
                     dur_ms = int(current_clip.duration * 1000)
@@ -1813,7 +1827,7 @@ class FeditNativeApp:
                 
                 if not transferred:
                     # Stop Old
-                    if eff_id != -1:
+                    if eff_id != -1 and should_stop_old:
                         self.log_api("stop_effect", {"effect_id": eff_id})
                         engine.stop_effect(eff_id)
                         eff_id = -1
@@ -1834,10 +1848,12 @@ class FeditNativeApp:
                     state['last_mag'] = current_clip.magnitude
                     state['last_freq'] = current_clip.frequency
                     state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
+                    state['clip_was_infinite'] = self._clip_is_infinite(current_clip)
                 else:
                     state['last_sent_freq'] = None
                     state['last_mag'] = None
                     state['last_freq'] = None
+                    state['clip_was_infinite'] = False
 
 
     # --- Rendering ---
