@@ -20,7 +20,7 @@ print(f"Dependencies at {DEPENDENCIES_DIR}")
 
 # Build Arguments
 args = [
-    'native_app.py',             # Your main script
+    os.path.join(BASE_DIR, 'native_app.py'), # Your main script
     '--name=Fedit2',              # Executable name
     '--onefile',                 # Single ONEFILE executable
     '--clean',                   # Clean cache
@@ -37,6 +37,9 @@ args = [
     '--exclude-module=starlette',
     '--exclude-module=tkinter',
     '--hidden-import=server.ffb_engine', # Explicitly force import
+    f'--distpath={DIST_DIR}',    # Force dist location
+    f'--workpath={BUILD_DIR}',   # Force build temp location
+    f'--specpath={BASE_DIR}',    # Force spec file location
 ]
 
 # Bundle SDL3 DLLs from server package

@@ -1442,7 +1442,9 @@ class FeditNativeApp:
                                 'clip_id': None,
                                 'clip_type': None,
                                 'chain_end_time': None, # Reset chain info
+                                'chain_end_time': None, # Reset chain info
                                 'effect_start_time': None,
+                                'hw_start_time': None,  # NEW: Time when RunHapticEffect was called
                                 'phase_acc': 0.0,
                                 'last_sweep_update_local': None,
                                 'last_sent_freq': None,
@@ -1600,6 +1602,10 @@ class FeditNativeApp:
 
     def _trigger_scrub_haptics(self, time_s: float):
         """Send a single-shot haptic update for the clip under simple scrubbing."""
+        # Only trigger haptics if actually playing
+        if not self.sequencer.is_playing:
+            return
+        
         # Simple throttle: Don't spam if we just sent one
         now = time.time()
         if hasattr(self, '_last_scrub_haptic_time'):
@@ -1678,8 +1684,10 @@ class FeditNativeApp:
                     'effect_id': -1,
                     'clip_id': None,
                     'clip_type': None,
+                    'clip_type': None,
                     'chain_end_time': None,
                     'effect_start_time': None,
+                    'hw_start_time': None,
                     'last_sweep_update_local': None,
                     'last_sent_freq': None,
                     'last_mag': None,
@@ -1770,7 +1778,9 @@ class FeditNativeApp:
 
                 self.log_api("play_descriptor", desc)
                 new_id = engine.play_descriptor(desc)
+                new_id = engine.play_descriptor(desc)
                 state['effect_start_time'] = playhead
+                state['hw_start_time'] = playhead # Store HW start time
                 state['last_sweep_update_local'] = None
                 # Initialize tracking so the first continuation tick doesn't immediately trigger an update
                 state['last_mag'] = current_clip.magnitude
@@ -1838,14 +1848,13 @@ class FeditNativeApp:
                         should_send = (is_sweep and sweep_ready) or has_changed
 
                         if should_send:
-                             # Use Chain End for Duration - CALCULATE TOTAL DURATION
+                             # Use Chain End for Duration, relative to Hardware Start
                              chain_end = state.get('chain_end_time', current_clip.start_time + current_clip.duration)
-                             eff_start = state.get('effect_start_time', current_clip.start_time)
+                             hw_start = state.get('hw_start_time', current_clip.start_time)
                              
-                             # With SDL, if we update the length, it usually sets the TOTAL length of the effect instance.
-                             # So we should send (Chain End - Start Time)
-                             total_dur_ms = int(max(0.0, chain_end - eff_start) * 1000)
-                             effect_len_ms = total_dur_ms + self.UPDATE_LENGTH_BUFFER_MS
+                             # Total Duration from HW Start
+                             remaining_ms = int(max(0.0, chain_end - hw_start) * 1000)
+                             effect_len_ms = remaining_ms + self.UPDATE_LENGTH_BUFFER_MS
                              
                              t_elapsed = t_local
                              start_f = current_clip.frequency
@@ -1921,19 +1930,11 @@ class FeditNativeApp:
                     chain_end = self._get_contiguous_chain_end(track, current_clip)
                     state['chain_end_time'] = chain_end
                     
-                    playhead = max(cur_t, current_clip.start_time)
-                    # Use Total Duration similar to CONTINUATION
-                    eff_start = state.get('effect_start_time', current_clip.start_time) # Should we use old or new start?
-                    # If we reuse the effect, the ID persists. Does SDL reset the timer on Update?
-                    # Usually NO. So we need duration from ORIGINAL start.
+                    # Duration is now Time-to-Chain-End (Total from HW Start)
+                    hw_start = state.get('hw_start_time', state.get('effect_start_time', 0))
                     
-                    # BUT `effect_start_time` in state tracks when we CREATED the effect?
-                    # Actually, if we are transitioning, we might be extending the same effect instance.
-                    # Or are we conceptually starting a "new" phase?
-                    # If SDL timer continues, we must use origin.
-                    # If we believe `state['effect_start_time']` is the origin, then:
-                    total_dur_ms = int(max(0.0, chain_end - eff_start) * 1000)
-                    dur_ms = total_dur_ms + self.UPDATE_LENGTH_BUFFER_MS
+                    # Update parameters
+                    dur_ms = int(max(0.0, chain_end - hw_start) * 1000) + self.UPDATE_LENGTH_BUFFER_MS
                     
                     eff_mag = int(current_clip.magnitude * global_gain)
                     
@@ -1983,6 +1984,7 @@ class FeditNativeApp:
                 state['clip_type'] = current_clip.type if current_clip else None
                 # Chain End Time is set in start_new_effect or Transition block
                 state['effect_start_time'] = current_clip.start_time if current_clip else None
+                # NOTE: Do NOT reset hw_start_time here if transferring, as we are reusing the HW effect!
                 state['last_sweep_update_local'] = None
                 if current_clip:
                     # Seed tracking to prevent an immediate "changed" update on the next tick
