@@ -549,7 +549,7 @@ class HapticController:
             return -1
 
     def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = 0):
-        """Updates parameters. Uses Infinite duration to avoid gaps."""
+        """Updates parameters with specified duration."""
         if not self.haptic or effect_id == -1: return -1
 
         effect = sdl_haptic.SDL_HapticEffect()
@@ -559,7 +559,7 @@ class HapticController:
         effect.periodic.direction.type = sdl_haptic.SDL_HAPTIC_CARTESIAN
         effect.periodic.period = int(1000 / max(0.1, float(freq)))
         effect.periodic.magnitude = magnitude
-        effect.periodic.length = sdl_haptic.SDL_HAPTIC_INFINITY
+        effect.periodic.length = duration_ms
         effect.periodic.attack_length = 0
         effect.periodic.fade_length = 0
         effect.periodic.phase = phase

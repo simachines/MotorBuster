@@ -574,6 +574,32 @@ class FeditNativeApp:
 
         return candidate
 
+    def _get_contiguous_chain_end(self, track: Track, start_clip: Clip) -> float:
+        """
+        Finds the end time of the contiguous chain of clips starting from start_clip.
+        Clips are considered contiguous if gap < 1ms (approx).
+        """
+        current_clip = start_clip
+        chain_end = current_clip.start_time + current_clip.duration
+        
+        # Iterate to find next neighbor until chain breaks
+        while True:
+            found_next = False
+            for other in track.clips:
+                if other is current_clip: continue
+                
+                # Check if 'other' starts exactly where 'current' ends (with small tolerance)
+                # Tolerance: 0.001s (1ms)
+                if abs(other.start_time - chain_end) < 0.005: # 5ms tolerance for "touching"
+                    chain_end = other.start_time + other.duration
+                    current_clip = other
+                    found_next = True
+                    break
+            if not found_next:
+                break
+                
+        return chain_end
+
     # --- Waveform helpers ---
     def _wave_amplitude(self, clip: Clip, t: float) -> float:
         """Return signed amplitude at time t (seconds) for display purposes."""
@@ -1359,6 +1385,7 @@ class FeditNativeApp:
                             if new_t < 0.05:
                                 new_t = 0.0
                             self.sequencer.current_time = new_t
+                            self._trigger_scrub_haptics(new_t)
                             if not was_scrubbing:
                                 self.sequencer.selected_clip = None
                                 self.update_inspector_ui()
@@ -1371,6 +1398,7 @@ class FeditNativeApp:
                         if new_t < 0.05:
                             new_t = 0.0
                         self.sequencer.current_time = new_t
+                        self._trigger_scrub_haptics(new_t)
         else:
             # Mouse Up - Release Drag/Resize/Scrub
             if self.sequencer.drag_clip:
@@ -1413,6 +1441,7 @@ class FeditNativeApp:
                                 'effect_id': -1,
                                 'clip_id': None,
                                 'clip_type': None,
+                                'chain_end_time': None, # Reset chain info
                                 'effect_start_time': None,
                                 'phase_acc': 0.0,
                                 'last_sweep_update_local': None,
@@ -1569,6 +1598,71 @@ class FeditNativeApp:
             return
         time.sleep(0.003)
 
+    def _trigger_scrub_haptics(self, time_s: float):
+        """Send a single-shot haptic update for the clip under simple scrubbing."""
+        # Simple throttle: Don't spam if we just sent one
+        now = time.time()
+        if hasattr(self, '_last_scrub_haptic_time'):
+            if now - self._last_scrub_haptic_time < 0.03: # 30ms throttle
+                return
+        self._last_scrub_haptic_time = now
+
+        # Find top-most clip at time_s
+        target_clip = None
+        for track in self.sequencer.tracks:
+            c = self.sequencer.get_clip_at(self.sequencer.tracks.index(track), time_s)
+            if c:
+                target_clip = c
+                break # Priority to top tracks? Or active track? Currently just first found.
+        
+        if not target_clip:
+            # Maybe stop effect?
+            return
+
+        # Prepare description
+        # Similar to start_new_effect but just for immediate feedback
+        eff_mag = int(target_clip.magnitude) # Use 100% of clip mag? Or scaled?
+        
+        # Calculate Phase for current time if Sine
+        phase_payload = 0
+        current_freq = target_clip.frequency
+        
+        if target_clip.type == "Sine":
+            start_f = target_clip.frequency
+            end_f = getattr(target_clip, 'frequency_end', start_f) if target_clip.sweep_enabled else start_f
+            t_local = max(0.0, time_s - target_clip.start_time)
+            k = (end_f - start_f) / max(1e-6, target_clip.duration)
+            
+            # Phase Integral: (start_f * t + 0.5 * k * t^2)
+            # Add Clip Start Phase
+            start_deg = getattr(target_clip, "start_phase", 0)
+            norm_phase = (start_deg/360.0 + start_f * t_local + 0.5 * k * t_local * t_local) % 1.0
+            phase_payload = int(norm_phase * 36000)
+            
+            if target_clip.sweep_enabled:
+                 progress = min(1.0, t_local / target_clip.duration)
+                 current_freq = start_f + (end_f - start_f) * progress
+
+        desc = {
+            "type": target_clip.type.lower(),
+            "frequency_hz": float(current_freq),
+            "magnitude": eff_mag,
+            "length_ms": 100, # Short burst for scrubbing sensation
+            "phase": phase_payload,
+            "start_mag": getattr(target_clip, 'start_mag', -10000),
+            "end_mag": getattr(target_clip, 'end_mag', 10000),
+             # Direction defaults..
+        }
+        
+        # Mapping Types
+        tm = {"Sine":"sine","Square":"square","Triangle":"triangle","SawtoothUp":"sawtoothup",
+              "SawtoothDown":"sawtoothdown","Constant":"constant","Ramp":"ramp",
+              "Spring":"spring","Damper":"damper","Inertia":"inertia","Friction":"friction"}
+        if target_clip.type in tm:
+            desc['type'] = tm[target_clip.type]
+            
+        engine.play_descriptor(desc)
+
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
         
@@ -1584,6 +1678,7 @@ class FeditNativeApp:
                     'effect_id': -1,
                     'clip_id': None,
                     'clip_type': None,
+                    'chain_end_time': None,
                     'effect_start_time': None,
                     'last_sweep_update_local': None,
                     'last_sent_freq': None,
@@ -1606,9 +1701,16 @@ class FeditNativeApp:
                 if not current_clip:
                     return -1
                 clip_start = current_clip.start_time
-                clip_end = clip_start + current_clip.duration
+                
+                # CHAIN DURATION LOGIC
+                # If this clip is part of a contiguous chain, we want the effect to run 
+                # until the end of the CHAIN, not just this clip.
+                chain_end = self._get_contiguous_chain_end(track, current_clip)
+                state['chain_end_time'] = chain_end
+                
                 playhead = max(cur_t, clip_start)
-                remaining_ms = int(max(0.0, clip_end - playhead) * 1000)
+                # Calculate remaining time against CHAIN end
+                remaining_ms = int(max(0.0, chain_end - playhead) * 1000)
                 dur_ms = remaining_ms + self.UPDATE_LENGTH_BUFFER_MS
                 eff_mag = int(current_clip.magnitude * global_gain)
                 state['clip_was_infinite'] = self._clip_is_infinite(current_clip)
@@ -1692,9 +1794,21 @@ class FeditNativeApp:
                         # Check "Dirty" State (User changed sliders)
                         last_mag = state.get('last_mag', -1)
                         last_freq = state.get('last_freq', -1)
+                        
+                        # --- CHAIN VALIDATION ---
+                        # Re-check chain length to support dynamic clip removal/resize
+                        current_chain_end = self._get_contiguous_chain_end(track, current_clip)
+                        stored_chain_end = state.get('chain_end_time')
+                        chain_changed = (stored_chain_end is None) or (abs(current_chain_end - stored_chain_end) > 0.01)
+                        
+                        if chain_changed:
+                             # Update stored state immediately so we don't spam updates if playhead paused?
+                             # No, we want to spam the update command ONCE to fix the effect.
+                             state['chain_end_time'] = current_chain_end
 
                         has_changed = (current_clip.magnitude != last_mag) or \
-                                      (current_clip.frequency != last_freq and not is_sweep)
+                                      (current_clip.frequency != last_freq and not is_sweep) or \
+                                      chain_changed
 
                         # Target ~10 updates per Hz across the clip duration (time-based, not frame-based)
                         t_local = max(0.0, cur_t - (state.get('effect_start_time') if state.get('effect_start_time') is not None else current_clip.start_time))
@@ -1724,7 +1838,15 @@ class FeditNativeApp:
                         should_send = (is_sweep and sweep_ready) or has_changed
 
                         if should_send:
-                             effect_len_ms = int(max(0.0, current_clip.duration - t_local) * 1000)
+                             # Use Chain End for Duration - CALCULATE TOTAL DURATION
+                             chain_end = state.get('chain_end_time', current_clip.start_time + current_clip.duration)
+                             eff_start = state.get('effect_start_time', current_clip.start_time)
+                             
+                             # With SDL, if we update the length, it usually sets the TOTAL length of the effect instance.
+                             # So we should send (Chain End - Start Time)
+                             total_dur_ms = int(max(0.0, chain_end - eff_start) * 1000)
+                             effect_len_ms = total_dur_ms + self.UPDATE_LENGTH_BUFFER_MS
+                             
                              t_elapsed = t_local
                              start_f = current_clip.frequency
                              end_f = current_clip.frequency_end if is_sweep else start_f
@@ -1793,7 +1915,26 @@ class FeditNativeApp:
                 should_stop_old = state.get('clip_was_infinite', False)
                 if eff_id != -1 and current_clip and prev_ctype == current_clip.type == "Sine":
                     # Reuse the sine effect via update
-                    dur_ms = int(current_clip.duration * 1000)
+                    
+                    # Update Chain End if we switched clips (which we did, since curr != prev)
+                    # We need to re-evaluate the chain end from this new clip onwards
+                    chain_end = self._get_contiguous_chain_end(track, current_clip)
+                    state['chain_end_time'] = chain_end
+                    
+                    playhead = max(cur_t, current_clip.start_time)
+                    # Use Total Duration similar to CONTINUATION
+                    eff_start = state.get('effect_start_time', current_clip.start_time) # Should we use old or new start?
+                    # If we reuse the effect, the ID persists. Does SDL reset the timer on Update?
+                    # Usually NO. So we need duration from ORIGINAL start.
+                    
+                    # BUT `effect_start_time` in state tracks when we CREATED the effect?
+                    # Actually, if we are transitioning, we might be extending the same effect instance.
+                    # Or are we conceptually starting a "new" phase?
+                    # If SDL timer continues, we must use origin.
+                    # If we believe `state['effect_start_time']` is the origin, then:
+                    total_dur_ms = int(max(0.0, chain_end - eff_start) * 1000)
+                    dur_ms = total_dur_ms + self.UPDATE_LENGTH_BUFFER_MS
+                    
                     eff_mag = int(current_clip.magnitude * global_gain)
                     
                     # Calculate Phase
@@ -1840,6 +1981,7 @@ class FeditNativeApp:
                 state['effect_id'] = eff_id
                 state['clip_id'] = curr_cid
                 state['clip_type'] = current_clip.type if current_clip else None
+                # Chain End Time is set in start_new_effect or Transition block
                 state['effect_start_time'] = current_clip.start_time if current_clip else None
                 state['last_sweep_update_local'] = None
                 if current_clip:

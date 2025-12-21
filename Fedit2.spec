@@ -2,8 +2,8 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('c:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server', 'server')]
-binaries = [('c:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\.dependencies\\sdl2dll\\dll\\SDL2.dll', '.')]
+datas = [('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server', 'server')]
+binaries = [('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server\\SDL3.dll', '.'), ('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server\\SDL3_image.dll', '.'), ('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server\\SDL3_mixer.dll', '.'), ('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server\\SDL3_net.dll', '.'), ('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server\\SDL3_rtf.dll', '.'), ('C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\server\\SDL3_ttf.dll', '.')]
 hiddenimports = ['server.ffb_engine']
 hiddenimports += collect_submodules('server')
 tmp_ret = collect_all('dearpygui')
@@ -16,7 +16,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ['native_app.py'],
-    pathex=['.', 'c:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\.dependencies'],
+    pathex=['.'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

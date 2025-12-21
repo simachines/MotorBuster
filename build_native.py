@@ -39,43 +39,20 @@ args = [
     '--hidden-import=server.ffb_engine', # Explicitly force import
 ]
 
-# Robust Dependency Handling
-sdl2_path = None
-
-# 1. Check local .dependencies cache (used in our agent env)
-local_sdl2 = os.path.join(DEPENDENCIES_DIR, "sdl2dll", "dll", "SDL2.dll")
-if os.path.exists(DEPENDENCIES_DIR):
-    print(f"Using local dependencies at {DEPENDENCIES_DIR}")
-    args.append(f'--paths={DEPENDENCIES_DIR}')
-    if os.path.exists(local_sdl2):
-        sdl2_path = local_sdl2
-
-# 2. If not found locally, check site-packages (standard pip install)
-if not sdl2_path:
-    try:
-        import os
-        # Try to find within installed pysdl2-dll package
-        # Usually in Lib/site-packages/sdl2dll/dll/SDL2.dll or similar
-        # We can try to guess based on standard install locations or import
-        import sdl2dll # type: ignore
-        package_dir = os.path.dirname(os.path.abspath(sdl2dll.__file__))
-        proposed = os.path.join(package_dir, "dll", "SDL2.dll")
-        if os.path.exists(proposed):
-             sdl2_path = proposed
-             print(f"Found SDL2 via package import: {sdl2_path}")
-    except ImportError:
-        pass
-
-# 3. Last resort fallback (user might be running this script from a venv)
-if not sdl2_path:
-    # Look in the venv site-packages manually if needed, or just warn
-    pass
-
-if sdl2_path and os.path.exists(sdl2_path):
-    print(f"Bundling SDL2.dll from: {sdl2_path}")
-    args.append(f'--add-binary={sdl2_path};.')
+# Bundle SDL3 DLLs from server package
+sdl3_dll = os.path.join(BASE_DIR, "server", "SDL3.dll")
+if os.path.exists(sdl3_dll):
+    print(f"Bundling SDL3.dll from: {sdl3_dll}")
+    args.append(f'--add-binary={sdl3_dll};.')
 else:
-    print("WARNING: Could not find SDL2.dll to bundle! Application may fail.")
+    print("WARNING: Could not find SDL3.dll in server/ directory!")
+
+# Bundle other SDL3 libs if present (Image, Mixer, etc)
+for fname in os.listdir(os.path.join(BASE_DIR, "server")):
+    if fname.startswith("SDL3") and fname.endswith(".dll") and fname != "SDL3.dll":
+        fpath = os.path.join(BASE_DIR, "server", fname)
+        print(f"Bundling {fname}...")
+        args.append(f'--add-binary={fpath};.')
 
 # Force include the 'server' package dir
 server_dir = os.path.join(BASE_DIR, "server")
@@ -91,10 +68,5 @@ PyInstaller.__main__.run(args)
 exe_path = os.path.join(DIST_DIR, "Fedit2.exe")
 if os.path.exists(exe_path):
     print(f"Build Complete: {exe_path}")
-    # If using OneFile, we don't need to copy SDL2.dll next to it usually,
-    # but PySDL2 sometimes demands it in CWD. Copy when available.
-    if sdl2_path:
-        shutil.copy(sdl2_path, os.path.join(DIST_DIR, "SDL2.dll"))
-        print("Copied SDL2.dll to dist/ for safety.")
 else:
     print("Build Failed.")
