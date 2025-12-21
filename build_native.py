@@ -21,7 +21,9 @@ print(f"Dependencies at {DEPENDENCIES_DIR}")
 # Build Arguments
 args = [
     os.path.join(BASE_DIR, 'native_app.py'), # Your main script
-    '--name=Fedit2',              # Executable name
+    '--name=FFeditor',              # Executable name
+    f'--icon={os.path.join(BASE_DIR, "assets", "icon.ico")}', # Exe Icon
+    f'--add-data={os.path.join(BASE_DIR, "assets")};assets',  # Bundle assets dir
     '--onefile',                 # Single ONEFILE executable
     '--clean',                   # Clean cache
     '--windowed',                # No terminal window

@@ -1264,7 +1264,7 @@ class FeditNativeApp:
         mouse_left_down = dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
         mouse_left_just_pressed = mouse_left_down and not self.mouse_left_button_down
         self.mouse_left_button_down = mouse_left_down
-        if mouse_left_just_pressed and not ctrl_down:
+        if mouse_left_just_pressed and not ctrl_down and mouse_in_timeline:
             self.highlighted_clip_ids.clear()
             self.multi_selected_clips = []
 
@@ -2413,25 +2413,43 @@ class FeditNativeApp:
                 used_bold = font_bold_path if os.path.exists(font_bold_path) else None
             elif os.path.exists(sys_font_path):
                 used_path = sys_font_path
-                used_bold = sys_bold_path if os.path.exists(sys_bold_path) else None
-                
-            if used_path:
+            # Add font chars for custom title bar icons: — (0x2014), □ (0x25A1), ✕ (0x2715)
+            # We use a context manager or add_font_chars directly if supported, or remap.
+            # DPG add_font_chars needs to be called on the font object.
+            
+            # Helper to add ranges
+            def add_custom_chars(font_tag):
+                dpg.add_font_range_hint(dpg.mvFontRangeHint_Default, parent=font_tag)
+                # 0x2014 (Em Dash), 0x25A1 (Square), 0x00D7 (Mult Sign)
+                dpg.add_font_chars([0x2014, 0x25A1, 0x00D7], parent=font_tag)
+
+            if used_bold and os.path.exists(used_bold):
                 try:
-                    # Main Font
-                    with dpg.font(used_path, 16) as default_font:
-                        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-                    dpg.bind_font(default_font)
-                    
-                    # Bold Font (if needed later)
-                    if used_bold:
-                        with dpg.font(used_bold, 16) as bold_font:
-                             dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-                    
+                    self.font_bold = dpg.add_font(used_bold, 20)
+                    add_custom_chars(self.font_bold)
+                    self.font_header = dpg.add_font(used_bold, 24)
+                    add_custom_chars(self.font_header)
+                    # Large icons font
+                    self.font_large_icons = dpg.add_font(used_path if used_path else used_bold, 28) 
+                    add_custom_chars(self.font_large_icons)
+                except Exception as e:
+                    self.log(f"Error loading bold/large font: {e}")
+            
+            if used_path and os.path.exists(used_path):
+                try:
+                    self.font_regular = dpg.add_font(used_path, 18)
+                    add_custom_chars(self.font_regular)
+                    if not hasattr(self, 'font_large_icons'): # Fallback if bold failed or didn't exist
+                         self.font_large_icons = dpg.add_font(used_path, 28)
+                         add_custom_chars(self.font_large_icons)
+
+                    dpg.bind_font(self.font_regular)
                     print(f"Loaded Font: {used_path}")
                 except Exception as e:
-                    print(f"Font Load Error: {e}")
+                     self.log(f"Error loading regular font: {e}")
             else:
-                print("Using Default DPG Font")
+                # Fallback to default
+                dpg.bind_font(dpg.mvFont_Default)
 
     def apply_theme(self, mode):
         self.current_theme_mode = mode
@@ -2510,44 +2528,87 @@ class FeditNativeApp:
             dpg.add_key_press_handler(dpg.mvKey_S, callback=lambda: dpg.show_item("dlg_save") if ctrl_pressed() else None)
             dpg.add_key_press_handler(dpg.mvKey_O, callback=lambda: dpg.show_item("dlg_load") if ctrl_pressed() else None)
 
+        with dpg.theme(tag="theme_no_padding"):
+            with dpg.theme_component(dpg.mvAll):
+                # WindowPadding y=6 to vertically center the title bar contents (avoids sticking to top)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 8, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 4, 3, category=dpg.mvThemeCat_Core) # Restore default frame padding for buttons
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 4, category=dpg.mvThemeCat_Core)
+
         with dpg.window(tag="Main"):
-            # Menu Bar
-            with dpg.menu_bar():
-                with dpg.menu(label="File"):
+            dpg.bind_item_theme("Main", "theme_no_padding")
+
+            # Title Bar Section
+            
+            # Load Icon Texture (Existing code)
+            icon_width, icon_height, icon_channels, icon_data = 0, 0, 0, []
+            texture_loaded = False
+            try:
+                import os
+                base_path = os.path.dirname(os.path.abspath(__file__))
+                icon_png_path = os.path.join(base_path, "assets", "icon.png")
+                width, height, channels, data = dpg.load_image(icon_png_path)
+                
+                with dpg.texture_registry(show=False):
+                    dpg.add_static_texture(width=width, height=height, default_value=data, tag="icon_texture")
+                texture_loaded = True
+            except Exception as e:
+                print(f"Failed to load icon texture: {e}")
+
+            # Custom Header
+            with dpg.group(horizontal=True, tag="custom_title_bar"):
+                 # Left Padding for Icon
+                 dpg.add_spacer(width=8) 
+                 
+                 if texture_loaded:
+                     dpg.add_image("icon_texture", width=20, height=20) 
+                 
+                 dpg.add_spacer(width=5)
+                 dpg.add_text("FFeditor", color=(200, 200, 200))
+                 dpg.add_spacer(width=20)
+                 
+                 # Menu Bar (simulated)
+                 # File Menu
+                 dpg.add_button(label="File", tag="btn_file_menu")
+                 with dpg.popup("btn_file_menu", mousebutton=dpg.mvMouseButton_Left):
                     dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
                     dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
-                with dpg.menu(label="View"):
-                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
-                    dpg.add_menu_item(
-                        label="Show Redlines",
-                        check=True,
-                        default_value=self.show_redlines,
-                        tag="menu_redlines",
-                        callback=self.toggle_redlines,
-                    )
-                    dpg.add_menu_item(
-                        label="Wheel Graph",
-                        check=True,
-                        default_value=self._wheel_graph_visible,
-                        tag="menu_wheel_graph",
-                        callback=self._on_wheel_graph_checkbox,
-                    )
-                    dpg.add_menu_item(
-                        label="Mouse Status",
-                        tag="menu_mouse_status",
-                        check=True,
-                        default_value=True,
-                        callback=self._on_mouse_status_checkbox,
-                    )
-                # --- Device Controls in Menu Bar ---
-                dpg.add_spacer(width=20)
-                dpg.add_combo(tag="device_combo", width=200)
-                dpg.add_button(label="Scan", callback=self.scan_devices)
-                dpg.add_button(label="Connect", callback=self.connect_callback)
-                dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
 
+                 # View Menu
+                 dpg.add_button(label="View", tag="btn_view_menu")
+                 with dpg.popup("btn_view_menu", mousebutton=dpg.mvMouseButton_Left):
+                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                    dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
+                    dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
+                    dpg.add_menu_item(label="Mouse Status", check=True, default_value=True, callback=self._on_mouse_status_checkbox)
+                 
+                 dpg.add_spacer(width=10)
+                 dpg.add_combo(tag="device_combo", width=200)
+                 dpg.add_button(label="Scan", callback=self.scan_devices)
+                 dpg.add_button(label="Connect", callback=self.connect_callback)
+                 dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                 
+                 dpg.add_spacer(width=100, tag="title_bar_spacer") 
+            
+                 # Window Controls
+                 # Icons: —  □  ×
+                 # Taller buttons (height=28)
+                 b_min = dpg.add_button(label="—", width=34, height=28, callback=lambda: dpg.minimize_viewport())
+                 b_max = dpg.add_button(label="□", width=34, height=28, callback=self.toggle_maximize)
+                 b_close = dpg.add_button(label="×", width=34, height=28, callback=lambda: dpg.stop_dearpygui())
+                 
+                 # Bind large font to buttons
+                 if hasattr(self, 'font_large_icons'):
+                     dpg.bind_item_font(b_min, self.font_large_icons)
+                     dpg.bind_item_font(b_max, self.font_large_icons)
+                     dpg.bind_item_font(b_close, self.font_large_icons)
+
+            dpg.add_separator()  
+            # Spacing below title bar - Reduced to 0/minimal as requested
+            # Content will sit flush against separator
+            
             # Torque Monitor Window (Initially Hidden or Shown)
             with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=False):
                  dpg.add_text("Real-time Torque", color=(150, 255, 150))
@@ -2695,17 +2756,156 @@ class FeditNativeApp:
     def toggle_redlines(self, sender, app_data, user_data=None):
         self.show_redlines = bool(app_data)
 
+    
+    # --- Custom Title Bar Logic ---
+    def _render_custom_title_bar(self):
+        with dpg.group(horizontal=True, tag="custom_title_bar"):
+            # Icon
+            # dpg.add_image("app_icon", width=20, height=20) # Need to load image texture first if we want this
+            dpg.add_button(label="Fedit2", width=100,  callback=None) # Placeholder/Title
+            
+            # Drag Area (Spacer)
+            # We use a button or specific item to catch drag? 
+            # Actually, we can just check if mouse is over the title bar group and is dragging.
+            dpg.add_spacer(width=20)
+            
+            # Application Menu (File, View, etc) integrated into Title Bar? 
+            # Or just below it? Let's put it back in the main window for now, 
+            # but usually borderless apps have the menu inside the bar.
+            # To simulate Menu Bar in a Group:
+            with dpg.menu_bar():
+                 with dpg.menu(label="File"):
+                    dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
+                    dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
+                    dpg.add_separator()
+                    dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
+                 with dpg.menu(label="View"):
+                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+                    dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
+                    dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
+                    dpg.add_menu_item(label="Mouse Status", check=True, default_value=True, callback=self._on_mouse_status_checkbox)
+                 # Re-add Device Controls to Menu Bar area
+                 dpg.add_spacer(width=20)
+                 dpg.add_combo(tag="device_combo", width=200)
+                 dpg.add_button(label="Scan", callback=self.scan_devices)
+                 dpg.add_button(label="Connect", callback=self.connect_callback)
+                 dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+
+            # Spacer to push window controls to the right
+            # This is tricky in DPG as width=-1 might not work in group horizontal
+            # We can calculate dynamic width or just use a large spacer for now/
+            # Better: DPG 'layout' is limited. We might need to rely on the window width.
+            avail_w = dpg.get_item_width("Main") 
+            # This is hard to get perfectly right without a resize callback calculating width.
+            # Fallback: Just putting them on the right might require a separate group with alignment, but DPG Main window is root.
+            
+            dpg.add_spacer(width=50) # Just a bit of space
+
+            # Window Controls
+            dpg.add_button(label="_", width=30, callback=lambda: dpg.minimize_viewport())
+            dpg.add_button(label="[ ]", width=30, callback=self.toggle_maximize)
+            dpg.add_button(label="X", width=30, callback=lambda: dpg.stop_dearpygui())
+
+    def toggle_maximize(self):
+        # Native Maximize/Restore to ensure sync with OS state
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            if hwnd:
+                if ctypes.windll.user32.IsZoomed(hwnd):
+                    ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
+                else:
+                    ctypes.windll.user32.ShowWindow(hwnd, 3) # SW_MAXIMIZE = 3
+        except Exception as e:
+            print(f"Maximize failed: {e}")
+
+    def _enable_resize(self):
+        # Enable resizing for borderless window
+        try:
+            import ctypes
+            from ctypes import wintypes
+            GWL_STYLE = -16
+            WS_THICKFRAME = 0x00040000
+            WS_CAPTION = 0x00C00000
+            
+            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            if hwnd:
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+                # Ensure WS_THICKFRAME is on, WS_CAPTION is off (already off by decorated=False usually)
+                style |= WS_THICKFRAME
+                style &= ~WS_CAPTION # Ensure no caption
+                # Apply style
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+                
+                # Force frame update using SetWindowPos
+                # SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED (0x0020)
+                ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 
+                                                  0x0002 | 0x0001 | 0x0004 | 0x0020)
+        except Exception as e:
+            print(f"Resize enable failed: {e}")
+
+    def _update_title_bar_layout(self):
+        """Calculates spacer width to push window controls to right edge."""
+        try:
+             vp_width = dpg.get_viewport_width()
+             fixed_content_width = 800 # Tuned visually
+             new_spacer_width = max(10, vp_width - fixed_content_width)
+             dpg.set_item_width("title_bar_spacer", new_spacer_width)
+        except: pass
+
+    def _check_title_bar_drag(self):
+        # Native drag logic using simple polling (worked previously)
+        if dpg.is_mouse_button_down(0):
+            try:
+                mx, my = dpg.get_mouse_pos(local=False)
+                # Only check if in title bar area
+                if my < 45:
+                    # Check if over buttons (Right side)
+                    vw = dpg.get_viewport_width()
+                    if mx < (vw - 150):
+                         import ctypes
+                         hwnd = ctypes.windll.user32.GetForegroundWindow()
+                         if hwnd:
+                             ctypes.windll.user32.ReleaseCapture()
+                             ctypes.windll.user32.SendMessageW(hwnd, 0xA1, 2, 0) # HTCAPTION
+            except: pass
+
     def run(self):
+        # Resolve absolute path for icon
+        import os
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_path, "assets", "icon.ico")
+        
         # Disable VSync for Haptics
-        dpg.create_viewport(title='Fedit DAW 2.0', width=1280, height=800, vsync=False)
+        # DECORATED=False for Borderless
+        dpg.create_viewport(title='FFeditor', width=1280, height=800, vsync=False, 
+                            small_icon=icon_path, large_icon=icon_path, 
+                            decorated=False) 
+                            
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("Main", True)
         
+        # Enable resizing logic (Native Style)
+        self._enable_resize()
+
         self.scan_devices()
+
+        import win32gui
+        import win32api
+        
+        self.frame_count = 0
 
         try:
             while dpg.is_dearpygui_running():
+                # Force redraw of title bar spacer
+                self._update_title_bar_layout()
+                
+                if self.frame_count % 2 == 0:
+                    self._throttle_when_idle()
+                    # Check drag every few frames or every frame? Every frame is smoother.
+                    self._check_title_bar_drag()
+
                 try:
                     self.update_loop()
                 except Exception as e:
@@ -2715,9 +2915,11 @@ class FeditNativeApp:
                     self.sequencer.is_playing = False
                     
                 dpg.render_dearpygui_frame()
+                self.frame_count += 1
         finally:
             try:
                 engine.stop_effect()
+
                 self.log_api("stop_effect", {"scope": "all"})
             except Exception as e:
                 self.log(f"Stop on exit failed: {e}")
