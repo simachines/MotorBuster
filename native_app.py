@@ -817,6 +817,10 @@ class FeditNativeApp:
                  dpg.set_value("status_text", "Status: Connected")
                  dpg.configure_item("status_text", color=(0, 255, 0))
                  
+                 # Ensure device starts in a neutral state
+                 engine.stop_effect()
+                 self.log_api("stop_effect", {"scope": "all"})
+                 
                  # Reset previous effect states as we have a new device
                  for k in self.track_states:
                      self.track_states[k] = {
