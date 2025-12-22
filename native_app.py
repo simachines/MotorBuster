@@ -2918,6 +2918,8 @@ class FeditNativeApp:
          # Track drag start position to implement drag threshold
          if not hasattr(self, '_drag_start_pos'):
              self._drag_start_pos = None
+         if not hasattr(self, '_window_drag_offset'):
+             self._window_drag_offset = None
          
          if mouse_down:
              if not self._drag_initiated:
@@ -2938,22 +2940,34 @@ class FeditNativeApp:
                          drag_threshold = 5  # pixels
                          
                          if dx > drag_threshold or dy > drag_threshold:
-                             # Mouse moved enough - start dragging
-                             ctypes.windll.user32.ReleaseCapture()
-                             ctypes.windll.user32.SendMessageW(self._hwnd, 0xA1, 2, 0)
-                             # Drag completed (SendMessageW blocks until release)
-                             # Immediately restore focus
-                             ctypes.windll.user32.SetForegroundWindow(self._hwnd)
-                             ctypes.windll.user32.SetFocus(self._hwnd)
-                             # Reset state immediately
-                             self._drag_initiated = False
-                             self._drag_start_pos = None
+                             # Mouse moved enough - start custom dragging (non-blocking)
+                             if self._window_drag_offset is None:
+                                 import win32api
+                                 cursor_screen = win32api.GetCursorPos()
+                                 # Get window position
+                                 rect = ctypes.wintypes.RECT()
+                                 ctypes.windll.user32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+                                 # Calculate offset from cursor to window top-left
+                                 self._window_drag_offset = (cursor_screen[0] - rect.left, cursor_screen[1] - rect.top)
+                             self._drag_initiated = True
                  else:
                      # Mouse moved outside drag zone
                      self._drag_start_pos = None
+                     self._window_drag_offset = None
+             elif self._window_drag_offset is not None:
+                 # Continue custom drag - move window to follow cursor
+                 try:
+                     import win32api
+                     cursor_screen = win32api.GetCursorPos()
+                     new_x = cursor_screen[0] - self._window_drag_offset[0]
+                     new_y = cursor_screen[1] - self._window_drag_offset[1]
+                     # SWP_NOSIZE | SWP_NOZORDER = 0x0001 | 0x0004 = 0x0005
+                     ctypes.windll.user32.SetWindowPos(self._hwnd, 0, new_x, new_y, 0, 0, 0x0005)
+                 except: pass
          else:
              # Mouse released
              self._drag_start_pos = None
+             self._window_drag_offset = None
              # Restore focus when drag completes
              if self._drag_initiated:
                  # Re-focus and bring window to foreground
