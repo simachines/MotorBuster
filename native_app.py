@@ -8,6 +8,7 @@ import uuid
 import json
 import math
 import warnings
+import webbrowser
 
 # Filter benign PySDL2 warning
 warnings.filterwarnings("ignore", message="pysdl2-dll is installed as source-only")
@@ -150,24 +151,34 @@ class FeditSequencer:
         self.current_time = 0.0
         self.last_tick = 0.0
         self.zoom_x = 50.0
-        self.selected_clip: Clip = None
+        self.selected_clips: list[Clip] = []
         self.drag_clip: Clip = None
         self.drag_time_offset: float = 0.0
         self.resize_clip: Clip = None
         self.resize_edge: str = None
         self.resize_initial_time: float = 0.0
         self.resize_initial_dur: float = 0.0
+        self.resize_initial_dur: float = 0.0
         self.clipboard: dict = None
+        self.cut_clip_ids: list[str] = []
 
     def to_dict(self):
         return {"tracks": [t.to_dict() for t in self.tracks]}
 
     def load_from_dict(self, d):
         self.tracks = [Track.from_dict(td) for td in d.get("tracks", [])]
-        self.selected_clip = None
+        self.selected_clips = []
 
     def add_clip(self, track_idx, type, start_time):
-        clip = Clip(type=type, start_time=start_time, track_index=track_idx)
+        # Auto-naming logic
+        count = 0
+        for t in self.tracks:
+            for c in t.clips:
+                if c.type == type:
+                    count += 1
+        
+        name = f"{type} {count + 1}"
+        clip = Clip(type=type, start_time=start_time, track_index=track_idx, name=name)
         self.tracks[track_idx].clips.append(clip)
         return clip
 
@@ -175,8 +186,8 @@ class FeditSequencer:
         for t in self.tracks:
             if clip in t.clips:
                 t.clips.remove(clip)
-                if self.selected_clip == clip:
-                    self.selected_clip = None
+                if clip in self.selected_clips:
+                    self.selected_clips.remove(clip)
                 return
 
     def get_clip_at(self, track_idx, time_s):
@@ -286,7 +297,9 @@ class InspectorPanel:
     
     def get_target_clip(self):
         if self.clip: return self.clip
-        return self.app.sequencer.selected_clip
+        if self.app.sequencer.selected_clips:
+            return self.app.sequencer.selected_clips[0]
+        return None
 
     def update(self):
         clip = self.get_target_clip()
@@ -753,7 +766,7 @@ class FeditNativeApp:
              idx = int(name.split("#")[-1].replace(")", ""))
              if engine.connect_device(idx):
                  dpg.set_value("status_text", "Status: Connected")
-                 dpg.configure_item("status_text", color=(0, 255, 0))
+                 dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
                  
                  # Reset previous effect states as we have a new device
                  for k in self.track_states:
@@ -767,12 +780,10 @@ class FeditNativeApp:
                          'last_freq': None,
                      }
                  
-                 # Auto-Detect Torque
+                 # Auto-Detect Torque (Logic preserved but UI update removed)
                  detected_torque = self._get_torque_for_device(name)
                  if detected_torque > 0.0:
-                     if dpg.does_item_exist("input_max_torque"):
-                         dpg.set_value("input_max_torque", detected_torque)
-                         self.log(f"Auto-Detected Torque: {detected_torque} Nm")
+                     self.log(f"Auto-Detected Torque: {detected_torque} Nm")
                  
          except: pass
 
@@ -827,13 +838,11 @@ class FeditNativeApp:
             self.sweep_markers = []
             
             # Reset Stats (from Main)
+            # Reset Stats (Internal only)
             self.stats_peak = 0.0
             self.stats_min = 9999.0
             self.stats_sum = 0.0
             self.stats_count = 0
-            if dpg.does_item_exist("txt_peak"): dpg.set_value("txt_peak", "Peak: --")
-            if dpg.does_item_exist("txt_avg"): dpg.set_value("txt_avg", "Avg: --")
-            if dpg.does_item_exist("txt_min"): dpg.set_value("txt_min", "Min: --")
             
             # Auto-rewind if at end
             # Auto-rewind if at end AND we have content
@@ -950,7 +959,6 @@ class FeditNativeApp:
              best_clip = None
              best_edge = None
              best_score = (threshold, 1)
-             selected_clip = self.sequencer.selected_clip
              zoom = self.sequencer.zoom_x
              for clip in track.clips:
                  start_px = clip.start_time * zoom
@@ -958,7 +966,7 @@ class FeditNativeApp:
                  for edge_pos, edge_name in ((start_px, "left"), (end_px, "right")):
                      delta = abs(rel_x - edge_pos)
                      if delta < threshold:
-                         score = (delta, 0 if clip is selected_clip else 1)
+                         score = (delta, 0 if clip in self.sequencer.selected_clips else 1)
                          if score < best_score:
                              best_score = score
                              best_clip = clip
@@ -968,6 +976,18 @@ class FeditNativeApp:
         return None, None
 
     def update_loop(self):
+        # 0. Modal Blocking (About Dialog)
+        if dpg.is_item_shown("win_about"):
+             if self.sequencer.is_playing:
+                 self.process_sequencer_logic()
+             
+             if dpg.does_item_exist("txt_github") and dpg.is_item_hovered("txt_github"):
+                 # IDC_HAND = 32649
+                 ctypes.windll.user32.SetCursor(ctypes.windll.user32.LoadCursorW(0, 32649))
+
+             self._throttle_when_idle()
+             return
+
         # Track Target for Drop/Drag
         mpos = dpg.get_mouse_pos(local=False)
         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
@@ -980,27 +1000,71 @@ class FeditNativeApp:
 
         if dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl):
             if dpg.is_key_pressed(dpg.mvKey_C):
-                if self.sequencer.selected_clip:
-                    self.sequencer.clipboard = self.sequencer.selected_clip.to_dict()
-                    self.log(f"Copied {self.sequencer.selected_clip.name or 'Clip'}")
+                if self.sequencer.selected_clips:
+                    data = [c.to_dict() for c in self.sequencer.selected_clips]
+                    self.sequencer.clipboard = {"clips": data, "cut": False}
+                    self.sequencer.cut_clip_ids = [] # Clear cut visual
+                    self.log(f"Copied {len(data)} Clips")
+
+            if dpg.is_key_pressed(dpg.mvKey_X):
+                if self.sequencer.selected_clips:
+                    data = [c.to_dict() for c in self.sequencer.selected_clips]
+                    self.sequencer.clipboard = {"clips": data, "cut": True}
+                    self.sequencer.cut_clip_ids = [c.id for c in self.sequencer.selected_clips]
+                    self.log(f"Cut {len(data)} Clips (Pending Move)")
 
             if dpg.is_key_pressed(dpg.mvKey_V):
-                if self.sequencer.clipboard:
-                    data = self.sequencer.clipboard
-                    new_clip = Clip.from_dict(data)
-                    new_clip.id = str(uuid.uuid4())
-                    new_clip.start_time = self.sequencer.current_time
+                if self.sequencer.clipboard and isinstance(self.sequencer.clipboard, dict) and "clips" in self.sequencer.clipboard:
+                    clips_data = self.sequencer.clipboard["clips"]
+                    is_cut = self.sequencer.clipboard.get("cut", False)
+                    
+                    if clips_data:
+                        # Calculate offset based on first clip start vs current time
+                        first_start = min([c["start_time"] for c in clips_data])
+                        time_offset = self.sequencer.current_time - first_start
+                        
+                        created_clips = []
+                        
+                        target_t_base = -1
+                        # Try to use hovered track for the FIRST clip, maintaining relative offsets for others
+                        if self.drag_target_track_idx is not None and 0 <= self.drag_target_track_idx < len(self.sequencer.tracks):
+                             # Find relative track offset from original first clip
+                             orig_track = clips_data[0]["track_index"]
+                             track_offset = self.drag_target_track_idx - orig_track
+                        else:
+                             track_offset = 0
 
-                    target_t_idx = new_clip.track_index
-                    if 0 <= target_t_idx < len(self.sequencer.tracks):
-                        t = self.sequencer.tracks[target_t_idx]
-                        t.clips.append(new_clip)
-                        actual_start = self._avoid_overlap_on_drag(t, new_clip, new_clip.start_time)
-                        new_clip.start_time = actual_start
+                        for cd in clips_data:
+                            new_clip = Clip.from_dict(cd)
+                            old_id = new_clip.id # Keep old ID for delete check if needed? No, we delete by ID match from cut list
+                            new_clip.id = str(uuid.uuid4())
+                            
+                            new_clip.start_time = max(0.0, new_clip.start_time + time_offset)
+                            
+                            # Track logic
+                            t_idx = max(0, min(len(self.sequencer.tracks)-1, new_clip.track_index + track_offset))
+                            new_clip.track_index = t_idx
+                            
+                            self.sequencer.tracks[t_idx].clips.append(new_clip)
+                            created_clips.append(new_clip)
 
-                        self.sequencer.selected_clip = new_clip
+                        # Handle Cut (Move) -> One-time paste
+                        if is_cut:
+                            # Delete originals
+                            cut_ids = self.sequencer.cut_clip_ids
+                            for track in self.sequencer.tracks:
+                                to_remove = [c for c in track.clips if c.id in cut_ids]
+                                for c in to_remove:
+                                    track.clips.remove(c)
+                            
+                            self.sequencer.cut_clip_ids = []
+                            self.sequencer.clipboard = None # Clear clipboard (One-Shot)
+                            self.log("Moved Clips")
+                        else:
+                            self.log("Pasted Clips")
+
+                        self.sequencer.selected_clips = created_clips
                         self.update_inspector_ui()
-                        self.log("Pasted Clip")
 
         # DOUBLE CLICK CHECK (Open Inspector)
         if dpg.is_mouse_button_double_clicked(dpg.mvMouseButton_Left):
@@ -1008,7 +1072,7 @@ class FeditNativeApp:
             rx, ry = self.get_canvas_relative_pos(m_pos)
             d_clip = self.get_clip_at_pos(rx, ry)
             if d_clip:
-                self.sequencer.selected_clip = d_clip
+                self.sequencer.selected_clips = [d_clip]
                 self.create_floating_inspector(d_clip)
 
         # Mouse logic for Dragging Clips vs Scrubbing vs Resizing
@@ -1027,7 +1091,7 @@ class FeditNativeApp:
         if mouse_left_down:
             if mouse_left_just_pressed and resize_clip_hover:
                 clip, edge = resize_clip_hover, resize_edge
-                self.sequencer.selected_clip = clip
+                self.sequencer.selected_clips = [clip]
                 self.sequencer.resize_clip = clip
                 self.sequencer.resize_edge = edge
                 self.sequencer.resize_initial_dur = clip.duration
@@ -1055,23 +1119,40 @@ class FeditNativeApp:
             elif self.sequencer.drag_clip:
                 pointer_time = rel_x / max(1.0, self.sequencer.zoom_x)
                 new_t = max(0.0, pointer_time + self.sequencer.drag_time_offset)
-
                 new_track_idx = self._track_index_from_rel_y(rel_y)
 
+                # Calculate deltas based on primary drag clip
                 clip = self.sequencer.drag_clip
+                old_start = clip.start_time
+                old_track = clip.track_index
+                
+                # Apply change to primary
                 clip.start_time = new_t
-
+                
+                # Track change
                 if 0 <= new_track_idx < len(self.sequencer.tracks):
-                    if clip.track_index != new_track_idx:
-                        old_track = self.sequencer.tracks[clip.track_index]
-                        if clip in old_track.clips:
-                            old_track.clips.remove(clip)
+                     if clip.track_index != new_track_idx:
+                        ot = self.sequencer.tracks[clip.track_index]
+                        if clip in ot.clips: ot.clips.remove(clip)
                         clip.track_index = new_track_idx
                         self.sequencer.tracks[new_track_idx].clips.append(clip)
-
-                    active_track = self.sequencer.tracks[clip.track_index]
-                    snapped_start = self._snap_to_edges(active_track, clip, clip.start_time)
-                    clip.start_time = self._avoid_overlap_on_drag(active_track, clip, snapped_start)
+                
+                # Apply deltas to other selected clips
+                d_time = clip.start_time - old_start
+                d_track = clip.track_index - old_track
+                
+                for sel_clip in self.sequencer.selected_clips:
+                    if sel_clip == clip: continue # Already moved
+                    
+                    sel_clip.start_time = max(0.0, sel_clip.start_time + d_time)
+                    # Track move
+                    target_tk = sel_clip.track_index + d_track
+                    if 0 <= target_tk < len(self.sequencer.tracks):
+                         if sel_clip.track_index != target_tk:
+                             ot = self.sequencer.tracks[sel_clip.track_index]
+                             if sel_clip in ot.clips: ot.clips.remove(sel_clip)
+                             sel_clip.track_index = target_tk
+                             self.sequencer.tracks[target_tk].clips.append(sel_clip)
 
                 self.update_inspector_ui()
 
@@ -1082,7 +1163,19 @@ class FeditNativeApp:
 
                 if mouse_left_just_pressed:
                     if hover_clip and not self.sequencer.is_scrubbing:
-                        self.sequencer.selected_clip = hover_clip
+                        # Ctrl logic
+                        is_ctrl = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+                        if is_ctrl:
+                            if hover_clip in self.sequencer.selected_clips:
+                                self.sequencer.selected_clips.remove(hover_clip)
+                            else:
+                                self.sequencer.selected_clips.append(hover_clip)
+                        else:
+                            # If hovering selected, don't clear (might be drag start), unless it wasn't selected
+                            if hover_clip not in self.sequencer.selected_clips:
+                                self.sequencer.selected_clips = [hover_clip]
+                            # If clicking a selected clip without ctrl, we keep it selected (and potentially Drag)
+                            
                         self.update_inspector_ui()
 
                         clip_px_start = hover_clip.start_time * self.sequencer.zoom_x
@@ -1111,7 +1204,9 @@ class FeditNativeApp:
                             new_t = 0.0
                         self.sequencer.current_time = new_t
                         if not was_scrubbing:
-                            self.sequencer.selected_clip = None
+                            # Clear selection on empty click if not holding ctrl
+                            if not (dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)):
+                                self.sequencer.selected_clips = []
                             self.update_inspector_ui()
                 elif self.sequencer.is_scrubbing:
                     new_t = max(0.0, rel_x / self.sequencer.zoom_x)
@@ -1178,29 +1273,7 @@ class FeditNativeApp:
             force, is_active = self.calculate_current_force()
             dpg.set_value("force_gauge", force)
 
-            # Update Torque Monitor
-            # Default to 8.0 Nm if not set (could make this a variable later accessible via UI)
-            max_torque = dpg.get_value("input_max_torque") if dpg.does_item_exist("input_max_torque") else 8.0
-            
-            # force is -100 to 100
-            current_nm = (force / 100.0) * max_torque
-            dpg.set_value("txt_torque_val", f"{current_nm:.2f} Nm")
-            dpg.set_value("bar_torque", (abs(current_nm)/max_torque) if max_torque > 0 else 0)
-
-            # Statistics Update
-            # Only update stats if we are actively playing a clip (not just silence)
-            if self.sequencer.is_playing and is_active:
-                abs_val = abs(current_nm)
-                self.stats_peak = max(self.stats_peak, abs_val)
-                self.stats_min = min(self.stats_min, abs_val)
-                self.stats_sum += abs_val
-                self.stats_count += 1
-                
-                avg = self.stats_sum / max(1, self.stats_count)
-                
-                dpg.set_value("txt_peak", f"Peak: {self.stats_peak:.2f} Nm")
-                dpg.set_value("txt_avg", f"Avg: {avg:.2f} Nm")
-                dpg.set_value("txt_min", f"Min: {self.stats_min:.2f} Nm")
+            # Torque Monitor & Statistics Removed
 
 
             
@@ -1295,7 +1368,7 @@ class FeditNativeApp:
                 val = max(-1.0, min(1.0, latest["value"] * gain))
                 y = (height / 2) - val * (height / 2 - 6)
                 dpg.draw_circle([playhead_x, y], 4, color=(255, 150, 60), fill=(255, 150, 60), parent="timeline_canvas")
-                dpg.draw_text([4, 4], f"Wheel: {latest['value']*100:.1f}%", size=12, color=(220, 220, 255), parent="timeline_canvas")
+                dpg.draw_text([4, 4], f"Wheel: {latest['value']*100:.1f}%", size=17, color=(220, 220, 255), parent="timeline_canvas")
 
 
     def _should_show_wheel_playhead(self) -> bool:
@@ -1626,7 +1699,7 @@ class FeditNativeApp:
             if x > end_px or lines_drawn >= max_lines:
                 break
             if x >= start_px:
-                color = (60, 60, 60, 100)
+                color = self.theme_colors.get("grid_line", (60, 60, 60, 100))
                 thickness = 1
                 dpg.draw_line([x, 0], [x, total_h], color=color, thickness=thickness, parent="timeline_canvas")
                 lines_drawn += 1
@@ -1673,30 +1746,45 @@ class FeditNativeApp:
         for i, track in enumerate(self.sequencer.tracks):
             is_target = (i == self.drag_target_track_idx)
             
-            bg_col = (40, 40, 45, 50) if i % 2 == 0 else (35, 35, 40, 50)
+            # Theme Colors
+            col_even = self.theme_colors.get("track_bg_even", (40, 40, 45, 50))
+            col_odd = self.theme_colors.get("track_bg_odd", (35, 35, 40, 50))
+            bg_col = col_even if i % 2 == 0 else col_odd
+            
             if i == self.drag_target_track_idx:
+                # Highlight for drag target
                 bg_col = (60, 60, 80, 100)
 
             dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
-            dpg.draw_line([0, y_offset + track_height], [total_w, y_offset + track_height], color=(60, 60, 60), parent="timeline_canvas")
-            dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
+            
+            border_col = self.theme_colors.get("track_border", (60, 60, 60))
+            dpg.draw_line([0, y_offset + track_height], [total_w, y_offset + track_height], color=border_col, parent="timeline_canvas")
+            
+            txt_col = self.theme_colors.get("text_track", (200, 200, 200))
+            dpg.draw_text([10, y_offset + 5], track.name, size=15, color=txt_col, parent="timeline_canvas")
             
             for clip in track.clips:
                 x_start = clip.start_time * self.sequencer.zoom_x
                 width = clip.duration * self.sequencer.zoom_x
                 
-                base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
+                # Clip Colors
+                base_col = self.theme_colors.get("clip_sine", (100, 150, 255))
                 if clip.type == "Constant":
-                    base_col = (100, 255, 100)
-                if clip.type == "Ramp":
-                    base_col = (255, 255, 100)
-                if clip.type == "Sawtooth":
-                    base_col = (255, 150, 50)
+                    base_col = self.theme_colors.get("clip_const", (100, 255, 100))
+                elif clip.type == "Ramp":
+                    base_col = self.theme_colors.get("clip_ramp", (255, 150, 100))
+                elif "Saw" in clip.type: # Catch SawtoothUp/Down
+                     base_col = self.theme_colors.get("clip_saw", (255, 150, 50))
 
-                border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
+                border_col = (255, 255, 255) if clip in self.sequencer.selected_clips else base_col
                 
-                dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
-                dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=13, parent="timeline_canvas")
+                # Visual Feedback for Cut
+                fill_alpha = 150
+                if self.sequencer.cut_clip_ids and clip.id in self.sequencer.cut_clip_ids:
+                     fill_alpha = 50 
+
+                dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], fill_alpha), parent="timeline_canvas")
+                dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=16, color=(255, 255, 255), parent="timeline_canvas")
 
                 wave_points = self._clip_wave_points(
                     clip,
@@ -1761,9 +1849,12 @@ class FeditNativeApp:
         dpg.draw_line([x - shaft_len, y], [x + shaft_len, y], color=col, thickness=shaft_w, parent="timeline_canvas")
 
     def delete_selected_clip(self):
-            self.sequencer.delete_clip(self.sequencer.selected_clip)
-            self.sequencer.selected_clip = None
+        if self.sequencer.selected_clips:
+            for clip in self.sequencer.selected_clips:
+                self.sequencer.delete_clip(clip)
+            self.sequencer.selected_clips = []
             self.update_inspector_ui()
+            self.log("Deleted Clips")
 
     def on_drop_receive(self, sender, app_data):
         print(f"DEBUG DROP: Sender={sender}, Data={app_data}")
@@ -1783,7 +1874,7 @@ class FeditNativeApp:
         if 0 <= track_idx < len(self.sequencer.tracks):
              time_s = max(0.0, rel_x / self.sequencer.zoom_x)
              clip = self.sequencer.add_clip(track_idx, effect_type, time_s)
-             self.sequencer.selected_clip = clip
+             self.sequencer.selected_clips = [clip]
              self.log(f"Created Clip: {time_s:.2f}s")
         else:
              self.log(f"Drop Skipped: Invalid Track {track_idx}")
@@ -1807,7 +1898,7 @@ class FeditNativeApp:
             if clip:
                 # CLIP CONTEXT MENU
                 if dpg.does_item_exist("win_clip_opts"): dpg.delete_item("win_clip_opts")
-                self.sequencer.selected_clip = clip # Auto-select on right click
+                self.sequencer.selected_clips = [clip] # Auto-select on right click
                 self.renaming_clip = clip
                 
                 with dpg.window(tag="win_clip_opts", label="Clip Options", width=250, height=120, modal=True, show=True, pos=mpos):
@@ -1824,7 +1915,7 @@ class FeditNativeApp:
                      def do_del_clip(s, a, u):
                          if self.renaming_clip:
                              self.sequencer.delete_clip(self.renaming_clip)
-                             self.sequencer.selected_clip = None
+                             self.sequencer.selected_clips = []
                              self.update_inspector_ui()
                          dpg.delete_item("win_clip_opts")
 
@@ -1848,7 +1939,7 @@ class FeditNativeApp:
                     def do_delete(s, a, u):
                         if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
                             del self.sequencer.tracks[self.renaming_track_idx]
-                            self.sequencer.selected_clip = None 
+                            self.sequencer.selected_clips = [] 
                         dpg.delete_item("win_track_opts")
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="Rename", callback=do_rename)
@@ -1894,7 +1985,8 @@ class FeditNativeApp:
 
     # --- Palette Drag Source ---
     def make_drag_source(self, label, type):
-        with dpg.group():
+        with dpg.group(horizontal=True):
+             dpg.add_spacer(width=7)
              dpg.add_button(label=label, width=100)
              with dpg.drag_payload(drag_data=type): # Removed payload_type for compatibility
                  dpg.add_text(f"Effect: {label}")
@@ -1904,6 +1996,10 @@ class FeditNativeApp:
         # app_data is value
         # Lock view to tracks: Only zoom if hovering timeline
         if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
+            # REQUIRE CONTROL KEY FOR ZOOM
+            if not (dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)):
+                return
+                
             self.manual_timebase_override = False
             self.manual_timebase_value = None
             # Zoom
@@ -2016,16 +2112,33 @@ class FeditNativeApp:
                  "ruler_text": (200, 200, 200),
                  "playhead": (255, 50, 50),
                  "playhead_fill": (255, 100, 100),
+                 "text_green": (0, 255, 0),
              }
+             
+             # Global UI Colors (Dark)
+             ui = {
+                 "win_bg": (20, 20, 25),
+                 "text": (220, 220, 220),
+                 "btn": (45, 45, 50),
+                 "btn_hov": (60, 60, 65),
+                 "btn_act": (80, 80, 85),
+                 "frame_bg": (30, 30, 35),
+                 "frame_hov": (40, 40, 45),
+                 "menu_bg": (30, 30, 35),
+                 "popup_bg": (30, 30, 35),
+                 "border": (60, 60, 60),
+                 "check": (100, 150, 255),
+             }
+
         else:
              # Light Mode
              cols = {
-                 "grid_line": (200, 200, 200, 100),
+                 "grid_line": (160, 160, 160, 100),
                  "track_bg_even": (240, 240, 245, 200),
                  "track_bg_odd": (230, 230, 235, 200),
                  "track_border": (180, 180, 180),
                  "text_track": (50, 50, 50),
-                 "clip_sine": (50, 100, 200),
+                 "clip_sine": (10, 50, 120),
                  "clip_const": (100, 200, 50),
                  "clip_ramp": (200, 100, 50),
                  "clip_saw": (200, 50, 50),
@@ -2036,12 +2149,89 @@ class FeditNativeApp:
                  "ruler_text": (50, 50, 50),
                  "playhead": (200, 20, 20),
                  "playhead_fill": (255, 50, 50),
+                 "text_green": (0, 130, 0),
              }
+             
+             # Global UI Colors (Light)
+             ui = {
+                 "win_bg": (245, 245, 250),
+                 "text": (20, 20, 25),
+                 "btn": (220, 220, 225),
+                 "btn_hov": (200, 200, 205),
+                 "btn_act": (180, 180, 185),
+                 "frame_bg": (255, 255, 255),
+                 "frame_hov": (230, 230, 235),
+                 "menu_bg": (220, 220, 225),
+                 "popup_bg": (240, 240, 245),
+                 "border": (180, 180, 180),
+                 "check": (50, 100, 200),
+             }
+
         self.theme_colors = cols
+        
+        # Apply Global Theme
+        # ... (rest of theme application)
+        
+        # ...
+        
+
+        with dpg.theme() as global_theme:
+            with dpg.theme_component(dpg.mvAll):
+                # Core
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, ui["win_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_Text, ui["text"])
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 8)
+                dpg.add_theme_color(dpg.mvThemeCol_Border, ui["border"])
+                
+                # Buttons
+                dpg.add_theme_color(dpg.mvThemeCol_Button, ui["btn"])
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, ui["btn_hov"])
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, ui["btn_act"])
+                
+                # Frames (Inputs)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, ui["frame_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, ui["frame_hov"])
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, ui["frame_hov"])
+                
+                # Menu / Popup
+                dpg.add_theme_color(dpg.mvThemeCol_MenuBarBg, ui["menu_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_PopupBg, ui["popup_bg"])
+                
+                # Child Windows (Panels)
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, ui["win_bg"])
+                
+                # Panel Padding Theme (for Sidebars)
+                # We can't nest themes inside global theme easily for specific items unless we use specific tags.
+                # But we can add it to the valid components.
+                # Actually, better to define a separate theme for panels and bind it.
+                pass 
+                
+                # Title Bars
+                title_bg = ui["menu_bg"]
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg, title_bg)
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, title_bg)
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgCollapsed, title_bg)
+                
+                # Table Borders
+                dpg.add_theme_color(dpg.mvThemeCol_TableBorderLight, ui["border"])
+                dpg.add_theme_color(dpg.mvThemeCol_TableBorderStrong, ui["border"])
+                
+                # Misc
+                dpg.add_theme_color(dpg.mvThemeCol_CheckMark, ui["check"])
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, ui["check"])
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, ui["check"])
+        
+        dpg.bind_theme(global_theme)
         
         # Trigger redraw if needed
         if hasattr(self, 'sequencer'):
             self.render_timeline()
+
+        # Update specific items that don't auto-update with theme
+        if dpg.does_item_exist("status_text"):
+             dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
+        if dpg.does_item_exist("monitor_freq"):
+             dpg.configure_item("monitor_freq", color=self.theme_colors.get("text_green", (0, 255, 0)))
 
     def setup_ui(self):
         with dpg.theme() as global_theme:
@@ -2064,6 +2254,38 @@ class FeditNativeApp:
         dpg.add_file_extension(".fedit", color=(255, 255, 255, 255), parent="dlg_load")
         dpg.add_file_extension(".*", parent="dlg_load")
 
+        # About Dialog
+        with dpg.theme() as theme_about:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 20, 20)
+        
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 20, 20)
+        
+        with dpg.item_handler_registry(tag="handler_github_link"):
+            dpg.add_item_clicked_handler(callback=lambda: webbrowser.open("https://github.com"))
+        
+        with dpg.window(tag="win_about", label="About Fedit", width=550, height=380, modal=True, show=False, pos=[400, 200], no_resize=True, no_collapse=True):
+            dpg.add_text("FFeditor (Version 1.0)", color=(255, 255, 255))
+            dpg.add_spacer(height=10)
+            dpg.add_text("A modern spiritual successor to Microsoft Fedit (1999).")
+            dpg.add_spacer(height=10)
+            dpg.add_text("Created by Swift & Napman")
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True, horizontal_spacing=0):
+                dpg.add_text("Source Code: Available on ")
+                dpg.add_text("GitHub", color=(100, 200, 255), tag="txt_github")
+                dpg.bind_item_handler_registry("txt_github", "handler_github_link")
+            dpg.add_text("License: MIT License")
+            dpg.add_spacer(height=10)
+            dpg.add_text("This software is an independent project and is not affiliated with,\nendorsed by, or sponsored by Microsoft Corporation.", wrap=500)
+            dpg.add_spacer(height=10)
+            dpg.add_text("Copyright © 2025. Free and open source.")
+            
+            dpg.add_spacer(height=20)
+            dpg.add_button(label="Close", width=100, callback=lambda: dpg.hide_item("win_about"))
+            
+        dpg.bind_item_theme("win_about", theme_about)
+
         # Shortcuts
         def ctrl_pressed() -> bool:
             return dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
@@ -2072,50 +2294,46 @@ class FeditNativeApp:
             dpg.add_key_press_handler(dpg.mvKey_S, callback=lambda: dpg.show_item("dlg_save") if ctrl_pressed() else None)
             dpg.add_key_press_handler(dpg.mvKey_O, callback=lambda: dpg.show_item("dlg_load") if ctrl_pressed() else None)
 
+        # Main Layout Theme (No Padding)
+        with dpg.theme() as theme_no_padding:
+            with dpg.theme_component(dpg.mvAll):
+                 dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 0)
+        
+        # Menu Theme (Padded) - Overrides Main's no-padding for menus
+        with dpg.theme() as theme_menu_padded:
+             with dpg.theme_component(dpg.mvAll):
+                 dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 8)
+                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 4)
+                 dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 4, 4) # Extra tick padding
+
         with dpg.window(tag="Main"):
+            dpg.bind_item_theme("Main", theme_no_padding)
             # Menu Bar
             with dpg.menu_bar():
-                with dpg.menu(label="File"):
+                with dpg.menu(label="File", tag="menu_file"):
+                    dpg.bind_item_theme("menu_file", theme_menu_padded)
                     dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
                     dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
-                with dpg.menu(label="View"):
-                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
                 
+                with dpg.menu(label="Theme", tag="menu_theme"):
+                    dpg.bind_item_theme("menu_theme", theme_menu_padded)
+                    dpg.add_menu_item(label="Light Mode", callback=lambda: self.apply_theme("Light"))
+                    dpg.add_menu_item(label="Dark Mode", callback=lambda: self.apply_theme("Dark"))
+
+                # View menu removed as it is empty
+                
+                with dpg.menu(label="Help", tag="menu_help"):
+                     dpg.bind_item_theme("menu_help", theme_menu_padded)
+                     dpg.add_menu_item(label="About", callback=lambda: dpg.show_item("win_about"))
+
                 # --- Device Controls in Menu Bar ---
                 dpg.add_spacer(width=20)
                 dpg.add_combo(tag="device_combo", width=200)
                 dpg.add_button(label="Scan", callback=self.scan_devices)
                 dpg.add_button(label="Connect", callback=self.connect_callback)
                 dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
-
-            # Torque Monitor Window (Initially Hidden or Shown)
-            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=False):
-                 dpg.add_text("Real-time Torque", color=(150, 255, 150))
-                 dpg.add_text("0.00 Nm", tag="txt_torque_val") # Standard size for now to avoid crash
-                 # We'll stick to standard text for now, maybe add a progress bar.
-                 dpg.add_progress_bar(tag="bar_torque", width=-1, height=20)
-                 
-                 dpg.add_spacer(height=5)
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Peak: --", tag="txt_peak", color=(255, 100, 100))
-                     dpg.add_spacer(width=10)
-                     dpg.add_text("Avg: --", tag="txt_avg", color=(100, 200, 255))
-                     dpg.add_spacer(width=10)
-                     dpg.add_text("Min: --", tag="txt_min", color=(200, 200, 200))
-
-                 dpg.add_separator()
-                 dpg.add_text("Settings:")
-
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Base Torque (Ref):")
-                     dpg.add_input_float(tag="input_max_torque", default_value=8.0, width=100, step=0.5)
-                     
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Master Gain (%):  ")
-                     dpg.add_slider_int(tag="slider_gain", default_value=100, min_value=0, max_value=100, width=100)
-
             
             # Set Main as a fallback drop target without payload type check
             # try: dpg.set_item_drop_callback("Main", self.on_drop_receive)
@@ -2148,7 +2366,7 @@ class FeditNativeApp:
                 dpg.add_text("0.00s", tag="time_display")
                 
                 dpg.add_spacer(width=20)
-                dpg.add_text("Freq: --", tag="monitor_freq", color=(100, 255, 100))
+                dpg.add_text("Freq: --", tag="monitor_freq", color=(0, 130, 0))
 
                 dpg.add_spacer(width=20)
                 dpg.add_button(label="Clear", width=70, callback=lambda: self._clear_wheel_history())
@@ -2161,6 +2379,11 @@ class FeditNativeApp:
 
         
 
+        # Panel Padding Theme
+        with dpg.theme() as theme_panel_padded:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 10, 10)
+
         # --- SOLID TABLE LAYOUT ---
         with dpg.table(header_row=False, resizable=True, policy=dpg.mvTable_SizingStretchProp, 
                        borders_innerV=True, parent="Main"):
@@ -2171,8 +2394,11 @@ class FeditNativeApp:
             with dpg.table_row():
                 
                 # Col 1: Palette
-                with dpg.child_window(height=-1):
-                    dpg.add_text("Effects")
+                with dpg.child_window(tag="panel_effects", height=-1):
+                    dpg.bind_item_theme("panel_effects", theme_panel_padded)
+                    with dpg.group(horizontal=True):
+                         dpg.add_spacer(width=41)
+                         dpg.add_text("Effects")
                     dpg.add_separator()
                     self.make_drag_source("Sine Wave", "Sine")
                     self.make_drag_source("Square", "Square")
@@ -2187,7 +2413,9 @@ class FeditNativeApp:
                     self.make_drag_source("Friction", "Friction")
                     self.make_drag_source("Left/Right", "LeftRight")
                     dpg.add_spacer(height=20)
-                    dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
+                    with dpg.group(horizontal=True):
+                        dpg.add_spacer(width=7)
+                        dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
 
                 # Col 2: Timeline
                 with dpg.group(tag="timeline_group"):
@@ -2211,6 +2439,7 @@ class FeditNativeApp:
                 with dpg.group():
                     # Inspector Section (Top Half)
                     with dpg.child_window(tag="panel_inspector", height=450):
+                        dpg.bind_item_theme("panel_inspector", theme_panel_padded)
                         # We use a Tab Bar here to host the single Live Inspector tab
                         # This keeps the look consistent and clean
                         with dpg.tab_bar(tag="inspector_tab_bar"):

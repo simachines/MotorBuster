@@ -1,0 +1,169 @@
+Found def on_drop_receive at 1767: def on_drop_receive(self, sender, app_data):
+    def on_drop_receive(self, sender, app_data):
+        print(f"DEBUG DROP: Sender={sender}, Data={app_data}")
+        self.handle_drop(app_data, sender) # Pass sender to debug
+
+    def handle_drop(self, effect_type, sender="Unknown"):
+        if not isinstance(effect_type, str): return
+        
+        mpos = dpg.get_mouse_pos(local=False)
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+        track_h = 80
+        track_idx = self._track_index_from_rel_y(rel_y)
+        
+        self.log(f"Drop [{sender}]: {effect_type} at {int(rel_x)},{int(rel_y)} -> Tk {track_idx+1}")
+        
+        if 0 <= track_idx < len(self.sequencer.tracks):
+             time_s = max(0.0, rel_x / self.sequencer.zoom_x)
+             clip = self.sequencer.add_clip(track_idx, effect_type, time_s)
+             self.sequencer.selected_clip = clip
+             self.log(f"Created Clip: {time_s:.2f}s")
+        else:
+             self.log(f"Drop Skipped: Invalid Track {track_idx}")
+
+    def canvas_click(self, sender, app_data):
+        mouse_btn = app_data[0] # [0]=button, [1]=tag
+        mpos = dpg.get_mouse_pos(local=False)
+        if not self._is_mouse_in_timeline_viewport(mpos):
+            return
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+
+--- END BLOCK ---
+Found def canvas_click at 1790: def canvas_click(self, sender, app_data):
+    def canvas_click(self, sender, app_data):
+        mouse_btn = app_data[0] # [0]=button, [1]=tag
+        mpos = dpg.get_mouse_pos(local=False)
+        if not self._is_mouse_in_timeline_viewport(mpos):
+            return
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+        track_h = 80
+        track_idx = self._track_index_from_rel_y(rel_y)
+        time_s = rel_x / self.sequencer.zoom_x
+        
+        if mouse_btn == 1:
+            # RIGHT CLICK: Context Menu
+            # Check if clicked on a clip
+            clip = self.get_clip_at_pos(rel_x, rel_y)
+            
+            if clip:
+                # CLIP CONTEXT MENU
+                if dpg.does_item_exist("win_clip_opts"): dpg.delete_item("win_clip_opts")
+                self.sequencer.selected_clip = clip # Auto-select on right click
+                self.renaming_clip = clip
+                
+                with dpg.window(tag="win_clip_opts", label="Clip Options", width=250, height=120, modal=True, show=True, pos=mpos):
+                     dpg.add_text(f"Clip: {clip.type}")
+                     dpg.add_input_text(tag="input_clip_name", default_value=clip.name, on_enter=True, callback=lambda: do_rename_clip(None, None, None))
+
+                     def do_rename_clip(s, a, u):
+                         name = dpg.get_value("input_clip_name")
+                         if self.renaming_clip:
+                             self.renaming_clip.name = name
+                             self.update_inspector_ui()
+                         dpg.delete_item("win_clip_opts")
+
+                     def do_del_clip(s, a, u):
+                         if self.renaming_clip:
+                             self.sequencer.delete_clip(self.renaming_clip)
+                             self.sequencer.selected_clip = None
+                             self.update_inspector_ui()
+                         dpg.delete_item("win_clip_opts")
+
+                     with dpg.group(horizontal=True):
+                         dpg.add_button(label="Rename", callback=do_rename_clip)
+                         dpg.add_button(label="Delete", callback=do_del_clip)
+                         dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_clip_opts"))
+            
+            elif 0 <= track_idx < len(self.sequencer.tracks):
+                # TRACK CONTEXT MENU
+                self.renaming_track_idx = track_idx
+                if dpg.does_item_exist("win_track_opts"): dpg.delete_item("win_track_opts")
+                
+                with dpg.window(tag="win_track_opts", label=f"Track {track_idx+1} Options", width=300, height=120, modal=True, show=True, pos=mpos):
+                    dpg.add_input_text(tag="input_rename", default_value=self.sequencer.tracks[track_idx].name)
+                    def do_rename(s, a, u):
+                        name = dpg.get_value("input_rename")
+                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                            self.sequencer.tracks[self.renaming_track_idx].name = name
+                        dpg.delete_item("win_track_opts")
+                    def do_delete(s, a, u):
+                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                            del self.sequencer.tracks[self.renaming_track_idx]
+                            self.sequencer.selected_clip = None 
+                        dpg.delete_item("win_track_opts")
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Rename", callback=do_rename)
+                        dpg.add_button(label="Delete Track", callback=do_delete)
+                        dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_track_opts"))
+            return
+
+
+
+    def update_inspector_ui(self):
+        # Update all active inspector panels
+        active = []
+        for p in self.inspectors:
+            if dpg.does_item_exist(p.tag_tab):
+                p.update()
+                active.append(p)
+        self.inspectors = active
+
+    def create_floating_inspector(self, clip=None, parent=None):
+        # 1. Check if window already exists for this clip (only for floating windows)
+        if clip and not parent:
+            for p in self.inspectors:
+                if p.clip == clip and p.is_window and dpg.does_item_exist(p.tag_tab):
+                    dpg.configure_item(p.tag_tab, show=True)
+                    dpg.focus_item(p.tag_tab)
+                    # Bring to front? Focus usually does it.
+                    return
+
+        # 2. Cleanup closed inspectors
+        self.inspectors = [p for p in self.inspectors if dpg.does_item_exist(p.tag_tab)]
+
+        # 3. Create New
+        pos = [400, 200]
+        if not parent:
+            # Cascade logic
+            offset = len(self.inspectors) * 30
+            pos = [400 + offset, 200 + offset]
+            
+        p = InspectorPanel(self, parent, clip, pos=pos)
+
+--- END BLOCK ---
+Found def make_drag_source at 1895: def make_drag_source(self, label, type):
+    def make_drag_source(self, label, type):
+        with dpg.group():
+             dpg.add_button(label=label, width=100)
+             with dpg.drag_payload(drag_data=type): # Removed payload_type for compatibility
+                 dpg.add_text(f"Effect: {label}")
+
+
+    def on_mouse_wheel(self, sender, app_data):
+        # app_data is value
+        # Lock view to tracks: Only zoom if hovering timeline
+        if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
+            self.manual_timebase_override = False
+            self.manual_timebase_value = None
+            # Zoom
+            scale_factor = 1.15
+            if app_data > 0:
+                self.sequencer.zoom_x *= scale_factor
+            elif app_data < 0:
+                self.sequencer.zoom_x /= scale_factor
+
+            # Clamp settings
+            self.sequencer.zoom_x = max(10.0, min(50000.0, self.sequencer.zoom_x))
+            
+            # Prevent Vertical Scroll Drift?
+            # If content fits, ensure Y scroll is 0?
+            total_h = self.wheel_graph_height + len(self.sequencer.tracks) * 80
+            win_h = dpg.get_item_height("timeline_scroll")
+            if total_h <= win_h:
+                dpg.set_y_scroll("timeline_scroll", 0)
+
+
+--- END BLOCK ---

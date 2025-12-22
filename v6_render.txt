@@ -1,0 +1,203 @@
+Found def render_timeline at 1658: def render_timeline(self):
+    def render_timeline(self):
+        if dpg.does_item_exist("timeline_canvas"):
+            dpg.delete_item("timeline_canvas", children_only=True)
+
+        y_offset = self.wheel_graph_height
+        track_height = 80
+        total_w = max(3000, int(self.sequencer.zoom_x * 60))
+        total_h = int(self.wheel_graph_height + len(self.sequencer.tracks) * track_height)
+        dpg.configure_item("timeline_canvas", width=total_w, height=total_h)
+        self.render_grid(total_w, total_h)
+        
+        if self.wheel_graph_height > 0:
+            self._draw_wheel_graph(total_w)
+
+        for i, track in enumerate(self.sequencer.tracks):
+            is_target = (i == self.drag_target_track_idx)
+            
+            bg_col = (40, 40, 45, 50) if i % 2 == 0 else (35, 35, 40, 50)
+            if i == self.drag_target_track_idx:
+                bg_col = (60, 60, 80, 100)
+
+            dpg.draw_rectangle([0, y_offset], [total_w, y_offset + track_height], color=bg_col, fill=bg_col, parent="timeline_canvas")
+            dpg.draw_line([0, y_offset + track_height], [total_w, y_offset + track_height], color=(60, 60, 60), parent="timeline_canvas")
+            dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
+            
+            for clip in track.clips:
+                x_start = clip.start_time * self.sequencer.zoom_x
+                width = clip.duration * self.sequencer.zoom_x
+                
+                base_col = (100, 150, 255) if clip.type == "Sine" else (255, 100, 100)
+                if clip.type == "Constant":
+                    base_col = (100, 255, 100)
+                if clip.type == "Ramp":
+                    base_col = (255, 255, 100)
+                if clip.type == "Sawtooth":
+                    base_col = (255, 150, 50)
+
+                border_col = (255, 255, 255) if clip == self.sequencer.selected_clip else base_col
+                
+                dpg.draw_rectangle([x_start, y_offset + 20], [x_start + width, y_offset + track_height - 5], color=border_col, thickness=2, fill=(base_col[0], base_col[1], base_col[2], 150), parent="timeline_canvas")
+                dpg.draw_text([x_start + 5, y_offset + 25], clip.name, size=13, parent="timeline_canvas")
+
+                wave_points = self._clip_wave_points(
+                    clip,
+                    x_start + 4,
+                    max(4.0, width - 8),
+                    y_offset + 28,
+                    y_offset + track_height - 12,
+                    samples=max(20, int(width / 6))
+                )
+                dpg.draw_polyline(wave_points, color=(240, 240, 240, 220), thickness=2, parent="timeline_canvas")
+
+            y_offset += track_height
+
+        px = self.sequencer.current_time * self.sequencer.zoom_x
+        dpg.draw_line([px, 0], [px, y_offset], color=(255, 50, 50), thickness=2, parent="timeline_canvas")
+
+        if self.sweep_markers:
+            for m in self.sweep_markers:
+                mx = m.get("time", 0.0) * self.sequencer.zoom_x
+                phase_txt = f"{m.get('phase', 0)/100.0:.1f}┬░"
+                dpg.draw_line([mx, 0], [mx, y_offset], color=(200, 50, 50, 120), thickness=1, parent="timeline_canvas")
+                dpg.draw_text([mx + 4, 8], phase_txt, size=12, color=(255, 120, 120), parent="timeline_canvas")
+
+    def _draw_resize_cursor(self, x, y):
+        """Draws a custom double-headed arrow cursor at (x,y)."""
+        # Draw on top of everything
+        # Size - 30% smaller than 10 -> 7
+        sz = 7 
+        # Color
+        col = (255, 255, 255, 255)
+        outline_col = (0, 0, 0, 200) # Shadow/Outline
+        
+        # Thinner shaft for smaller size
+        shaft_w = 3
+        shaft_len = 4
+
+        # Helper to draw arrow with outline
+        def draw_arrow(cx, cy, direction):
+            # direction: -1 left, 1 right
+            offset = shaft_len * direction
+            
+            # Arrow Head
+            # Tip
+            p1 = [cx + (sz * direction) + offset, cy]
+            # Back Top
+            p2 = [cx + offset, cy - sz/1.5]
+            # Back Bottom
+            p3 = [cx + offset, cy + sz/1.5]
+            
+            # Shadow/Outline
+            dpg.draw_triangle(p1, p2, p3, fill=outline_col, color=outline_col, parent="timeline_canvas", thickness=2)
+            # Main White Triangle
+            dpg.draw_triangle(p1, p2, p3, fill=col, color=col, parent="timeline_canvas")
+
+        draw_arrow(x, y, -1) # Left
+        draw_arrow(x, y, 1)  # Right
+        
+        # Center Line (Shaft)
+        # Shadow
+        dpg.draw_line([x - shaft_len, y], [x + shaft_len, y], color=outline_col, thickness=shaft_w+2, parent="timeline_canvas")
+        # Main
+        dpg.draw_line([x - shaft_len, y], [x + shaft_len, y], color=col, thickness=shaft_w, parent="timeline_canvas")
+
+    def delete_selected_clip(self):
+            self.sequencer.delete_clip(self.sequencer.selected_clip)
+            self.sequencer.selected_clip = None
+            self.update_inspector_ui()
+
+    def on_drop_receive(self, sender, app_data):
+        print(f"DEBUG DROP: Sender={sender}, Data={app_data}")
+        self.handle_drop(app_data, sender) # Pass sender to debug
+
+    def handle_drop(self, effect_type, sender="Unknown"):
+        if not isinstance(effect_type, str): return
+        
+        mpos = dpg.get_mouse_pos(local=False)
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+        track_h = 80
+        track_idx = self._track_index_from_rel_y(rel_y)
+        
+        self.log(f"Drop [{sender}]: {effect_type} at {int(rel_x)},{int(rel_y)} -> Tk {track_idx+1}")
+        
+        if 0 <= track_idx < len(self.sequencer.tracks):
+             time_s = max(0.0, rel_x / self.sequencer.zoom_x)
+             clip = self.sequencer.add_clip(track_idx, effect_type, time_s)
+             self.sequencer.selected_clip = clip
+             self.log(f"Created Clip: {time_s:.2f}s")
+        else:
+             self.log(f"Drop Skipped: Invalid Track {track_idx}")
+
+    def canvas_click(self, sender, app_data):
+        mouse_btn = app_data[0] # [0]=button, [1]=tag
+        mpos = dpg.get_mouse_pos(local=False)
+        if not self._is_mouse_in_timeline_viewport(mpos):
+            return
+        rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+        
+        track_h = 80
+        track_idx = self._track_index_from_rel_y(rel_y)
+        time_s = rel_x / self.sequencer.zoom_x
+        
+        if mouse_btn == 1:
+            # RIGHT CLICK: Context Menu
+            # Check if clicked on a clip
+            clip = self.get_clip_at_pos(rel_x, rel_y)
+            
+            if clip:
+                # CLIP CONTEXT MENU
+                if dpg.does_item_exist("win_clip_opts"): dpg.delete_item("win_clip_opts")
+                self.sequencer.selected_clip = clip # Auto-select on right click
+                self.renaming_clip = clip
+                
+                with dpg.window(tag="win_clip_opts", label="Clip Options", width=250, height=120, modal=True, show=True, pos=mpos):
+                     dpg.add_text(f"Clip: {clip.type}")
+                     dpg.add_input_text(tag="input_clip_name", default_value=clip.name, on_enter=True, callback=lambda: do_rename_clip(None, None, None))
+
+                     def do_rename_clip(s, a, u):
+                         name = dpg.get_value("input_clip_name")
+                         if self.renaming_clip:
+                             self.renaming_clip.name = name
+                             self.update_inspector_ui()
+                         dpg.delete_item("win_clip_opts")
+
+                     def do_del_clip(s, a, u):
+                         if self.renaming_clip:
+                             self.sequencer.delete_clip(self.renaming_clip)
+                             self.sequencer.selected_clip = None
+                             self.update_inspector_ui()
+                         dpg.delete_item("win_clip_opts")
+
+                     with dpg.group(horizontal=True):
+                         dpg.add_button(label="Rename", callback=do_rename_clip)
+                         dpg.add_button(label="Delete", callback=do_del_clip)
+                         dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_clip_opts"))
+            
+            elif 0 <= track_idx < len(self.sequencer.tracks):
+                # TRACK CONTEXT MENU
+                self.renaming_track_idx = track_idx
+                if dpg.does_item_exist("win_track_opts"): dpg.delete_item("win_track_opts")
+                
+                with dpg.window(tag="win_track_opts", label=f"Track {track_idx+1} Options", width=300, height=120, modal=True, show=True, pos=mpos):
+                    dpg.add_input_text(tag="input_rename", default_value=self.sequencer.tracks[track_idx].name)
+                    def do_rename(s, a, u):
+                        name = dpg.get_value("input_rename")
+                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                            self.sequencer.tracks[self.renaming_track_idx].name = name
+                        dpg.delete_item("win_track_opts")
+                    def do_delete(s, a, u):
+                        if 0 <= self.renaming_track_idx < len(self.sequencer.tracks):
+                            del self.sequencer.tracks[self.renaming_track_idx]
+                            self.sequencer.selected_clip = None 
+                        dpg.delete_item("win_track_opts")
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Rename", callback=do_rename)
+                        dpg.add_button(label="Delete Track", callback=do_delete)
+                        dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("win_track_opts"))
+            return
+
+
+--- END BLOCK ---
