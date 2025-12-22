@@ -2567,7 +2567,7 @@ class FeditNativeApp:
                  dpg.add_text("FFeditor", color=(200, 200, 200))
                  dpg.add_spacer(width=20)
                  
-                 # Menu Bar (simulated)
+                 # Menu Bar (popups work better in horizontal group)
                  # File Menu
                  dpg.add_button(label="File", tag="btn_file_menu")
                  with dpg.popup("btn_file_menu", mousebutton=dpg.mvMouseButton_Left):
@@ -2762,24 +2762,24 @@ class FeditNativeApp:
         with dpg.group(horizontal=True, tag="custom_title_bar"):
             # Icon
             # dpg.add_image("app_icon", width=20, height=20) # Need to load image texture first if we want this
-            dpg.add_button(label="Fedit2", width=100,  callback=None) # Placeholder/Title
+            dpg.add_button(label="Fedit2", width=100, tag="title_drag_area", callback=None) # Placeholder/Title - DRAGGABLE
             
             # Drag Area (Spacer)
             # We use a button or specific item to catch drag? 
             # Actually, we can just check if mouse is over the title bar group and is dragging.
-            dpg.add_spacer(width=20)
+            dpg.add_spacer(width=20, tag="title_bar_icon_spacer")
             
             # Application Menu (File, View, etc) integrated into Title Bar? 
             # Or just below it? Let's put it back in the main window for now, 
             # but usually borderless apps have the menu inside the bar.
             # To simulate Menu Bar in a Group:
             with dpg.menu_bar():
-                 with dpg.menu(label="File"):
+                 with dpg.menu(label="File", tag="title_menu_file"):
                     dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
                     dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
-                 with dpg.menu(label="View"):
+                 with dpg.menu(label="View", tag="title_menu_view"):
                     dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
                     dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
                     dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
@@ -2802,9 +2802,9 @@ class FeditNativeApp:
             dpg.add_spacer(width=50) # Just a bit of space
 
             # Window Controls
-            dpg.add_button(label="_", width=30, callback=lambda: dpg.minimize_viewport())
-            dpg.add_button(label="[ ]", width=30, callback=self.toggle_maximize)
-            dpg.add_button(label="X", width=30, callback=lambda: dpg.stop_dearpygui())
+            dpg.add_button(label="_", tag="title_min", width=30, callback=lambda: dpg.minimize_viewport())
+            dpg.add_button(label="[ ]", tag="title_max", width=30, callback=self.toggle_maximize)
+            dpg.add_button(label="X", tag="title_close", width=30, callback=lambda: dpg.stop_dearpygui())
 
     def toggle_maximize(self):
         # Native Maximize/Restore to ensure sync with OS state
@@ -2848,27 +2848,118 @@ class FeditNativeApp:
         """Calculates spacer width to push window controls to right edge."""
         try:
              vp_width = dpg.get_viewport_width()
-             fixed_content_width = 800 # Tuned visually
+             # Reserve enough space for Left Content (Icon/Menu) + Right Content (Buttons)
+             # Buttons(~120) + Safe Margin(~50) + Left Content(~500) = ~670+
+             # Decreasing this moves buttons to the right (larger spacer)
+             # Set to 815 to position buttons 15px right from previous 830 position
+             fixed_content_width = 815
              new_spacer_width = max(10, vp_width - fixed_content_width)
              dpg.set_item_width("title_bar_spacer", new_spacer_width)
         except: pass
 
-    def _check_title_bar_drag(self):
-        # Native drag logic using simple polling (worked previously)
-        if dpg.is_mouse_button_down(0):
-            try:
-                mx, my = dpg.get_mouse_pos(local=False)
-                # Only check if in title bar area
-                if my < 45:
-                    # Check if over buttons (Right side)
-                    vw = dpg.get_viewport_width()
-                    if mx < (vw - 150):
-                         import ctypes
-                         hwnd = ctypes.windll.user32.GetForegroundWindow()
-                         if hwnd:
+    def _update_resize_cursor_and_drag(self):
+         # Short & Robust Implementation: Visuals + Actions
+         # OPTIMIZED: Caches cursors, avoids frequent API calls, prevents DPG conflict.
+         
+         if not hasattr(self, 'last_cursor'): self.last_cursor = 0
+         if not hasattr(self, '_drag_initiated'): self._drag_initiated = False
+         if not hasattr(self, '_hwnd'):
+             import ctypes
+             self._hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+             self._cursor_cache = {
+                 0: ctypes.windll.user32.LoadCursorW(0, 32512),
+                 32644: ctypes.windll.user32.LoadCursorW(0, 32644),
+                 32645: ctypes.windll.user32.LoadCursorW(0, 32645),
+                 32642: ctypes.windll.user32.LoadCursorW(0, 32642),
+                 32643: ctypes.windll.user32.LoadCursorW(0, 32643),
+             }
+         
+         import ctypes
+         if ctypes.windll.user32.GetForegroundWindow() != self._hwnd:
+             return
+
+         mx, my = dpg.get_mouse_pos(local=False)
+         vw = dpg.get_viewport_width()
+         vh = dpg.get_viewport_height()
+         BORDER = 10  # Increased from 6 for easier edge grabbing
+
+         new_cursor_id = 0
+         hit_code = 0
+         
+         if 0 <= mx <= vw and 0 <= my <= vh:
+             if mx < BORDER:
+                 if my < BORDER: hit_code = 13
+                 elif my > vh - BORDER: hit_code = 16
+                 else: hit_code = 10
+             elif mx > vw - BORDER:
+                 if my < BORDER: hit_code = 14
+                 elif my > vh - BORDER: hit_code = 17
+                 else: hit_code = 11
+             elif my < BORDER: hit_code = 12
+             elif my > vh - BORDER: hit_code = 15
+         
+         if hit_code != 0:
+             c_map = {10:32644, 11:32644, 12:32645, 13:32642, 14:32643, 15:32645, 16:32643, 17:32642}
+             new_cursor_id = c_map.get(hit_code, 0)
+         
+         if new_cursor_id != 0:
+             if new_cursor_id != self.last_cursor:
+                  ctypes.windll.user32.SetCursor(self._cursor_cache.get(new_cursor_id))
+                  self.last_cursor = new_cursor_id
+         elif self.last_cursor != 0:
+             ctypes.windll.user32.SetCursor(self._cursor_cache.get(0))
+             self.last_cursor = 0
+
+         # SIMPLE GEOMETRIC DRAG ZONES: Top-left area + middle-right area
+         # Resize still works from edges
+         import win32api
+         mouse_down = win32api.GetKeyState(0x01) < 0
+         
+         # Track drag start position to implement drag threshold
+         if not hasattr(self, '_drag_start_pos'):
+             self._drag_start_pos = None
+         
+         if mouse_down:
+             if not self._drag_initiated:
+                 if hit_code != 0:
+                     # Resize ONLY
+                     ctypes.windll.user32.ReleaseCapture()
+                     ctypes.windll.user32.SendMessageW(self._hwnd, 0xA1, hit_code, 0)
+                     self._drag_initiated = True
+                 elif (0 <= mx <= 140 and 0 <= my <= 40) or (555 <= mx <= 1145 and 0 <= my <= 40):
+                     # In drag zone - track position for threshold check
+                     if self._drag_start_pos is None:
+                         # First frame in drag zone - record position
+                         self._drag_start_pos = (mx, my)
+                     else:
+                         # Check if mouse has moved enough to trigger drag
+                         dx = abs(mx - self._drag_start_pos[0])
+                         dy = abs(my - self._drag_start_pos[1])
+                         drag_threshold = 5  # pixels
+                         
+                         if dx > drag_threshold or dy > drag_threshold:
+                             # Mouse moved enough - start dragging
                              ctypes.windll.user32.ReleaseCapture()
-                             ctypes.windll.user32.SendMessageW(hwnd, 0xA1, 2, 0) # HTCAPTION
-            except: pass
+                             ctypes.windll.user32.SendMessageW(self._hwnd, 0xA1, 2, 0)
+                             # Drag completed (SendMessageW blocks until release)
+                             # Immediately restore focus
+                             ctypes.windll.user32.SetForegroundWindow(self._hwnd)
+                             ctypes.windll.user32.SetFocus(self._hwnd)
+                             # Reset state immediately
+                             self._drag_initiated = False
+                             self._drag_start_pos = None
+                 else:
+                     # Mouse moved outside drag zone
+                     self._drag_start_pos = None
+         else:
+             # Mouse released
+             self._drag_start_pos = None
+             # Restore focus when drag completes
+             if self._drag_initiated:
+                 # Re-focus and bring window to foreground
+                 ctypes.windll.user32.SetForegroundWindow(self._hwnd)
+                 ctypes.windll.user32.SetFocus(self._hwnd)
+             self._drag_initiated = False
 
     def run(self):
         # Resolve absolute path for icon
@@ -2903,8 +2994,8 @@ class FeditNativeApp:
                 
                 if self.frame_count % 2 == 0:
                     self._throttle_when_idle()
-                    # Check drag every few frames or every frame? Every frame is smoother.
-                    self._check_title_bar_drag()
+                    # Unified update: Cursor visual + Drag/Resize actions
+                    self._update_resize_cursor_and_drag()
 
                 try:
                     self.update_loop()
