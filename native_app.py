@@ -3006,8 +3006,12 @@ class FeditNativeApp:
                 # Force redraw of title bar spacer
                 self._update_title_bar_layout()
                 
-                if self.frame_count % 2 == 0:
-                    self._throttle_when_idle()
+                # Always update drag if dragging, otherwise throttle to every other frame
+                is_dragging = hasattr(self, '_window_drag_offset') and self._window_drag_offset is not None
+                
+                if is_dragging or self.frame_count % 2 == 0:
+                    if not is_dragging:
+                        self._throttle_when_idle()
                     # Unified update: Cursor visual + Drag/Resize actions
                     self._update_resize_cursor_and_drag()
 
