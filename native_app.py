@@ -2684,7 +2684,7 @@ class FeditNativeApp:
         # --- SOLID TABLE LAYOUT ---
         with dpg.table(header_row=False, resizable=True, policy=dpg.mvTable_SizingStretchProp, 
                        borders_innerV=True, parent="Main"):
-            dpg.add_table_column(width_fixed=True, init_width_or_weight=150) # Palette
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=100) # Palette
             dpg.add_table_column() # Timeline
             dpg.add_table_column(width_fixed=True, init_width_or_weight=300) # Inspector & Log
 
@@ -2692,8 +2692,7 @@ class FeditNativeApp:
                 
                 # Col 1: Palette
                 with dpg.child_window(height=-1):
-                    dpg.add_text("Effects")
-                    dpg.add_separator()
+                    
                     self.make_drag_source("Sine Wave", "Sine")
                     self.make_drag_source("Square", "Square")
                     self.make_drag_source("Triangle", "Triangle")
@@ -2878,25 +2877,38 @@ class FeditNativeApp:
          if ctypes.windll.user32.GetForegroundWindow() != self._hwnd:
              return
 
-         mx, my = dpg.get_mouse_pos(local=False)
-         vw = dpg.get_viewport_width()
-         vh = dpg.get_viewport_height()
-         BORDER = 10  # Increased from 6 for easier edge grabbing
+         import win32api
+         from ctypes import wintypes
+         
+         # Use screen coordinates to match Windows native resize zone
+         cursor_screen = win32api.GetCursorPos()
+         rect = wintypes.RECT()
+         ctypes.windll.user32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+         
+         # Calculate mouse position relative to window (including extended frame)
+         mx = cursor_screen[0] - rect.left
+         my = cursor_screen[1] - rect.top
+         vw = rect.right - rect.left
+         vh = rect.bottom - rect.top
+         
+         BORDER = 6  # Larger zone for resize cursor visibility
 
          new_cursor_id = 0
          hit_code = 0
          
-         if 0 <= mx <= vw and 0 <= my <= vh:
+         # Check if cursor is within or just outside window bounds (extended frame area)
+         EXTENDED = 6  # Extra pixels outside window for extended frame
+         if -EXTENDED <= mx <= vw + EXTENDED and -EXTENDED <= my <= vh + EXTENDED:
              if mx < BORDER:
-                 if my < BORDER: hit_code = 13
-                 elif my > vh - BORDER: hit_code = 16
-                 else: hit_code = 10
+                 if my < BORDER: hit_code = 13  # HTTOPLEFT
+                 elif my > vh - BORDER: hit_code = 16  # HTBOTTOMLEFT
+                 else: hit_code = 10  # HTLEFT
              elif mx > vw - BORDER:
-                 if my < BORDER: hit_code = 14
-                 elif my > vh - BORDER: hit_code = 17
-                 else: hit_code = 11
-             elif my < BORDER: hit_code = 12
-             elif my > vh - BORDER: hit_code = 15
+                 if my < BORDER: hit_code = 14  # HTTOPRIGHT
+                 elif my > vh - BORDER: hit_code = 17  # HTBOTTOMRIGHT
+                 else: hit_code = 11  # HTRIGHT
+             elif my < BORDER: hit_code = 12  # HTTOP
+             elif my > vh - BORDER: hit_code = 15  # HTBOTTOM
          
          if hit_code != 0:
              c_map = {10:32644, 11:32644, 12:32645, 13:32642, 14:32643, 15:32645, 16:32643, 17:32642}
