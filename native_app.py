@@ -442,7 +442,14 @@ class FeditNativeApp:
         dpg.create_context()
         self.load_fonts()
         self.setup_ui()
-        self.apply_theme("Dark")
+        
+        # Load Settings
+        self.settings = self.load_settings()
+        initial_theme = self.settings.get("theme", "Dark Mode")
+        if initial_theme not in ["Dark Mode", "Retro", "Classic"]:
+             initial_theme = "Dark Mode" # Fallback
+
+        self.apply_theme(initial_theme)
         
         # Init Engine
         try:
@@ -2091,10 +2098,38 @@ class FeditNativeApp:
             else:
                 print("Using Default DPG Font")
 
+    def load_settings(self):
+        settings_path = "fedit_settings.json"
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    def save_settings(self):
+        settings_path = "fedit_settings.json"
+        self.settings["theme"] = self.current_theme_mode
+        try:
+            with open(settings_path, "w") as f:
+                json.dump(self.settings, f)
+        except Exception as e:
+            print(f"Failed to save settings: {e}")
+
     def apply_theme(self, mode):
         self.current_theme_mode = mode
+        self.save_settings()
+        
+        # Update Menu Checkmarks
+        themes = ["Classic", "Dark Mode", "Retro"]
+        for t in themes:
+            tag = f"menu_theme_{t}"
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, t == mode)
+
         # define colors
-        if mode == "Dark":
+        if mode == "Dark Mode":
              cols = {
                  "grid_line": (60, 60, 60, 100),
                  "track_bg_even": (40, 40, 45, 50),
@@ -2128,43 +2163,113 @@ class FeditNativeApp:
                  "popup_bg": (30, 30, 35),
                  "border": (60, 60, 60),
                  "check": (100, 150, 255),
+                 "link_color": (100, 200, 255),
              }
 
-        else:
-             # Light Mode
+        # Removed 'Light' and 'Vista light' as requested.
+        
+        elif mode == "Retro":
+             # Retro / Sunset Palette
+             orange_accent = (255, 145, 40)
+             deep_bg = (40, 35, 42)
+             lighter_bg = (55, 50, 60)
+             
              cols = {
-                 "grid_line": (160, 160, 160, 100),
-                 "track_bg_even": (240, 240, 245, 200),
-                 "track_bg_odd": (230, 230, 235, 200),
-                 "track_border": (180, 180, 180),
-                 "text_track": (50, 50, 50),
-                 "clip_sine": (10, 50, 120),
-                 "clip_const": (100, 200, 50),
-                 "clip_ramp": (200, 100, 50),
-                 "clip_saw": (200, 50, 50),
-                 "ruler_bg": (220, 220, 225),
-                 "ruler_border": (180, 180, 180),
-                 "ruler_line": (150, 150, 150),
-                 "ruler_tick": (100, 100, 100),
-                 "ruler_text": (50, 50, 50),
-                 "playhead": (200, 20, 20),
-                 "playhead_fill": (255, 50, 50),
-                 "text_green": (0, 130, 0),
+                 "grid_line": (80, 70, 90, 80),
+                 "track_bg_even": (45, 40, 48, 200),
+                 "track_bg_odd": (40, 35, 42, 200),
+                 "track_border": (70, 60, 80),
+                 "text_track": (200, 180, 170),
+                 "clip_sine": orange_accent,      # Main Accent
+                 "clip_const": (255, 200, 60),    # Yellow
+                 "clip_ramp": (255, 90, 60),      # Red-Orange
+                 "clip_saw": (200, 60, 60),       # Deep Red
+                 "ruler_bg": (35, 30, 38),
+                 "ruler_border": (70, 60, 80),
+                 "ruler_text": (180, 170, 160),
+                 "timeline_bg": (30, 25, 32),
+                 "playhead": (255, 220, 100),
+                 "playhead_fill": (255, 180, 50),
+                 "text_green": (255, 160, 60), # Status Orange
              }
              
-             # Global UI Colors (Light)
              ui = {
-                 "win_bg": (245, 245, 250),
-                 "text": (20, 20, 25),
-                 "btn": (220, 220, 225),
-                 "btn_hov": (200, 200, 205),
-                 "btn_act": (180, 180, 185),
-                 "frame_bg": (255, 255, 255),
-                 "frame_hov": (230, 230, 235),
-                 "menu_bg": (220, 220, 225),
-                 "popup_bg": (240, 240, 245),
-                 "border": (180, 180, 180),
-                 "check": (50, 100, 200),
+                 "win_bg": deep_bg,
+                 "text": (240, 230, 225),
+                 "btn": lighter_bg,
+                 "btn_hov": (75, 70, 85),
+                 "btn_act": orange_accent,
+                 "frame_bg": (30, 25, 32),
+                 "frame_hov": (60, 55, 65),
+                 "check": orange_accent,
+                 "border": (80, 70, 90),
+                 "menu_bg": (35, 30, 38),
+                 "popup_bg": (45, 40, 48),
+                 "scrollbar_bg": (30, 25, 32),
+                 "scrollbar_grab": (70, 60, 75),
+                 "scrollbar_grab_hov": (90, 80, 95),
+                 "scrollbar_grab_act": orange_accent,
+                 "header": (255, 145, 40, 150),
+                 "header_hover": (255, 160, 60, 180),
+                 "header_active": orange_accent,
+                 "tab": deep_bg,
+                 "tab_hov": (60, 55, 65),
+                 "tab_act": orange_accent,
+                 "tab_act": orange_accent,
+                 "tab_act_unfocused": (200, 120, 30),
+                 "link_color": orange_accent,
+             }
+
+        elif mode == "Classic":
+             # Warm Paper / Sage Palette (Classic)
+             sage_accent = (100, 150, 110)
+             paper_bg = (245, 245, 240)   # Warm off-white
+             darker_paper = (235, 235, 230)
+             white_paper = (252, 252, 250)
+             
+             cols = {
+                 "grid_line": (180, 180, 175, 120),
+                 "track_bg_even": (240, 240, 235, 255),
+                 "track_bg_odd": (230, 230, 225, 255),
+                 "track_border": (200, 200, 195),
+                 "text_track": (60, 60, 65),
+                 "clip_sine": sage_accent,        # Sage
+                 "clip_const": (100, 120, 130),   # Slate
+                 "clip_ramp": (180, 100, 80),     # Muted Clay
+                 "clip_saw": (200, 120, 100),     # Terracotta
+                 "ruler_bg": darker_paper,
+                 "ruler_border": (190, 190, 185),
+                 "ruler_text": (70, 70, 75),
+                 "timeline_bg": paper_bg,
+                 "playhead": (40, 40, 45),        # Charcoal
+                 "playhead_fill": (80, 80, 85),
+                 "text_green": (60, 120, 70),     # Dark Green
+             }
+             
+             ui = {
+                 "win_bg": paper_bg,
+                 "text": (40, 40, 45),
+                 "btn": white_paper,
+                 "btn_hov": (230, 230, 225),
+                 "btn_act": sage_accent,
+                 "frame_bg": white_paper,
+                 "frame_hov": (230, 230, 225),
+                 "check": sage_accent,
+                 "border": (200, 200, 195),
+                 "menu_bg": paper_bg,
+                 "popup_bg": white_paper,
+                 "scrollbar_bg": paper_bg,
+                 "scrollbar_grab": (180, 180, 175),
+                 "scrollbar_grab_hov": (160, 160, 155),
+                 "scrollbar_grab_act": sage_accent,
+                 "header": (235, 235, 230),
+                 "header_hover": (225, 225, 220),
+                 "header_active": sage_accent,
+                 "tab": paper_bg,
+                 "tab_hov": (235, 235, 230),
+                 "tab_act": sage_accent,
+                 "tab_act_unfocused": (130, 160, 140),
+                 "link_color": sage_accent,
              }
 
         self.theme_colors = cols
@@ -2177,6 +2282,9 @@ class FeditNativeApp:
 
         with dpg.theme() as global_theme:
             with dpg.theme_component(dpg.mvAll):
+                # Ensure borders are visible (Soft Light needs this specifically)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
+                
                 # Core
                 dpg.add_theme_color(dpg.mvThemeCol_WindowBg, ui["win_bg"])
                 dpg.add_theme_color(dpg.mvThemeCol_Text, ui["text"])
@@ -2220,6 +2328,41 @@ class FeditNativeApp:
                 dpg.add_theme_color(dpg.mvThemeCol_CheckMark, ui["check"])
                 dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, ui["check"])
                 dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, ui["check"])
+                # Add Hovered state to ensure consistent coloring
+                # dpg.add_theme_color(dpg.mvThemeCol_SliderGrabHovered, ui["check"]) # Note: SliderGrab applies to grabbed state. FrameBg is the background.
+                # Actually, DPG might not have SliderGrabHovered exposed in some versions? 
+                # Let's check common attributes.
+                dpg.add_theme_color(dpg.mvThemeCol_Button, ui["btn"]) # Ensure buttons are correct
+                
+                # Scrollbars
+                if "scrollbar_bg" in ui:
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg, ui["scrollbar_bg"])
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab, ui["scrollbar_grab"])
+                     # Auto-calculate hover/active if not explicit, or use check color
+                     scrollbar_hov = ui.get("scrollbar_grab_hov", ui["scrollbar_grab"])
+                     scrollbar_act = ui.get("scrollbar_grab_act", ui["check"])
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabHovered, scrollbar_hov)
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabActive, scrollbar_act)
+
+                # Headers (Selectables, Menus, Collapsing Headers)
+                if "header" in ui:
+                    dpg.add_theme_color(dpg.mvThemeCol_Header, ui["header"])
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, ui.get("header_hover", ui["header"]))
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, ui.get("header_active", ui["header"]))
+
+                # Tabs
+                if "tab" in ui or "btn" in ui: 
+                    # Fallback to btn if tab not defined, or specific tab color
+                    base = ui.get("tab", ui.get("btn", (0,0,0)))
+                    hov = ui.get("tab_hov", ui.get("btn_hov", (0,0,0)))
+                    act = ui.get("tab_act", ui.get("btn_act", (0,0,0)))
+                    
+                    dpg.add_theme_color(dpg.mvThemeCol_Tab, base)
+                    dpg.add_theme_color(dpg.mvThemeCol_TabHovered, hov)
+                    dpg.add_theme_color(dpg.mvThemeCol_TabActive, act)
+                    dpg.add_theme_color(dpg.mvThemeCol_TabUnfocused, ui.get("tab_act_unfocused", base))
+                    dpg.add_theme_color(dpg.mvThemeCol_TabUnfocusedActive, ui.get("tab_act_unfocused", act))
+
         
         dpg.bind_theme(global_theme)
         
@@ -2232,6 +2375,11 @@ class FeditNativeApp:
              dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
         if dpg.does_item_exist("monitor_freq"):
              dpg.configure_item("monitor_freq", color=self.theme_colors.get("text_green", (0, 255, 0)))
+
+        if dpg.does_item_exist("txt_github"):
+             # Use defined link color, fallback to Blue if missing
+             link_col = ui.get("link_color", (100, 200, 255))
+             dpg.configure_item("txt_github", color=link_col)
 
     def setup_ui(self):
         with dpg.theme() as global_theme:
@@ -2265,7 +2413,7 @@ class FeditNativeApp:
             dpg.add_item_clicked_handler(callback=lambda: webbrowser.open("https://github.com"))
         
         with dpg.window(tag="win_about", label="About Fedit", width=550, height=380, modal=True, show=False, pos=[400, 200], no_resize=True, no_collapse=True):
-            dpg.add_text("FFeditor (Version 1.0)", color=(255, 255, 255))
+            dpg.add_text("FFeditor (Version 1.0)")
             dpg.add_spacer(height=10)
             dpg.add_text("A modern spiritual successor to Microsoft Fedit (1999).")
             dpg.add_spacer(height=10)
@@ -2273,7 +2421,7 @@ class FeditNativeApp:
             dpg.add_spacer(height=10)
             with dpg.group(horizontal=True, horizontal_spacing=0):
                 dpg.add_text("Source Code: Available on ")
-                dpg.add_text("GitHub", color=(100, 200, 255), tag="txt_github")
+                dpg.add_text("GitHub", tag="txt_github")
                 dpg.bind_item_handler_registry("txt_github", "handler_github_link")
             dpg.add_text("License: MIT License")
             dpg.add_spacer(height=10)
@@ -2319,8 +2467,11 @@ class FeditNativeApp:
                 
                 with dpg.menu(label="Theme", tag="menu_theme"):
                     dpg.bind_item_theme("menu_theme", theme_menu_padded)
-                    dpg.add_menu_item(label="Light Mode", callback=lambda: self.apply_theme("Light"))
-                    dpg.add_menu_item(label="Dark Mode", callback=lambda: self.apply_theme("Dark"))
+                    # Alphabetical Order: Classic, Dark Mode, Retro
+                    # Using check=True to show selection
+                    dpg.add_menu_item(label="Classic", check=True, tag="menu_theme_Classic", callback=lambda: self.apply_theme("Classic"))
+                    dpg.add_menu_item(label="Dark Mode", check=True, tag="menu_theme_Dark Mode", callback=lambda: self.apply_theme("Dark Mode"))
+                    dpg.add_menu_item(label="Retro", check=True, tag="menu_theme_Retro", callback=lambda: self.apply_theme("Retro"))
 
                 # View menu removed as it is empty
                 
