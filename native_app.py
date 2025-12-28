@@ -22,6 +22,7 @@ else:
     base_path = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(os.path.join(base_path, '.dependencies'))
 from server.ffb_engine import engine, DeviceInfo
+from sdl3 import SDL_haptic as sdl_haptic
 
 
 # --- Data Model ---
@@ -32,7 +33,7 @@ class Clip:
     start_time: float = 0.0
     duration: float = 2.0
     track_index: int = 0
-    magnitude: int = 3276
+    magnitude: int = 16000
     frequency: int = 10
     frequency_end: int = 10
     start_phase: int = 0
@@ -84,7 +85,7 @@ class Clip:
     @staticmethod
     def from_dict(d):
         freq = d.get("frequency", 10)
-        raw_angle = d.get("angle", 90)
+        raw_angle = d.get("angle", 0)
         # Backward compatibility: older projects stored hundredths of a degree
         if raw_angle > 359:
             raw_angle = int(round(raw_angle / 100.0))
@@ -96,7 +97,7 @@ class Clip:
             start_time=d.get("start_time", 0.0),
             duration=d.get("duration", 1.0),
             track_index=d.get("track_index", 0),
-            magnitude=d.get("magnitude", 3276),
+            magnitude=d.get("magnitude", 16000),
             frequency=freq,
             frequency_end=d.get("frequency_end", freq),
             start_phase=d.get("start_phase", 0),
@@ -786,12 +787,7 @@ class FeditNativeApp:
                          'last_mag': None,
                          'last_freq': None,
                      }
-                 
-                 # Auto-Detect Torque (Logic preserved but UI update removed)
-                 detected_torque = self._get_torque_for_device(name)
-                 if detected_torque > 0.0:
-                     self.log(f"Auto-Detected Torque: {detected_torque} Nm")
-                 
+                  
          except: pass
 
     def connect_callback(self):
@@ -801,41 +797,6 @@ class FeditNativeApp:
         else:
             self.scan_devices()
 
-    # --- Torque Telemetry ---
-    def calculate_current_force(self):
-        """Calculates theoretical total force output at current time."""
-        if not self.sequencer.is_playing: return 0.0, False
-        
-        total_force = 0.0
-        cur_t = self.sequencer.current_time
-        
-        for t in self.sequencer.tracks:
-            for clip in t.clips:
-                 if clip.start_time <= cur_t < (clip.start_time + clip.duration):
-                     # Calculate instantaneous amplitude
-                     # Relative time in clip
-                     rel_t = cur_t - clip.start_time
-                     amp = self._wave_amplitude(clip, rel_t)
-                     total_force += amp
-        
-        # Apply Global Gain (from UI if available, else 1.0)
-        gain = 1.0
-        if dpg.does_item_exist("slider_gain"):
-             gain = dpg.get_value("slider_gain") / 100.0
-        
-        normalized = (total_force * gain / 32767.0) * 100.0
-        
-        # Check if we are "active" (i.e. inside any clip)
-        is_active = False
-        for t in self.sequencer.tracks:
-            for clip in t.clips:
-                 if clip.start_time <= cur_t < (clip.start_time + clip.duration):
-                     is_active = True
-                     break
-            if is_active: break
-
-        return max(-100.0, min(100.0, normalized)), is_active
-
     # --- Transport Logic ---
     def toggle_play(self):
         self.sequencer.is_playing = not self.sequencer.is_playing
@@ -844,14 +805,6 @@ class FeditNativeApp:
             self.sequencer.last_tick = time.time()
             self.sweep_markers = []
             
-            # Reset Stats (from Main)
-            # Reset Stats (Internal only)
-            self.stats_peak = 0.0
-            self.stats_min = 9999.0
-            self.stats_sum = 0.0
-            self.stats_count = 0
-            
-            # Auto-rewind if at end
             # Auto-rewind if at end AND we have content
             max_dur = 0
             has_content = False
@@ -907,6 +860,60 @@ class FeditNativeApp:
             for c in t.clips: c.active_effect_id = -1
         self.sweep_markers = []
         self.log("Restarted")
+
+    def on_toggle_sine_mode(self, sender, app_data):
+        """Handle toggling between software and hardware sine modes with proper cleanup."""
+        use_software = app_data  # checkbox value
+        
+        # Stop all current effects and reset state
+        engine.stop_effect()
+        self.log_api("stop_effect", {"scope": "all", "reason": "sine_mode_toggle"})
+        
+        # CRITICAL: Reset engine effect_id to force clean state
+        # This ensures we create a fresh effect in the new mode instead of 
+        # trying to reuse an incompatible effect ID from the old mode
+        if hasattr(engine, 'effect_id'):
+            if engine.effect_id != -1 and engine.haptic:
+                try:
+                    sdl_haptic.SDL_DestroyHapticEffect(engine.haptic, engine.effect_id)
+                except:
+                    pass  # Ignore errors if effect was already destroyed
+            engine.effect_id = -1
+        
+        # Ensure oscillator thread is fully stopped
+        if hasattr(engine, '_stop_oscillator'):
+            engine._stop_oscillator()
+        
+        # Reset effect states
+        for k in self.track_states:
+            self.track_states[k] = {
+                'effect_id': -1,
+                'clip_id': None,
+                'clip_type': None,
+                'effect_start_time': None,
+                'phase_acc': 0.0,
+                'last_sweep_update_local': None,
+                'last_sent_freq': None,
+                'last_mag': None,
+                'last_freq': None,
+            }
+        
+        # Clear active effect IDs
+        for t in self.sequencer.tracks:
+            for c in t.clips:
+                c.active_effect_id = -1
+        
+        # Update engine mode
+        engine.use_software_sine = use_software
+        
+        mode_name = "Software Oscillator" if use_software else "Hardware Sine"
+        self.log(f"Sine Mode: {mode_name}")
+        
+        # If playing, effects will be recreated on next update with new mode
+        if self.sequencer.is_playing:
+            self.log("Effects will restart with new mode")
+
+
 
     def get_canvas_relative_pos(self, global_mouse_pos):
         # Helper to get coords relative to timeline content
@@ -1276,10 +1283,6 @@ class FeditNativeApp:
 
             if self.sequencer.is_playing: self.process_sequencer_logic()
             
-            # Update Telemetry
-            force, is_active = self.calculate_current_force()
-            dpg.set_value("force_gauge", force)
-
             # Torque Monitor & Statistics Removed
 
 
@@ -1452,7 +1455,7 @@ class FeditNativeApp:
                 elif direction_mode == "spherical":
                     direction = {"yaw": max(0, min(36000, current_clip.yaw)), "pitch": max(0, min(36000, current_clip.pitch)), "distance": max(0, current_clip.distance)}
                 else:
-                    dir_deg = max(0, min(359, getattr(current_clip, "angle", 90)))
+                    dir_deg = max(0, min(359, getattr(current_clip, "angle", 0)))
                     direction = {"angle": int(dir_deg * 100), "radius": max(0, current_clip.radius)}
 
                 # Phase: slider stores 0-359 deg; API expects 0-35900 (hundredths). 36000 wraps to 0.
@@ -2513,6 +2516,8 @@ class FeditNativeApp:
                 dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
                 dpg.add_button(label="|<", tag="btn_restart", width=30, callback=self.action_restart)
                 dpg.add_checkbox(label="Loop", tag="chk_loop")
+                dpg.add_checkbox(label="SW Sine", tag="chk_software_sine", default_value=True, 
+                                callback=self.on_toggle_sine_mode)
                 
                 dpg.add_text("0.00s", tag="time_display")
                 
