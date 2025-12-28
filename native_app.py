@@ -440,6 +440,11 @@ class FeditNativeApp:
         self.manual_timebase_value = None
         self.mouse_left_button_down = False
         
+        # Resizer state for inspector/log divider
+        self.inspector_height = 450
+        self.is_dragging_divider = False
+        self.drag_start_y = 0
+        
         dpg.create_context()
         self.load_fonts()
         self.setup_ui()
@@ -1001,6 +1006,13 @@ class FeditNativeApp:
 
              self._throttle_when_idle()
              return
+        
+        # Handle divider cursor
+        if dpg.does_item_exist("divider_button") and (dpg.is_item_hovered("divider_button") or dpg.is_item_hovered("divider_window")):
+            import ctypes
+            # IDC_SIZENS = 32645 (vertical resize cursor)
+            cursor = ctypes.windll.user32.LoadCursorW(0, 32645)
+            ctypes.windll.user32.SetCursor(cursor)
 
         # Track Target for Drop/Drag
         mpos = dpg.get_mouse_pos(local=False)
@@ -2038,7 +2050,35 @@ class FeditNativeApp:
         self.sequencer.zoom_x = target_px / app_data
         self.manual_timebase_override = True
         self.manual_timebase_value = app_data
+
+    def on_divider_hover(self, sender, app_data):
+        """Change cursor when hovering over divider"""
+        try:
+            import ctypes
+            # IDC_SIZENS = 32645 (vertical resize cursor)
+            cursor = ctypes.windll.user32.LoadCursorW(0, 32645)
+            ctypes.windll.user32.SetCursor(cursor)
+        except:
+            pass
+    
+    def on_divider_drag(self, sender, app_data):
+        """Handle dragging of the inspector/log divider"""
+        if dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
+            if not self.is_dragging_divider:
+                self.is_dragging_divider = True
+                self.drag_start_y = dpg.get_mouse_pos(local=False)[1]
+                self.drag_start_height = self.inspector_height
+        else:
+            self.is_dragging_divider = False
         
+        if self.is_dragging_divider:
+            current_y = dpg.get_mouse_pos(local=False)[1]
+            delta_y = current_y - self.drag_start_y
+            new_height = max(100, min(800, self.drag_start_height + delta_y))
+            self.inspector_height = new_height
+            dpg.configure_item("panel_inspector", height=self.inspector_height)
+        
+
 
     def _set_system_cursor_visible(self, visible: bool):
         if not hasattr(self, 'cursor_visible'): self.cursor_visible = True
@@ -2591,18 +2631,27 @@ class FeditNativeApp:
                          dpg.set_item_drop_callback("timeline_scroll", self.on_drop_receive)
                      except Exception as e: print(f"Init Warning: {e}")
 
-                # Col 3: Inspector (Top) & Log (Bottom)
+                # Col 3: Inspector (Top) & Log (Bottom) with Resizer
                 with dpg.group():
-                    # Inspector Section (Top Half)
-                    with dpg.child_window(tag="panel_inspector", height=450):
+                    # Inspector Panel
+                    with dpg.child_window(tag="panel_inspector", height=self.inspector_height):
                         dpg.bind_item_theme("panel_inspector", theme_panel_padded)
-                        # We use a Tab Bar here to host the single Live Inspector tab
-                        # This keeps the look consistent and clean
                         with dpg.tab_bar(tag="inspector_tab_bar"):
                             pass
                     
-                    # Log Section (Bottom Half)
-                    with dpg.child_window(tag="panel_log", height=-1):
+                    # Draggable Divider
+                    with dpg.child_window(height=6, tag="divider_window"):
+                        dpg.add_button(label="", width=-1, height=6, tag="divider_button")
+                        
+                    # Register mouse handlers for divider
+                    with dpg.item_handler_registry(tag="divider_handler"):
+                        dpg.add_item_hover_handler(callback=self.on_divider_hover)
+                        dpg.add_item_active_handler(callback=self.on_divider_drag)
+                    
+                    dpg.bind_item_handler_registry("divider_button", "divider_handler")
+                    
+                    # Log Panel (fills remaining space)
+                    with dpg.child_window(tag="panel_log"):
                         dpg.add_text("System Log")
                         dpg.add_listbox(tag="log_list", num_items=30, width=-1)
 
