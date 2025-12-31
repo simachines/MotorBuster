@@ -34,6 +34,7 @@ class Clip:
     frequency: int = 10
     frequency_end: int = 10
     start_phase: int = 0
+    lock_phase: bool = False
     sweep_enabled: bool = False
     direction_mode: str = "Polar"
     angle: int = 90
@@ -63,6 +64,7 @@ class Clip:
             "frequency_end": self.frequency_end,
             "sweep_enabled": self.sweep_enabled,
             "start_phase": self.start_phase,
+            "lock_phase": self.lock_phase,
             "direction_mode": self.direction_mode,
             "angle": self.angle,
             "radius": self.radius,
@@ -98,6 +100,7 @@ class Clip:
             frequency=freq,
             frequency_end=d.get("frequency_end", freq),
             start_phase=d.get("start_phase", 0),
+            lock_phase=d.get("lock_phase", False),
             sweep_enabled=d.get("sweep_enabled", False),
             direction_mode=d.get("direction_mode", "Polar"),
             angle=raw_angle,
@@ -214,6 +217,7 @@ class InspectorPanel:
         self.tag_freq = f"insp_freq_{self.id}"
         self.tag_freq_end = f"insp_freq_end_{self.id}"
         self.tag_phase = f"insp_phase_{self.id}"
+        self.tag_lock_phase = f"insp_lockphase_{self.id}"
         self.tag_sweep = f"insp_sweep_{self.id}"
         self.tag_title = f"insp_title_{self.id}"
         self.tag_type = f"insp_type_{self.id}"
@@ -230,6 +234,7 @@ class InspectorPanel:
         self.tag_end_mag = f"insp_endmag_{self.id}"
         self.tag_attack = f"insp_attack_{self.id}"
         self.tag_fade = f"insp_fade_{self.id}"
+        self.tag_sw_sine = f"insp_swsine_{self.id}"
         
         label = "Inspector (Live)" if not clip else (clip.name or f"Clip {clip.type}")
         
@@ -256,6 +261,8 @@ class InspectorPanel:
              dpg.add_checkbox(label="Enable Sweep", tag=self.tag_sweep, callback=self.on_change, user_data="sweep")
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
              dpg.add_slider_int(label="Phase (deg)", tag=self.tag_phase, min_value=0, max_value=359, callback=self.on_change, user_data="phase")
+             dpg.add_checkbox(label="Lock Phase", tag=self.tag_lock_phase, callback=self.on_change, user_data="lock_phase")
+             dpg.add_checkbox(label="Hardware Wave", tag=self.tag_sw_sine, default_value=not engine.use_software_sine, callback=self.on_change, user_data="hw_wave")
 
              dpg.add_separator()
              dpg.add_combo(label="Direction Mode", items=["Polar","Cartesian","Spherical"], tag=self.tag_dir_mode, callback=self.on_change, user_data="dir_mode")
@@ -312,6 +319,8 @@ class InspectorPanel:
         safe_set(self.tag_freq, clip.frequency)
         safe_set(self.tag_sweep, clip.sweep_enabled)
         safe_set(self.tag_phase, int(max(0, min(359, getattr(clip, 'start_phase', 0)))))
+        safe_set(self.tag_lock_phase, getattr(clip, 'lock_phase', False))
+        safe_set(self.tag_sw_sine, not engine.use_software_sine)
         safe_set(self.tag_type, clip.type)
         safe_set(self.tag_dir_mode, clip.direction_mode)
         safe_set(self.tag_angle, int(max(0, min(359, getattr(clip, 'angle', 90)))))
@@ -365,6 +374,8 @@ class InspectorPanel:
             else:
                 clip.frequency = app_data
         elif param == "phase": clip.start_phase = max(0, min(359, app_data))
+        elif param == "lock_phase": clip.lock_phase = bool(app_data)
+        elif param == "hw_wave": engine.use_software_sine = not bool(app_data)
         elif param == "freq_end": 
              if app_data < 1:
                  dpg.set_value(sender, 1)
@@ -1847,14 +1858,21 @@ class FeditNativeApp:
                              remaining_ms = int(max(0.0, chain_end - hw_start) * 1000)
                              effect_len_ms = remaining_ms + self.UPDATE_LENGTH_BUFFER_MS
                              
-                             t_elapsed = t_local
-                             start_f = current_clip.frequency
-                             end_f = current_clip.frequency_end if is_sweep else start_f
-                             k = (end_f - start_f) / max(1e-6, current_clip.duration)
-                             phase_integral = (start_f * t_elapsed + 0.5 * k * t_elapsed * t_elapsed)
                              start_deg = getattr(current_clip, "start_phase", 0)
-                             norm_phase = (phase_integral + (start_deg / 360.0)) % 1.0
-                             phase_payload = int(norm_phase * 36000)
+                             lock_phase = getattr(current_clip, "lock_phase", False)
+                             
+                             if lock_phase:
+                                 # Lock phase to starting phase during updates
+                                 phase_payload = start_deg * 100
+                             else:
+                                 # Calculate advancing phase based on elapsed time
+                                 t_elapsed = t_local
+                                 start_f = current_clip.frequency
+                                 end_f = current_clip.frequency_end if is_sweep else start_f
+                                 k = (end_f - start_f) / max(1e-6, current_clip.duration)
+                                 phase_integral = (start_f * t_elapsed + 0.5 * k * t_elapsed * t_elapsed)
+                                 norm_phase = (phase_integral + (start_deg / 360.0)) % 1.0
+                                 phase_payload = int(norm_phase * 36000)
                              
                              eff_mag = int(current_clip.magnitude * global_gain)
                              log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": phase_payload}
@@ -2933,10 +2951,21 @@ class FeditNativeApp:
          if not hasattr(self, '_window_drag_offset'):
              self._window_drag_offset = None
          
+         # Track if we're hovering over an edge with mouse up (ready for resize)
+         if not hasattr(self, '_edge_hover_ready'):
+             self._edge_hover_ready = False
+         
+         # Update edge hover ready state: set to True if hovering edge with mouse up
+         if hit_code != 0 and not mouse_down:
+             self._edge_hover_ready = True
+         elif hit_code == 0:
+             # Not on edge anymore, reset ready state
+             self._edge_hover_ready = False
+         
          if mouse_down:
              if not self._drag_initiated:
-                 if hit_code != 0:
-                     # Resize ONLY
+                 if hit_code != 0 and self._edge_hover_ready:
+                     # Resize ONLY - but only if we were hovering before mouse press
                      ctypes.windll.user32.ReleaseCapture()
                      ctypes.windll.user32.SendMessageW(self._hwnd, 0xA1, hit_code, 0)
                      self._drag_initiated = True
@@ -3018,14 +3047,14 @@ class FeditNativeApp:
                 # Force redraw of title bar spacer
                 self._update_title_bar_layout()
                 
-                # Always update drag if dragging, otherwise throttle to every other frame
+                # Throttle CPU when idle (but still run edge detection every frame)
                 is_dragging = hasattr(self, '_window_drag_offset') and self._window_drag_offset is not None
                 
-                if is_dragging or self.frame_count % 2 == 0:
-                    if not is_dragging:
-                        self._throttle_when_idle()
-                    # Unified update: Cursor visual + Drag/Resize actions
-                    self._update_resize_cursor_and_drag()
+                if not is_dragging and self.frame_count % 2 == 0:
+                    self._throttle_when_idle()
+                
+                # Always run resize cursor/edge detection for responsive hover detection
+                self._update_resize_cursor_and_drag()
 
                 try:
                     self.update_loop()

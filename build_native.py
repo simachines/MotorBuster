@@ -24,7 +24,7 @@ args = [
     '--name=FFeditor',              # Executable name
     f'--icon={os.path.join(BASE_DIR, "assets", "icon.ico")}', # Exe Icon
     f'--add-data={os.path.join(BASE_DIR, "assets")};assets',  # Bundle assets dir
-    '--onefile',                 # Single ONEFILE executable
+    '--onedir',                  # Directory with exe and dependencies
     '--clean',                   # Clean cache
     '--windowed',                # No terminal window
     '--collect-all=dearpygui',   # Collect DPG assets
