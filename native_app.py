@@ -1778,8 +1778,10 @@ class FeditNativeApp:
                     },
                 }
 
-                self.log_api("play_descriptor", desc)
-                new_id = engine.play_descriptor(desc)
+                # Log actual effect type: software mode uses CONSTANT with oscillator, hardware uses SINE
+                actual_type = "constant (oscillator)" if engine.use_software_sine else desc["type"]
+                log_desc = {**desc, "type": actual_type}
+                self.log_api("play_descriptor", log_desc)
                 new_id = engine.play_descriptor(desc)
                 state['effect_start_time'] = playhead
                 state['hw_start_time'] = playhead # Store HW start time
@@ -1858,25 +1860,15 @@ class FeditNativeApp:
                              remaining_ms = int(max(0.0, chain_end - hw_start) * 1000)
                              effect_len_ms = remaining_ms + self.UPDATE_LENGTH_BUFFER_MS
                              
+                             # Phase stays fixed at clip's start phase (no recalculation during sweep)
                              start_deg = getattr(current_clip, "start_phase", 0)
-                             lock_phase = getattr(current_clip, "lock_phase", False)
-                             
-                             if lock_phase:
-                                 # Lock phase to starting phase during updates
-                                 phase_payload = start_deg * 100
-                             else:
-                                 # Calculate advancing phase based on elapsed time
-                                 t_elapsed = t_local
-                                 start_f = current_clip.frequency
-                                 end_f = current_clip.frequency_end if is_sweep else start_f
-                                 k = (end_f - start_f) / max(1e-6, current_clip.duration)
-                                 phase_integral = (start_f * t_elapsed + 0.5 * k * t_elapsed * t_elapsed)
-                                 norm_phase = (phase_integral + (start_deg / 360.0)) % 1.0
-                                 phase_payload = int(norm_phase * 36000)
+                             phase_payload = start_deg * 100
                              
                              eff_mag = int(current_clip.magnitude * global_gain)
+                             # Log all params being sent to engine
+                             update_type = "update_oscillator" if engine.use_software_sine else "update_effect_sine"
                              log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": phase_payload}
-                             self.log_api("update_effect_sine", log_payload)
+                             self.log_api(update_type, log_payload)
 
                              new_eff_id = engine.update_effect_sine(eff_id, current_freq, eff_mag, effect_len_ms, phase=phase_payload)
 
@@ -1886,10 +1878,6 @@ class FeditNativeApp:
                                  state['last_sent_freq'] = current_freq
                                  if is_sweep:
                                      state['last_sweep_update_local'] = t_local
-                                     # record marker for visualization
-                                     self.sweep_markers.append({"time": cur_t, "phase": phase_payload})
-                                     if len(self.sweep_markers) > 500:
-                                         self.sweep_markers.pop(0)
 
                         # Update State
                         state['last_mag'] = current_clip.magnitude
