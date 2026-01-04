@@ -72,6 +72,31 @@ class HapticController:
         self.axis_baseline: dict[str, int] = {}
         self.preferred_axis_key: Optional[str] = None
         
+        # Polling rate throttling
+        self.detected_poll_rate_hz: int = 1000  # Default assumption
+        self.measured_usb_rate_hz: int = 0  # Actual measured rate from oscillator
+        self.target_update_rate_hz: int = 500   # 50% of detected (USB shared with position polling)
+        self.manual_poll_rate_override: Optional[int] = None  # User can override
+        self._min_update_interval_s: float = 0.002  # 2ms = 500Hz
+        
+        # Device version counter to detect reconnects
+        self._device_version: int = 0
+        self._haptic_lock = threading.Lock()
+        
+        # Event Queue for asynchronous API calls
+        self._event_queue_enabled = True
+        self._pending_payloads: Dict[str, any] = {}  # UUID -> payload data
+        self._event_types_registered = False
+        self._custom_event_types = {}
+        self._payload_lock = threading.Lock()
+        self._queue_stats = {
+            "events_queued": 0,
+            "events_processed": 0,
+            "queue_overflows": 0,
+        }
+        # Store effect_ids created by async events: (track_idx, clip_id) -> effect_id
+        self._effect_id_results: Dict[tuple, int] = {}
+        
     def init_sdl(self):
         flags = (
             sdl_init.SDL_INIT_VIDEO
@@ -84,6 +109,33 @@ class HapticController:
         if not sdl_init.SDL_Init(flags):
             logger.error(f"SDL_Init Error: {_sdl_error()}")
             raise Exception("Failed to initialize SDL3")
+        
+        # Register custom event types
+        self._register_custom_events()
+        
+    def _register_custom_events(self):
+        """Register SDL3 custom user events for asynchronous API calls."""
+        if self._event_types_registered:
+            return
+        
+        try:
+            # Register 3 custom event types
+            base_event = sdl_events.SDL_RegisterEvents(3)
+            if base_event == ctypes.c_uint32(-1).value:
+                logger.error("Failed to register SDL custom events")
+                self._event_queue_enabled = False
+                return
+            
+            self._custom_event_types = {
+                "EFFECT_START": base_event,
+                "EFFECT_STOP": base_event + 1,
+                "POSITION_REQUEST": base_event + 2,
+            }
+            self._event_types_registered = True
+            logger.info(f"SDL3 custom events registered: {self._custom_event_types}")
+        except Exception as e:
+            logger.error(f"Failed to register custom events: {e}")
+            self._event_queue_enabled = False
         
     def list_devices(self):
         # Pump events to refresh the device list (detects plug/unplug)
@@ -139,6 +191,7 @@ class HapticController:
         self._stop_oscillator_event = threading.Event()
         self._osc_params = {}
         self._oscillator_active = False  # Track if oscillator should run at full speed
+        self._device_version += 1  # Increment to invalidate old oscillator threads
 
         self.joystick = sdl_joy.SDL_OpenJoystick(joy_id)
         if not self.joystick:
@@ -178,7 +231,68 @@ class HapticController:
             logger.info("- CUSTOM Supported")
 
         logger.info(f"Connected to device idx={index} id={joy_id}")
+        
+        # Measure USB update rate right after connection
+        self._calibrate_usb_rate()
+        
         return True
+
+    def _calibrate_usb_rate(self):
+        """Measure USB update rate with 5 samples, using slowest - 10%."""
+        if not self.haptic:
+            return
+        
+        # Create a temporary constant effect for measurement
+        effect = sdl_haptic.SDL_HapticEffect()
+        ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
+        effect.type = sdl_haptic.SDL_HAPTIC_CONSTANT
+        effect.constant.direction.type = sdl_haptic.SDL_HAPTIC_CARTESIAN
+        effect.constant.direction.dir[0] = 1
+        effect.constant.length = 1000
+        effect.constant.level = 0  # Silent
+        
+        temp_effect_id = sdl_haptic.SDL_CreateHapticEffect(self.haptic, ctypes.byref(effect))
+        if temp_effect_id == -1:
+            logger.warning("Could not create temp effect for USB rate measurement")
+            return
+        
+        try:
+            sdl_haptic.SDL_RunHapticEffect(self.haptic, temp_effect_id, 1)
+            
+            logger.info("Measuring USB update rate (5 samples)...")
+            rates = []
+            
+            for i in range(5):
+                # Measure how many updates we can do in 100ms
+                sample_start = time.time()
+                sample_count = 0
+                
+                while (time.time() - sample_start) < 0.1:  # 100ms per sample
+                    try:
+                        sdl_haptic.SDL_UpdateHapticEffect(self.haptic, temp_effect_id, ctypes.byref(effect))
+                        sample_count += 1
+                    except OSError:
+                        break
+                
+                sample_elapsed = time.time() - sample_start
+                if sample_elapsed > 0 and sample_count > 0:
+                    rate = int(sample_count / sample_elapsed)
+                    rates.append(rate)
+            
+            if rates:
+                slowest_rate = min(rates)
+                safe_rate = int(slowest_rate * 0.9) # 10% safety margin
+                
+                self.measured_usb_rate_hz = safe_rate
+                self.detected_poll_rate_hz = safe_rate
+                self.target_update_rate_hz = safe_rate
+                self._min_update_interval_s = 1.0 / safe_rate
+                logger.info(f"USB update rate: {safe_rate}Hz (slowest {slowest_rate}Hz - 10%, samples: {rates})")
+        except OSError as e:
+            logger.warning(f"Error measuring USB rate: {e}")
+        finally:
+            sdl_haptic.SDL_StopHapticEffect(self.haptic, temp_effect_id)
+            sdl_haptic.SDL_DestroyHapticEffect(self.haptic, temp_effect_id)
 
     def close_device(self):
         if self.effect_id != -1:
@@ -200,6 +314,37 @@ class HapticController:
 
         self.axis_baseline.clear()
         self.preferred_axis_key = None
+
+    def detect_device_poll_rate(self, test_duration_s: float = 0.5) -> int:
+        """Returns the measured USB update rate."""
+        return self.measured_usb_rate_hz if self.measured_usb_rate_hz > 0 else self.target_update_rate_hz
+
+    def set_target_update_rate(self, rate_hz: int, is_manual_override: bool = False):
+        """
+        Set the target update rate for effect updates.
+        If is_manual_override is True, this rate will persist until reset.
+        """
+        rate_hz = max(10, min(1000, rate_hz))  # Clamp to valid range
+        
+        if is_manual_override:
+            self.manual_poll_rate_override = rate_hz
+        
+        self.target_update_rate_hz = rate_hz
+        self._min_update_interval_s = 1.0 / rate_hz
+        logger.info(f"Target update rate set to {rate_hz}Hz (interval: {self._min_update_interval_s*1000:.2f}ms)")
+    
+    def clear_manual_poll_rate_override(self):
+        """Clear manual override and reset to 75% of detected rate."""
+        self.manual_poll_rate_override = None
+        self.set_target_update_rate(int(self.detected_poll_rate_hz * 0.75))
+        logger.info("Manual poll rate override cleared, using auto-detected rate")
+
+    def get_effective_update_rate(self) -> int:
+        """Return the currently active update rate."""
+        if self.manual_poll_rate_override is not None:
+            return self.manual_poll_rate_override
+        return self.target_update_rate_hz
+
 
     def play_constant(self, level: int, length: int = 5000):
         if not self.haptic: return
@@ -294,20 +439,22 @@ class HapticController:
         # Return raw value without baseline offset to avoid stale baseline issues
         return value
 
+    def poll_input(self):
+        """Polls SDL events to update joystick/gamepad state. Call once per frame."""
+        # SDL_PumpEvents updates the event queue and input device states.
+        sdl_events.SDL_PumpEvents()
+        # Explicit update calls if needed, though PumpEvents covers most cases.
+        # Keeping them for robustness if PumpEvents isn't enough for Gamepad API.
+        try:
+            sdl_gp.SDL_UpdateGamepads()
+            sdl_joy.SDL_UpdateJoysticks()
+        except: pass
+
     def get_axis_value(self, axis_idx: int = 0) -> Optional[int]:
         """Read wheel position with baseline offset removal. Defaults to preferred X axis."""
         if not self.joystick:
             return None
         try:
-            try:
-                sdl_gp.SDL_UpdateGamepads()
-            except Exception:
-                pass
-            try:
-                sdl_joy.SDL_UpdateJoysticks()
-            except Exception:
-                pass
-
             axis_map = [
                 sdl_gp.SDL_GAMEPAD_AXIS_LEFTX,
                 sdl_gp.SDL_GAMEPAD_AXIS_LEFTY,
@@ -334,13 +481,15 @@ class HapticController:
             # Fallback to joystick
             axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
             if axis_count <= 0:
+                logger.warning(f"SDL_GetNumJoystickAxes returned {axis_count}, joystick may be disconnected")
                 return None
             idx = int(key.split("_")[1]) if key and key.startswith("joy_") else axis_idx
             if idx < 0 or idx >= axis_count:
                 idx = 0
             raw = int(sdl_joy.SDL_GetJoystickAxis(self.joystick, idx))
             return self._apply_baseline(f"joy_{idx}", raw)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Exception in get_axis_value: {e}")
             return None
 
     def play_sine_fallback(self, duration_ms: int, magnitude: int):
@@ -513,15 +662,18 @@ class HapticController:
             length_ms = int(desc.get("length_ms", len(samples)))
             return self.play_custom(samples, length_ms) and self.effect_id or -1
 
+        # Check for software sine override in descriptor
+        use_sw = desc.get("use_software_sine", self.use_software_sine)
+
         # Software sine: route periodic effects through oscillator thread
-        if self.use_software_sine and kind in ("sine", "square", "triangle", "sawtooth", "sawtoothup", "sawtoothdown"):
+        if use_sw and kind in ("sine", "square", "triangle", "sawtooth", "sawtoothup", "sawtoothdown", "ramp"):
             freq = float(desc.get("frequency_hz", 10.0))
             mag = int(desc.get("magnitude", 10000))
             length_ms = int(desc.get("length_ms", 5000))
             phase = int(desc.get("phase", 0))
             # Store desc for direction/envelope reference
             self._current_descriptor = desc
-            return self._start_software_sine(freq, mag, length_ms, phase, desc)
+            return self._start_software_oscillator(freq, mag, length_ms, phase, desc)
 
         # Hardware mode: use standard effect building
         self._stop_oscillator()
@@ -551,9 +703,10 @@ class HapticController:
         logger.error(f"Failed to run effect: {_sdl_error()}")
         return -1
     # --- Sequencer Methods ---
-    def _start_software_sine(self, freq: float, magnitude: int, duration_ms: int, phase: int, desc: dict):
-        """Start software sine using constant force oscillator with proper direction from descriptor."""
-        print(f">>> START SOFTWARE SINE: freq={freq}")
+    def _start_software_oscillator(self, freq: float, magnitude: int, duration_ms: int, phase: int, desc: dict):
+        """Start software oscillator using constant force effect with proper direction from descriptor."""
+        osc_type = (desc.get("type") or desc.get("effect") or "sine").lower()
+        print(f">>> START SOFTWARE OSCILLATOR: type={osc_type} freq={freq}")
         if not self.haptic:
             return -1
         
@@ -594,22 +747,31 @@ class HapticController:
             adjusted_phase = (phase - 9000) % 36000
             
             # Start oscillator
-            self._osc_params = {"freq": freq, "mag": magnitude, "phase": adjusted_phase}
+            self._osc_params = {
+                "freq": freq, 
+                "mag": magnitude, 
+                "phase": adjusted_phase,
+                "type": osc_type
+            }
             self._oscillator_active = True
             self._stop_oscillator_event.clear()
-            self._oscillator_thread = threading.Thread(target=self._sine_worker, daemon=True)
+            self._oscillator_thread = threading.Thread(target=self._software_oscillator_worker, daemon=True)
             self._oscillator_thread.start()
             return new_id
         except Exception as e:
-            logger.error(f"Error in _start_software_sine: {e}")
-            self.close_device()
+            logger.error(f"Error in _start_software_oscillator: {e}")
+            # Don't close device here - joystick input should remain functional
             return -1
 
     def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = 0):
         """Updates sine effect parameters during playback (sweep updates)."""
         if not self.haptic or effect_id == -1: return -1
         
-        if self.use_software_sine:
+        # Check if we are running software oscillator for this descriptor
+        desc = getattr(self, '_current_descriptor', {})
+        use_sw = desc.get("use_software_sine", self.use_software_sine)
+
+        if use_sw:
             # Software: only update freq and mag - phase is accumulated internally by oscillator
             self._osc_params["freq"] = freq
             self._osc_params["mag"] = magnitude
@@ -623,10 +785,17 @@ class HapticController:
                 desc.get("direction") if desc else None
             )
             
+            if not desc:
+                # Fallback to sine if no descriptor
+                sdl_type = sdl_haptic.SDL_HAPTIC_SINE
+            else:
+                kind = (desc.get("type") or desc.get("effect") or "sine").lower()
+                sdl_type = PERIODIC_TYPES.get(kind, sdl_haptic.SDL_HAPTIC_SINE)
+
             effect = sdl_haptic.SDL_HapticEffect()
             ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
-            effect.type = sdl_haptic.SDL_HAPTIC_SINE
-            effect.periodic.type = sdl_haptic.SDL_HAPTIC_SINE
+            effect.type = sdl_type
+            effect.periodic.type = sdl_type
             effect.periodic.direction = direction
             effect.periodic.period = int(1000 / max(0.1, float(freq)))
             effect.periodic.magnitude = magnitude
@@ -640,8 +809,8 @@ class HapticController:
                 sdl_haptic.SDL_UpdateHapticEffect(self.haptic, effect_id, ctypes.byref(effect))
                 return effect_id
             except Exception as e:
-                logger.error(f"Error: {e}")
-                self.close_device()
+                logger.error(f"Error updating haptic effect: {e}")
+                # Don't close device here - joystick input should remain functional
                 return -1 
 
 
@@ -745,7 +914,228 @@ class HapticController:
                 sdl_haptic.SDL_DestroyHapticEffect(self.haptic, effect_id) # Cleanup immediately? Or sequence end?
         except (OSError, Exception) as e:
             logger.error(f"Error in stop_effect: {e}")
-            self.close_device()
+            # Don't close device here - joystick input should remain functional
+    
+    # --- Event Queue Methods ---
+    def queue_effect_start(self, descriptor: Dict, track_idx: int, clip_id: str, effect_id: int = -1) -> bool:
+        """Queue an effect start command as SDL event. Returns True if queued successfully."""
+        if not self._event_queue_enabled:
+            # Fallback to synchronous execution
+            result_id = self.play_descriptor(descriptor)
+            return result_id != -1
+        
+        try:
+            import uuid
+            
+            # Store payload
+            payload_id = str(uuid.uuid4())
+            with self._payload_lock:
+                self._pending_payloads[payload_id] = {
+                    "descriptor": descriptor,
+                    "track_idx": track_idx,
+                    "clip_id": clip_id,
+                    "effect_id": effect_id,
+                }
+            
+            # Create and push SDL event
+            event = sdl_events.SDL_Event()
+            event.type = self._custom_event_types["EFFECT_START"]
+            # Store payload_id in user data (using windowID as a hack for string storage)
+            # We'll use code to store hash of payload_id for quick lookup
+            event.user.code = hash(payload_id) & 0x7FFFFFFF  # Keep positive
+            event.user.data1 = id(payload_id)  # Python object id
+            
+            # Store mapping for retrieval
+            with self._payload_lock:
+                self._pending_payloads[f"hash_{event.user.code}"] = payload_id
+            
+            result = sdl_events.SDL_PushEvent(ctypes.byref(event))
+            if result:
+                self._queue_stats["events_queued"] += 1
+                return True
+            else:
+                logger.warning(f"SDL_PushEvent failed for EFFECT_START: {_sdl_error()}")
+                self._queue_stats["queue_overflows"] += 1
+                # Fallback to synchronous
+                with self._payload_lock:
+                    del self._pending_payloads[payload_id]
+                    if f"hash_{event.user.code}" in self._pending_payloads:
+                        del self._pending_payloads[f"hash_{event.user.code}"]
+                result_id = self.play_descriptor(descriptor)
+                return result_id != -1
+        except Exception as e:
+            logger.error(f"Error queuing effect start: {e}")
+            return False
+    
+    def queue_effect_stop(self, effect_id: int, track_idx: int = -1) -> bool:
+        """Queue an effect stop command as SDL event. Returns True if queued successfully."""
+        if not self._event_queue_enabled:
+            # Fallback to synchronous execution
+            self.stop_effect(effect_id)
+            return True
+        
+        try:
+            import uuid
+            
+            # Store payload
+            payload_id = str(uuid.uuid4())
+            with self._payload_lock:
+                self._pending_payloads[payload_id] = {
+                    "effect_id": effect_id,
+                    "track_idx": track_idx,
+                }
+            
+            # Create and push SDL event
+            event = sdl_events.SDL_Event()
+            event.type = self._custom_event_types["EFFECT_STOP"]
+            event.user.code = hash(payload_id) & 0x7FFFFFFF
+            event.user.data1 = id(payload_id)
+            
+            with self._payload_lock:
+                self._pending_payloads[f"hash_{event.user.code}"] = payload_id
+            
+            result = sdl_events.SDL_PushEvent(ctypes.byref(event))
+            if result:
+                self._queue_stats["events_queued"] += 1
+                return True
+            else:
+                logger.warning(f"SDL_PushEvent failed for EFFECT_STOP: {_sdl_error()}")
+                self._queue_stats["queue_overflows"] += 1
+                # Fallback to synchronous
+                with self._payload_lock:
+                    del self._pending_payloads[payload_id]
+                    if f"hash_{event.user.code}" in self._pending_payloads:
+                        del self._pending_payloads[f"hash_{event.user.code}"]
+                self.stop_effect(effect_id)
+                return True
+        except Exception as e:
+            logger.error(f"Error queuing effect stop: {e}")
+            return False
+            
+    def process_event_queue(self, max_events: int = 32):
+        """Process pending SDL events from the queue. Call this regularly from logic thread."""
+        if not self._event_queue_enabled or not self._event_types_registered:
+            return
+        
+        event = sdl_events.SDL_Event()
+        processed = 0
+        
+        while processed < max_events:
+            # Peek events in our custom range
+            min_type = self._custom_event_types["EFFECT_START"]
+            max_type = self._custom_event_types["POSITION_REQUEST"]
+            
+            result = sdl_events.SDL_PeepEvents(
+                ctypes.byref(event), 1,
+                sdl_events.SDL_GETEVENT,  # Remove from queue
+                min_type, max_type
+            )
+            
+            if result <= 0:
+                break  # No more events
+            
+            # Dispatch event
+            try:
+                if event.type == self._custom_event_types["EFFECT_START"]:
+                    self._handle_effect_start_event(event)
+                elif event.type == self._custom_event_types["EFFECT_STOP"]:
+                    self._handle_effect_stop_event(event)
+                elif event.type == self._custom_event_types["POSITION_REQUEST"]:
+                    self._handle_position_request_event(event)
+                
+                self._queue_stats["events_processed"] += 1
+            except Exception as e:
+                logger.error(f"Error processing event type {event.type}: {e}")
+            
+            processed += 1
+    
+    def _handle_effect_start_event(self, event):
+        """Handle EFFECT_START event by executing play_descriptor."""
+        try:
+            # Retrieve payload
+            hash_key = f"hash_{event.user.code}"
+            with self._payload_lock:
+                payload_id = self._pending_payloads.get(hash_key)
+                if not payload_id:
+                    logger.warning("EFFECT_START event has no payload")
+                    return
+                
+                payload = self._pending_payloads.get(payload_id)
+                if not payload:
+                    logger.warning(f"Payload {payload_id} not found")
+                    return
+                
+                # Extract payload data
+                descriptor = payload["descriptor"]
+                track_idx = payload["track_idx"]
+                clip_id = payload["clip_id"]
+                prev_effect_id = payload["effect_id"]
+                
+                # Clean up
+                del self._pending_payloads[payload_id]
+                del self._pending_payloads[hash_key]
+            
+            # Execute the API call (now asynchronous from the caller's perspective)
+            new_effect_id = self.play_descriptor(descriptor)
+            
+            # Store the result so the app can retrieve it
+            with self._payload_lock:
+                self._effect_id_results[(track_idx, clip_id)] = new_effect_id
+            
+        except Exception as e:
+            logger.error(f"Error handling EFFECT_START event: {e}")
+    
+    def _handle_effect_stop_event(self, event):
+        """Handle EFFECT_STOP event by executing stop_effect."""
+        try:
+            # Retrieve payload
+            hash_key = f"hash_{event.user.code}"
+            with self._payload_lock:
+                payload_id = self._pending_payloads.get(hash_key)
+                if not payload_id:
+                    logger.warning("EFFECT_STOP event has no payload")
+                    return
+                
+                payload = self._pending_payloads.get(payload_id)
+                if not payload:
+                    logger.warning(f"Payload {payload_id} not found")
+                    return
+                
+                effect_id = payload["effect_id"]
+                
+                # Clean up
+                del self._pending_payloads[payload_id]
+                del self._pending_payloads[hash_key]
+            
+            # Execute the API call
+            self.stop_effect(effect_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling EFFECT_STOP event: {e}")
+    
+    def _handle_position_request_event(self, event):
+        """Handle POSITION_REQUEST event (placeholder for future use)."""
+        # Position polling is already handled by poll_input() in logic thread
+        # This is a placeholder for future enhancements
+        pass
+    
+    def get_effect_id_result(self, track_idx: int, clip_id: str) -> Optional[int]:
+        """
+        Retrieve the effect_id for an async-created effect.
+        Returns the effect_id if available, or None if not yet created.
+        Consumes the result (removes it from cache).
+        """
+        with self._payload_lock:
+            key = (track_idx, clip_id)
+            if key in self._effect_id_results:
+                effect_id = self._effect_id_results[key]
+                del self._effect_id_results[key]  # Consume the result
+                return effect_id
+        return None
+    
+    def get_queue_stats(self) -> Dict[str, int]:
+        """Return event queue statistics."""
+        return self._queue_stats.copy()
             
     # --- Software Oscillator ---
     def _stop_oscillator(self):
@@ -765,13 +1155,12 @@ class HapticController:
             self._oscillator_thread = None
             print("[OSC] Thread stopped")
             
-    def _sine_worker(self):
-        """Thread that updates Constant Force to emulate Sine using phase accumulation."""
+    def _software_oscillator_worker(self):
+        """Thread that updates Constant Force to emulate various periodic waveforms."""
         print("[OSC] Thread started!")
         
-        # Pre-initialize all variables to avoid overhead in hot loop
-        last_time = time.time()
-        accumulated_phase = 0.0
+        # Capture the device version at thread start - if it changes, we must exit
+        osc_device_version = self._device_version
         
         # Pre-create the cached effect structure
         cached_effect = sdl_haptic.SDL_HapticEffect()
@@ -783,6 +1172,12 @@ class HapticController:
         cached_effect.constant.length = 60000
         self._cached_effect = cached_effect  # Store for stop function
         
+        # Pre-initialize all variables to avoid overhead in hot loop
+        last_time = time.time()
+        last_usb_update_time = time.time()  # Track when we last sent USB command
+        accumulated_phase = 0.0
+        update_count = 0
+        
         two_pi = 2 * math.pi
         
         while not self._stop_oscillator_event.is_set():
@@ -790,6 +1185,8 @@ class HapticController:
             if not self._oscillator_active:
                 time.sleep(0.1)
                 last_time = time.time()
+                last_usb_update_time = time.time()
+                update_count = 0
                 continue
             
             current_time = time.time()
@@ -803,21 +1200,75 @@ class HapticController:
             
             freq = params.get("freq", 10.0)
             mag = params.get("mag", 10000)
-            phase_offset_rad = math.radians(params.get("phase", 0) / 100.0)
+            phase_deg = params.get("phase", 0)
+            phase_offset_rad = math.radians(phase_deg / 100.0) if phase_deg > 360 else math.radians(phase_deg)
+            osc_type = params.get("type", "sine")
             
-            # Accumulate phase
+            # Accumulate phase (this runs at full speed for accuracy)
             accumulated_phase += two_pi * freq * dt
             if accumulated_phase > 6283.185:
                 accumulated_phase %= 6283.185
             
-            # Calculate sine and level
-            current_level = int(math.sin(accumulated_phase + phase_offset_rad) * mag)
+            # Calculate waveform value (-1.0 to 1.0)
+            val = 0.0
+            total_phase = (accumulated_phase + phase_offset_rad) % two_pi
+            norm_phase = total_phase / two_pi  # 0.0 to 1.0
             
-            # Update Effect - no debug logging in hot loop for max speed
-            if self.haptic and self.effect_id != -1:
-                cached_effect.constant.level = current_level
-                sdl_haptic.SDL_UpdateHapticEffect(self.haptic, self.effect_id, ctypes.byref(cached_effect))
+            if osc_type == "sine":
+                val = math.sin(total_phase)
+            elif osc_type == "square":
+                val = 1.0 if math.sin(total_phase) >= 0 else -1.0
+            elif osc_type == "triangle":
+                # Triangle: 0->1 (0-0.25), 1->-1 (0.25-0.75), -1->0 (0.75-1.0)
+                # Adjusted to match Sine phase (starts at 0, going up)
+                if norm_phase < 0.25:
+                    val = 4.0 * norm_phase
+                elif norm_phase < 0.75:
+                    val = 2.0 - 4.0 * norm_phase
+                else:
+                    val = 4.0 * norm_phase - 4.0
+            elif osc_type == "sawtoothup":
+                # Sawtooth Up: -1 to 1 over one period
+                # Starts at -1 (phase 0) if we use 2*t - 1
+                val = -1.0 + 2.0 * norm_phase
+            elif osc_type == "sawtoothdown":
+                # Sawtooth Down: 1 to -1 over one period
+                val = 1.0 - 2.0 * norm_phase
+            elif osc_type == "ramp":
+                # Treat Ramp as Sawtooth Up for periodic context
+                val = -1.0 + 2.0 * norm_phase
+            else:
+                val = math.sin(total_phase)
+                
+            current_level = int(val * mag)
+            
+            # Only send USB update if enough time has passed
+            time_since_last_usb = current_time - last_usb_update_time
+            if time_since_last_usb >= self._min_update_interval_s:
+                with self._haptic_lock:
+                    haptic = self.haptic
+                    effect_id = self.effect_id
+                    device_version = self._device_version
+                
+                # Check validity
+                if device_version != osc_device_version:
+                    print(f"[OSC] Device version changed, stopping thread")
+                    break
+                
+                if haptic and effect_id != -1:
+                    cached_effect.constant.level = current_level
+                    try:
+                        sdl_haptic.SDL_UpdateHapticEffect(haptic, effect_id, ctypes.byref(cached_effect))
+                        last_usb_update_time = current_time
+                        update_count += 1
+                    except OSError as e:
+                        print(f"[OSC] SDL_UpdateHapticEffect error: {e}, stopping thread")
+                        break
+            
+            # Small sleep to prevent CPU spin
+            time.sleep(0.0001)
     # -----------------------
 
 # Global Instance
 engine = HapticController()
+

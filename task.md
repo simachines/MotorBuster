@@ -65,3 +65,4 @@
     - [x] **Drag & Drop**: Highlight *only* the target track (not whole window)
     - [x] **Context Menus**:
         - [x] Right-click clip -> options to Delete Clip / Rename Track (?)
+    - [x] **Refine Timeline Snapping**: Based on screen pixels instead of time (15px threshold)

@@ -4,6 +4,8 @@ import logging
 import math
 import os
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -14,6 +16,7 @@ if sys.stderr is None:
     sys.stderr = sys.stdout
 
 from sdl3 import SDL_error as sdl_error
+from sdl3 import SDL_events as sdl_events
 from sdl3 import SDL_gamepad as sdl_gp
 from sdl3 import SDL_haptic as sdl_haptic
 from sdl3 import SDL_init as sdl_init
@@ -65,6 +68,7 @@ class HapticController:
         self.effect_id = -1
         self._device_ids: list[int] = []
         self._current_custom_data = None
+        self.use_software_sine = True  # Toggle: True = Software Oscillator, False = Hardware SINE
         self.axis_baseline: dict[str, int] = {}
         self.preferred_axis_key: Optional[str] = None
         
@@ -82,6 +86,9 @@ class HapticController:
             raise Exception("Failed to initialize SDL3")
         
     def list_devices(self):
+        # Pump events to refresh the device list (detects plug/unplug)
+        sdl_events.SDL_PumpEvents()
+        
         devices: list[DeviceInfo] = []
         count = ctypes.c_int(0)
         joystick_ids = sdl_joy.SDL_GetJoysticks(ctypes.byref(count))
@@ -111,8 +118,8 @@ class HapticController:
                 f"Device {idx} (id={joy_id}): '{name_str}' | Haptic: {is_haptic} | Gamepad: {is_gc}"
             )
 
-            if is_haptic or is_gc:
-                devices.append(DeviceInfo(index=idx, name=name_str))
+            # Include ALL joysticks, not just haptic/gamepad ones
+            devices.append(DeviceInfo(index=idx, name=name_str))
 
         return devices
 
@@ -127,6 +134,11 @@ class HapticController:
             return False
 
         joy_id = self._device_ids[index]
+        self.effect_id = -1
+        self._oscillator_thread = None
+        self._stop_oscillator_event = threading.Event()
+        self._osc_params = {}
+        self._oscillator_active = False  # Track if oscillator should run at full speed
 
         self.joystick = sdl_joy.SDL_OpenJoystick(joy_id)
         if not self.joystick:
@@ -174,6 +186,7 @@ class HapticController:
             self.effect_id = -1
             
         if self.haptic:
+            self._stop_oscillator()
             sdl_haptic.SDL_CloseHaptic(self.haptic)
             self.haptic = None
             
@@ -401,7 +414,7 @@ class HapticController:
         effect.periodic.length = int(desc.get("length_ms", sdl_haptic.SDL_HAPTIC_INFINITY))
         # Offset phase by +60 degrees to compensate for SDL's phase reference
         raw_phase = int(desc.get("phase", 0))
-        adjusted_phase = (raw_phase + 6000) % 36000  # +60 degrees in centidegrees
+        adjusted_phase = (raw_phase - 9000) % 36000  
         effect.periodic.phase = adjusted_phase
         self._apply_envelope(effect.periodic, envelope)
 
@@ -500,6 +513,24 @@ class HapticController:
             length_ms = int(desc.get("length_ms", len(samples)))
             return self.play_custom(samples, length_ms) and self.effect_id or -1
 
+        # Software sine: route periodic effects through oscillator thread
+        if self.use_software_sine and kind in ("sine", "square", "triangle", "sawtooth", "sawtoothup", "sawtoothdown"):
+            freq = float(desc.get("frequency_hz", 10.0))
+            mag = int(desc.get("magnitude", 10000))
+            length_ms = int(desc.get("length_ms", 5000))
+            phase = int(desc.get("phase", 0))
+            # Store desc for direction/envelope reference
+            self._current_descriptor = desc
+            return self._start_software_sine(freq, mag, length_ms, phase, desc)
+
+        # Hardware mode: use standard effect building
+        self._stop_oscillator()
+        
+        # Store descriptor and start phase for update_effect_sine
+        self._current_descriptor = desc
+        raw_phase = int(desc.get("phase", 0))
+        self._start_phase = (raw_phase - 9000) % 36000  # Same offset as _build_periodic
+        
         effect = self.build_effect_from_descriptor(desc)
         if not effect:
             return -1
@@ -519,73 +550,99 @@ class HapticController:
 
         logger.error(f"Failed to run effect: {_sdl_error()}")
         return -1
-
     # --- Sequencer Methods ---
-    def start_effect_sine(self, freq: float, magnitude: int, duration_ms: int, phase: int = 0):
-        if not self.haptic: return -1
+    def _start_software_sine(self, freq: float, magnitude: int, duration_ms: int, phase: int, desc: dict):
+        """Start software sine using constant force oscillator with proper direction from descriptor."""
+        print(f">>> START SOFTWARE SINE: freq={freq}")
+        if not self.haptic:
+            return -1
         
-        # New Effect
+        self._stop_oscillator()
+        
+        # Destroy existing effect
+        if self.effect_id != -1:
+            try:
+                sdl_haptic.SDL_StopHapticEffect(self.haptic, self.effect_id)
+                sdl_haptic.SDL_DestroyHapticEffect(self.haptic, self.effect_id)
+            except:
+                pass
+            self.effect_id = -1
+        
+        # Build direction from descriptor
+        direction = self._make_direction(desc.get("direction_mode", "polar"), desc.get("direction"))
+        
+        sdl_error.SDL_ClearError()
         effect = sdl_haptic.SDL_HapticEffect()
         ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
-        effect.type = sdl_haptic.SDL_HAPTIC_SINE
-        effect.periodic.type = sdl_haptic.SDL_HAPTIC_SINE
-        effect.periodic.direction.type = sdl_haptic.SDL_HAPTIC_CARTESIAN
-        effect.periodic.period = int(1000 / max(0.1, float(freq)))
-        effect.periodic.magnitude = magnitude
-        effect.periodic.length = sdl_haptic.SDL_HAPTIC_INFINITY
-        effect.periodic.attack_length = 0
-        effect.periodic.fade_length = 0
-        # Offset phase by +60 degrees to compensate for SDL's phase reference
-        # SDL subtracts 60 degrees from the phase internally
-        adjusted_phase = (phase + 0) % 36000  # +60 degrees in centidegrees
-        effect.periodic.phase = adjusted_phase
+        effect.type = sdl_haptic.SDL_HAPTIC_CONSTANT
+        effect.constant.direction = direction
+        effect.constant.length = 60000
+        effect.constant.level = magnitude
+        effect.constant.attack_length = 0
+        effect.constant.fade_length = 0
         
         try:
             new_id = sdl_haptic.SDL_CreateHapticEffect(self.haptic, ctypes.byref(effect))
-            if new_id != -1:
-                sdl_haptic.SDL_RunHapticEffect(self.haptic, new_id, 1)
+            if new_id == -1:
+                logger.error(f"CreateEffect FAILED: {_sdl_error()}")
+                return -1
+            self.effect_id = new_id
+            
+            sdl_haptic.SDL_RunHapticEffect(self.haptic, new_id, 1)
+            
+            # Adjust phase offset like _build_periodic does
+            adjusted_phase = (phase - 9000) % 36000
+            
+            # Start oscillator
+            self._osc_params = {"freq": freq, "mag": magnitude, "phase": adjusted_phase}
+            self._oscillator_active = True
+            self._stop_oscillator_event.clear()
+            self._oscillator_thread = threading.Thread(target=self._sine_worker, daemon=True)
+            self._oscillator_thread.start()
             return new_id
-        except OSError:
-            logger.error("Access Violation in start_effect_sine: Device likely disconnected.")
-            self.close_device()
-            return -1
         except Exception as e:
-            logger.error(f"Error in start_effect_sine: {e}")
+            logger.error(f"Error in _start_software_sine: {e}")
+            self.close_device()
             return -1
 
     def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = 0):
-        """Updates parameters with specified duration."""
+        """Updates sine effect parameters during playback (sweep updates)."""
         if not self.haptic or effect_id == -1: return -1
-
-        effect = sdl_haptic.SDL_HapticEffect()
-        ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
-        effect.type = sdl_haptic.SDL_HAPTIC_SINE
-        effect.periodic.type = sdl_haptic.SDL_HAPTIC_SINE
-        effect.periodic.direction.type = sdl_haptic.SDL_HAPTIC_CARTESIAN
-        effect.periodic.period = int(1000 / max(0.1, float(freq)))
-        effect.periodic.magnitude = magnitude
-        effect.periodic.length = duration_ms
-        effect.periodic.attack_length = 0
-        effect.periodic.fade_length = 0
-        # Offset phase by +60 degrees to compensate for SDL's phase reference
-        # SDL subtracts 60 degrees from the phase internally
-        adjusted_phase = (phase - 0) % 36000  # +60 degrees in centidegrees
-        effect.periodic.phase = adjusted_phase
         
-        try:
-            # Note: SDL_HapticUpdateEffect dynamically updates the effect
-            # We do NOT request RunEffect here as it would restart the envelope/phase
-            res = sdl_haptic.SDL_UpdateHapticEffect(self.haptic, effect_id, ctypes.byref(effect))
-            if res:
+        if self.use_software_sine:
+            # Software: only update freq and mag - phase is accumulated internally by oscillator
+            self._osc_params["freq"] = freq
+            self._osc_params["mag"] = magnitude
+            # Note: phase is NOT updated here - oscillator handles phase accumulation
+            return effect_id
+        else:
+            # Hardware: update SDL effect - use stored descriptor for proper direction
+            desc = getattr(self, '_current_descriptor', None)
+            direction = self._make_direction(
+                desc.get("direction_mode", "polar") if desc else "polar",
+                desc.get("direction") if desc else None
+            )
+            
+            effect = sdl_haptic.SDL_HapticEffect()
+            ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
+            effect.type = sdl_haptic.SDL_HAPTIC_SINE
+            effect.periodic.type = sdl_haptic.SDL_HAPTIC_SINE
+            effect.periodic.direction = direction
+            effect.periodic.period = int(1000 / max(0.1, float(freq)))
+            effect.periodic.magnitude = magnitude
+            effect.periodic.length = duration_ms
+            effect.periodic.attack_length = 0
+            effect.periodic.fade_length = 0
+            # Keep phase fixed from clip start - don't use the changing phase value
+            effect.periodic.phase = getattr(self, '_start_phase', 0)
+            
+            try:
+                sdl_haptic.SDL_UpdateHapticEffect(self.haptic, effect_id, ctypes.byref(effect))
                 return effect_id
-            return -1
-        except OSError:
-            logger.error("Access Violation in update_effect_sine: Device likely disconnected.")
-            self.close_device()
-            return -1
-        except Exception as e:
-             logger.error(f"Error in update_effect_sine: {e}")
-             return -1 
+            except Exception as e:
+                logger.error(f"Error: {e}")
+                self.close_device()
+                return -1 
 
 
 
@@ -680,14 +737,86 @@ class HapticController:
         try:
             if effect_id == -1:
                 # Stop All
+                self._stop_oscillator()
                 sdl_haptic.SDL_StopHapticEffects(self.haptic)
             else:
+                self._stop_oscillator() # Stop thread if stopping specific effect (assuming only 1 effect active usually)
                 sdl_haptic.SDL_StopHapticEffect(self.haptic, effect_id)
                 sdl_haptic.SDL_DestroyHapticEffect(self.haptic, effect_id) # Cleanup immediately? Or sequence end?
         except (OSError, Exception) as e:
             logger.error(f"Error in stop_effect: {e}")
             self.close_device()
             
+    # --- Software Oscillator ---
+    def _stop_oscillator(self):
+        self._oscillator_active = False  # Trigger idle sleep mode
+        
+        # Zero the level before stopping to prevent force spike
+        if hasattr(self, '_cached_effect') and self.haptic and self.effect_id != -1:
+            self._cached_effect.constant.level = 0
+            try:
+                sdl_haptic.SDL_UpdateHapticEffect(self.haptic, self.effect_id, ctypes.byref(self._cached_effect))
+            except:
+                pass
+        
+        if hasattr(self, '_oscillator_thread') and self._oscillator_thread:
+            self._stop_oscillator_event.set()
+            self._oscillator_thread.join()
+            self._oscillator_thread = None
+            print("[OSC] Thread stopped")
+            
+    def _sine_worker(self):
+        """Thread that updates Constant Force to emulate Sine using phase accumulation."""
+        print("[OSC] Thread started!")
+        
+        # Pre-initialize all variables to avoid overhead in hot loop
+        last_time = time.time()
+        accumulated_phase = 0.0
+        
+        # Pre-create the cached effect structure
+        cached_effect = sdl_haptic.SDL_HapticEffect()
+        cached_effect.type = sdl_haptic.SDL_HAPTIC_CONSTANT
+        cached_effect.constant.direction.type = sdl_haptic.SDL_HAPTIC_CARTESIAN
+        cached_effect.constant.direction.dir[0] = 1
+        cached_effect.constant.direction.dir[1] = 0
+        cached_effect.constant.direction.dir[2] = 0
+        cached_effect.constant.length = 60000
+        self._cached_effect = cached_effect  # Store for stop function
+        
+        two_pi = 2 * math.pi
+        
+        while not self._stop_oscillator_event.is_set():
+            # Check if we should be actively running
+            if not self._oscillator_active:
+                time.sleep(0.1)
+                last_time = time.time()
+                continue
+            
+            current_time = time.time()
+            dt = current_time - last_time
+            last_time = current_time
+            
+            params = self._osc_params
+            if not params:
+                time.sleep(0.001)
+                continue
+            
+            freq = params.get("freq", 10.0)
+            mag = params.get("mag", 10000)
+            phase_offset_rad = math.radians(params.get("phase", 0) / 100.0)
+            
+            # Accumulate phase
+            accumulated_phase += two_pi * freq * dt
+            if accumulated_phase > 6283.185:
+                accumulated_phase %= 6283.185
+            
+            # Calculate sine and level
+            current_level = int(math.sin(accumulated_phase + phase_offset_rad) * mag)
+            
+            # Update Effect - no debug logging in hot loop for max speed
+            if self.haptic and self.effect_id != -1:
+                cached_effect.constant.level = current_level
+                sdl_haptic.SDL_UpdateHapticEffect(self.haptic, self.effect_id, ctypes.byref(cached_effect))
     # -----------------------
 
 # Global Instance

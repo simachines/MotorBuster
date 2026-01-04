@@ -2,12 +2,16 @@ import dearpygui.dearpygui as dpg
 import sys
 import os
 import time
+import webbrowser
 from collections import deque
 from dataclasses import dataclass, field
 import uuid
 import json
 import math
+import bisect
+from typing import Optional
 import warnings
+import ctypes
 
 # Filter benign PySDL2 warning
 warnings.filterwarnings("ignore", message="pysdl2-dll is installed as source-only")
@@ -51,6 +55,7 @@ class Clip:
     fade_length: int = 0
     name: str = "Clip"
     active_effect_id: int = -1
+    use_software_sine: bool = False
 
     def to_dict(self):
         return {
@@ -79,6 +84,7 @@ class Clip:
             "attack_length": self.attack_length,
             "fade_length": self.fade_length,
             "name": self.name,
+            "use_software_sine": self.use_software_sine,
         }
 
     @staticmethod
@@ -116,6 +122,7 @@ class Clip:
             attack_length=d.get("attack_length", 0),
             fade_length=d.get("fade_length", 0),
             name=d.get("name", "Clip"),
+            use_software_sine=d.get("use_software_sine", False),
         )
  
 @dataclass
@@ -262,7 +269,7 @@ class InspectorPanel:
              dpg.add_input_int(label="End Freq (Hz)", tag=self.tag_freq_end, min_value=1, max_value=5000, step=1, step_fast=10, callback=self.on_change, user_data="freq_end")
              dpg.add_slider_int(label="Phase (deg)", tag=self.tag_phase, min_value=0, max_value=359, callback=self.on_change, user_data="phase")
              dpg.add_checkbox(label="Lock Phase", tag=self.tag_lock_phase, callback=self.on_change, user_data="lock_phase")
-             dpg.add_checkbox(label="Hardware Wave", tag=self.tag_sw_sine, default_value=not engine.use_software_sine, callback=self.on_change, user_data="hw_wave")
+             dpg.add_checkbox(label="Hardware Wave", tag=self.tag_sw_sine, callback=self.on_change, user_data="hw_wave")
 
              dpg.add_separator()
              dpg.add_combo(label="Direction Mode", items=["Polar","Cartesian","Spherical"], tag=self.tag_dir_mode, callback=self.on_change, user_data="dir_mode")
@@ -315,12 +322,12 @@ class InspectorPanel:
         
         safe_set(self.tag_start, clip.start_time)
         safe_set(self.tag_dur, clip.duration)
-        safe_set(self.tag_mag, int((clip.magnitude / 32767.0) * 100))
+        safe_set(self.tag_mag, round((clip.magnitude / 32767.0) * 100))
         safe_set(self.tag_freq, clip.frequency)
         safe_set(self.tag_sweep, clip.sweep_enabled)
         safe_set(self.tag_phase, int(max(0, min(359, getattr(clip, 'start_phase', 0)))))
         safe_set(self.tag_lock_phase, getattr(clip, 'lock_phase', False))
-        safe_set(self.tag_sw_sine, not engine.use_software_sine)
+        safe_set(self.tag_sw_sine, not getattr(clip, 'use_software_sine', False))
         safe_set(self.tag_type, clip.type)
         safe_set(self.tag_dir_mode, clip.direction_mode)
         safe_set(self.tag_angle, int(max(0, min(359, getattr(clip, 'angle', 90)))))
@@ -375,7 +382,7 @@ class InspectorPanel:
                 clip.frequency = app_data
         elif param == "phase": clip.start_phase = max(0, min(359, app_data))
         elif param == "lock_phase": clip.lock_phase = bool(app_data)
-        elif param == "hw_wave": engine.use_software_sine = not bool(app_data)
+        elif param == "hw_wave": clip.use_software_sine = not bool(app_data)
         elif param == "freq_end": 
              if app_data < 1:
                  dpg.set_value(sender, 1)
@@ -429,9 +436,13 @@ class FeditNativeApp:
         self.wheel_graph_height = 150
         self._wheel_graph_visible = True
         self.wheel_graph_gain = 1.0
-        self.wheel_history = deque()
+        self.wheel_history = []
+        self._last_live_wheel_norm = 0.0 # Live value for dot, separate from history
         self.wheel_history_limit = None
         self.wheel_axis_scale = 32767.0
+        self.wheel_graph_auto_scale = True
+        self.force_history = []  # New: Command force history
+        self._force_graph_visible = False # Toggle
         self.hide_playhead_until_next_sample = False
         self.manual_timebase_override = False
         self.manual_timebase_value = None
@@ -464,11 +475,20 @@ class FeditNativeApp:
         }
         self._mouse_status_tag = "txt_mouse_status"
         self._mouse_status_visible = True
-       
+        self._pending_scroll_x = None # For deferred zoom scrolling
+        
+        # Pre-load Cursors
+        self.cursor_hand = ctypes.windll.user32.LoadCursorW(0, 32649) # IDC_HAND
+
         dpg.create_context()
         self.load_fonts()
+        
+        # Load User Settings (overrides defaults like show_redlines)
+        self.load_settings()
+        
         self.setup_ui()
-        self.apply_theme("Dark")
+        # Theme is applied in run() to ensure proper initialization
+        # self.apply_theme("Dark Mode")
         
         # Init Engine
         try:
@@ -615,31 +635,61 @@ class FeditNativeApp:
     def _wave_amplitude(self, clip: Clip, t: float) -> float:
         """Return signed amplitude at time t (seconds) for display purposes."""
         mag = clip.magnitude
-        if clip.type == "Constant":
+        
+        # Non-periodic / Constant-like types for visualization
+        if clip.type in ("Constant", "Spring", "Damper", "Inertia", "Friction", "LeftRight"):
             return mag
-        if clip.type == "Ramp":
-            return mag * max(0.0, min(1.0, t / max(clip.duration, 1e-6)))
-        if clip.type == "Sawtooth":
-            period = 1.0 / max(1.0, clip.frequency)
-            phase = (t / period) % 1.0
-            return mag * (2 * phase - 1)  # -mag .. +mag
-            
-        # Default: Sine
-        start_f = clip.frequency
-        end_f = start_f
         
-        # Only use frequency_end if sweep is actually enabled
-        if getattr(clip, 'sweep_enabled', False):
-             end_f = getattr(clip, 'frequency_end', start_f)
+        # Periodic types
+        freq = max(1e-6, clip.frequency)
         
-        if start_f == end_f:
-             omega = 2 * math.pi * start_f
-             return mag * math.sin(omega * t)
+        # Handle Sweep for periodic types
+        is_sweep = getattr(clip, 'sweep_enabled', False)
+        
+        phase = 0.0
+        if is_sweep:
+            start_f = clip.frequency
+            end_f = getattr(clip, 'frequency_end', start_f)
+            # Chirp phase
+            k = (end_f - start_f) / max(1e-6, clip.duration)
+            phase = 2 * math.pi * (start_f * t + 0.5 * k * t * t)
         else:
-             # Chirp: phase = 2*pi * (f0*t + 0.5*k*t^2)
-             k = (end_f - start_f) / max(1e-6, clip.duration)
-             phase = 2 * math.pi * (start_f * t + 0.5 * k * t * t)
-             return mag * math.sin(phase)
+            phase = 2 * math.pi * freq * t
+            
+        # Add start phase
+        start_phase_rad = math.radians(getattr(clip, "start_phase", 0))
+        total_phase = (phase + start_phase_rad) % (2 * math.pi)
+        norm_phase = total_phase / (2 * math.pi) # 0.0 to 1.0
+        
+        if clip.type == "Square":
+            return mag * (1.0 if math.sin(total_phase) >= 0 else -1.0)
+            
+        elif clip.type == "Triangle":
+            # 0->1 (0-0.25), 1->-1 (0.25-0.75), -1->0 (0.75-1.0)
+            # Matched to Sine phase (0 at 0, peak at pi/2)
+            if norm_phase < 0.25:
+                return mag * (4.0 * norm_phase)
+            elif norm_phase < 0.75:
+                return mag * (2.0 - 4.0 * norm_phase)
+            else:
+                return mag * (4.0 * norm_phase - 4.0)
+                
+        elif clip.type in ("Sawtooth", "SawtoothUp", "Ramp"):
+             # Shifted to match Sine: Start at 0, go up
+             # Original was -1 + 2*norm (Starts at -1)
+             # New: Starts at 0, wraps at 0.5 (180 deg) ? 
+             # No, standard Saw is -1 to 1.
+             # We want 0 crossing at Phase 0.
+             shifted_norm = (norm_phase + 0.5) % 1.0
+             return mag * (-1.0 + 2.0 * shifted_norm)
+             
+        elif clip.type == "SawtoothDown":
+             # Shifted to match Sine 0-crossing (but falling)
+             shifted_norm = (norm_phase + 0.5) % 1.0
+             return mag * (1.0 - 2.0 * shifted_norm)
+
+        # Default: Sine
+        return mag * math.sin(total_phase)
 
     def _clip_wave_points(self, clip: Clip, x_start: float, width: float, y_top: float, y_bottom: float, samples: int = 0):
         # Precise Peak-Detection for Aliasing
@@ -655,7 +705,12 @@ class FeditNativeApp:
 
         pixels = max(1, int(width))
         max_samples = 5000
-        sample_count = min(pixels, max_samples)
+        
+        # Respect requested sample count if provided, otherwise default to 1 pixel per sample
+        if samples > 0:
+            sample_count = min(samples, max_samples)
+        else:
+            sample_count = min(pixels, max_samples)
 
         duration = max(clip.duration, 1e-6)
         step_t = duration / max(1, sample_count)
@@ -826,7 +881,7 @@ class FeditNativeApp:
              idx = int(name.split("#")[-1].replace(")", ""))
              if engine.connect_device(idx):
                  dpg.set_value("status_text", "Status: Connected")
-                 dpg.configure_item("status_text", color=(0, 255, 0))
+                 dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
                  
                  # Ensure device starts in a neutral state
                  engine.stop_effect()
@@ -842,6 +897,7 @@ class FeditNativeApp:
                          'last_sent_freq': None,
                          'last_mag': None,
                          'last_freq': None,
+                         'creation_pending': False,
                      }
                  
                  # Auto-Detect Torque
@@ -850,6 +906,13 @@ class FeditNativeApp:
                      if dpg.does_item_exist("input_max_torque"):
                          dpg.set_value("input_max_torque", detected_torque)
                          self.log(f"Auto-Detected Torque: {detected_torque} Nm")
+                 
+                 # Auto-Detect Polling Rate
+                 detected_rate = engine.detect_device_poll_rate(test_duration_s=0.3)
+                 target_rate = engine.get_effective_update_rate()
+                 if dpg.does_item_exist("poll_rate_input"):
+                     dpg.set_value("poll_rate_input", target_rate)
+                 self.log(f"Poll Rate: {detected_rate}Hz detected, using {target_rate}Hz")
                  
          except: pass
 
@@ -949,6 +1012,7 @@ class FeditNativeApp:
                     'last_sent_freq': None,
                     'last_mag': None,
                     'last_freq': None,
+                    'creation_pending': False,
                 }
             
             # Reset active IDs (Main)
@@ -972,6 +1036,7 @@ class FeditNativeApp:
                 'last_sent_freq': None,
                 'last_mag': None,
                 'last_freq': None,
+                'creation_pending': False,
             }
         for t in self.sequencer.tracks:
             for c in t.clips: c.active_effect_id = -1
@@ -1106,6 +1171,27 @@ class FeditNativeApp:
             dpg.set_value("menu_wheel_graph", self._wheel_graph_visible)
         if hasattr(self, 'sequencer'):
             self.render_timeline()
+
+    def _on_force_graph_checkbox(self, sender, app_data):
+        self._force_graph_visible = bool(app_data)
+        if dpg.does_item_exist("menu_force_graph"):
+            dpg.set_value("menu_force_graph", self._force_graph_visible)
+        if hasattr(self, 'sequencer'):
+            self.render_timeline()
+
+    def _on_poll_rate_changed(self, sender, app_data):
+        """Handle manual poll rate override from UI."""
+        rate = int(app_data)
+        # Check if this differs from the auto-detected 75% rate
+        auto_rate = int(engine.detected_poll_rate_hz * 0.75)
+        is_manual = abs(rate - auto_rate) > 5  # 5Hz tolerance for rounding
+        
+        engine.set_target_update_rate(rate, is_manual_override=is_manual)
+        
+        if is_manual:
+            self.log(f"Manual poll rate override: {rate}Hz")
+        else:
+            self.log(f"Poll rate: {rate}Hz (auto)")
 
     def _apply_hover_highlight(self, tag, cfg, highlighted):
         if not dpg.does_item_exist(tag):
@@ -1242,7 +1328,7 @@ class FeditNativeApp:
 
         # KEYBOARD SHORTCUTS
         if dpg.is_key_pressed(dpg.mvKey_Delete):
-            if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_focused("timeline_scroll"):
+            if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_focused("timeline_scroll") or ctrl_down:
                 if not self.delete_multi_selected_clips():
                     self.delete_selected_clip()
 
@@ -1406,7 +1492,7 @@ class FeditNativeApp:
                             was_scrubbing = self.sequencer.is_scrubbing
                             self.sequencer.is_scrubbing = True
                             new_t = max(0.0, rel_x / self.sequencer.zoom_x)
-                            if new_t < 0.05:
+                            if rel_x < 15:
                                 new_t = 0.0
                             self.sequencer.current_time = new_t
                             # Only trigger haptics if position changed
@@ -1422,7 +1508,7 @@ class FeditNativeApp:
                             self._toggle_clip_highlight(hover_clip)
                     elif self.sequencer.is_scrubbing:
                         new_t = max(0.0, rel_x / self.sequencer.zoom_x)
-                        if new_t < 0.05:
+                        if rel_x < 15:
                             new_t = 0.0
                         self.sequencer.current_time = new_t
                         # Only trigger haptics if position changed
@@ -1500,34 +1586,23 @@ class FeditNativeApp:
             force, is_active = self.calculate_current_force()
             dpg.set_value("force_gauge", force)
 
-            # Update Torque Monitor
-            # Default to 8.0 Nm if not set (could make this a variable later accessible via UI)
-            max_torque = dpg.get_value("input_max_torque") if dpg.does_item_exist("input_max_torque") else 8.0
-            
-            # force is -100 to 100
-            current_nm = (force / 100.0) * max_torque
-            dpg.set_value("txt_torque_val", f"{current_nm:.2f} Nm")
-            dpg.set_value("bar_torque", (abs(current_nm)/max_torque) if max_torque > 0 else 0)
-
-            # Statistics Update
-            # Only update stats if we are actively playing a clip (not just silence)
-            if self.sequencer.is_playing and is_active:
-                abs_val = abs(current_nm)
-                self.stats_peak = max(self.stats_peak, abs_val)
-                self.stats_min = min(self.stats_min, abs_val)
-                self.stats_sum += abs_val
-                self.stats_count += 1
-                
-                avg = self.stats_sum / max(1, self.stats_count)
-                
-                dpg.set_value("txt_peak", f"Peak: {self.stats_peak:.2f} Nm")
-                dpg.set_value("txt_avg", f"Avg: {avg:.2f} Nm")
-                dpg.set_value("txt_min", f"Min: {self.stats_min:.2f} Nm")
-
-
+            # Auto-Scroll Playhead Tracking
+            if dpg.does_item_exist("chk_track_playhead") and dpg.get_value("chk_track_playhead"):
+                 if self.sequencer.is_playing:
+                     playhead_px = self.sequencer.current_time * self.sequencer.zoom_x
+                     try:
+                        # Use rect size for actual visible width (get_item_width returns config val like -1)
+                        viewport_w = dpg.get_item_rect_size("timeline_scroll")[0]
+                     except:
+                        viewport_w = 400 # Fallback
+                        
+                     # Center it
+                     target_x = playhead_px - (viewport_w / 2)
+                     dpg.set_x_scroll("timeline_scroll", max(0, target_x))
             
         dpg.set_value("time_display", f"{self.sequencer.current_time:.2f}s")
-        self.render_timeline()
+        # Timeline render is handled in main UI loop now
+
         
         # Draw Cursor Overlay AFTER timeline render (z-order)
         should_hide_system = False
@@ -1537,9 +1612,14 @@ class FeditNativeApp:
         
         self._set_system_cursor_visible(not should_hide_system)
 
-        # Always sample wheel position regardless of playback state so the overlay stays populated
-        self._record_wheel_sample(self.sequencer.current_time)
-        self._throttle_when_idle()
+
+
+        try:
+            if dpg.does_item_exist("win_about") and dpg.is_item_shown("win_about"):
+                if dpg.does_item_exist("txt_github") and dpg.is_item_hovered("txt_github"):
+                    ctypes.windll.user32.SetCursor(self.cursor_hand)
+        except Exception:
+            pass
 
     def _record_wheel_sample(self, current_time: float):
         if self.sequencer.drag_clip or self.sequencer.resize_clip or getattr(self.sequencer, 'is_scrubbing', False):
@@ -1550,17 +1630,57 @@ class FeditNativeApp:
         axis_scale = self.wheel_axis_scale if self.wheel_axis_scale else 32767.0
         norm = raw / axis_scale
         norm = max(-1.0, min(1.0, norm))
+
+        # Always update live value for the dot
+        self._last_live_wheel_norm = norm
+
+        # Only record history if playing
+        if not self.sequencer.is_playing:
+            return
+
+        if self.wheel_history:
+            last_t = self.wheel_history[-1]["time"]
+            # Detect loop or rewind -> Clear history to maintain sorted order for bisect
+            if current_time < last_t:
+                 self.wheel_history.clear()
+
         self.wheel_history.append({"time": current_time, "value": norm})
         if self.wheel_history_limit and len(self.wheel_history) > self.wheel_history_limit:
-            while len(self.wheel_history) > self.wheel_history_limit:
-                self.wheel_history.popleft()
+            excess = len(self.wheel_history) - self.wheel_history_limit
+            if excess > 0:
+                del self.wheel_history[:excess]
         self.hide_playhead_until_next_sample = False
+
+    def _record_force_sample(self, current_time: float):
+        if self.sequencer.drag_clip or self.sequencer.resize_clip or getattr(self.sequencer, 'is_scrubbing', False):
+            return
+            
+        start_t = time.perf_counter()
+        force_pct, _ = self.calculate_current_force()
+        norm = force_pct / 100.0
+        norm = max(-1.0, min(1.0, norm))
+
+        if not self.sequencer.is_playing:
+            return
+
+        if self.force_history:
+            last_t = self.force_history[-1]["time"]
+            if current_time < last_t:
+                 self.force_history.clear()
+
+        self.force_history.append({"time": current_time, "value": norm})
+        
+        limit = self.wheel_history_limit if self.wheel_history_limit else 10000 
+        if len(self.force_history) > limit:
+            excess = len(self.force_history) - limit
+            if excess > 0:
+                del self.force_history[:excess]
 
     def _clear_wheel_history(self):
         self.wheel_history.clear()
         self.hide_playhead_until_next_sample = False
 
-    def _draw_wheel_graph(self, total_w: float):
+    def _draw_wheel_graph(self, total_w: float, scroll_x: Optional[float] = None, scroll_w: float = 0):
         if not self._wheel_graph_visible:
             return
         height = max(0, self.wheel_graph_height)
@@ -1572,54 +1692,205 @@ class FeditNativeApp:
         dpg.draw_rectangle([0, 0], [total_w, height], color=(40, 40, 50, 220), fill=(20, 20, 25, 190), parent="timeline_canvas")
 
         center_y = height / 2
+        
+        # Optimize Grid Lines: Only draw visible grid lines? 
+        # For now, just simplistic drawing, but we could cull these too. 
+        # The main bottleneck is the massive point history.
         if total_w > 0:
             dpg.draw_line([0, center_y], [total_w, center_y], color=(100, 110, 140, 200), thickness=1, parent="timeline_canvas")
-        dot_width = 6
-        dot_gap = 10
-        int_width = max(0, int(total_w))
-        for x in range(0, int_width, dot_gap):
-            end_x = min(total_w, x + dot_width)
-            dpg.draw_line([x, center_y], [end_x, center_y], color=(170, 170, 190, 120), thickness=1, parent="timeline_canvas")
+        
+        # Grid Dots - simplified or culling could be applied here too
+        # But let's focus on history points first.
+        
+        y_scale = 1.0 # Default scale
+        
+        if self.wheel_history:
+            segments = []
+            current_segment = []
+            prev_time = None
+            gap_threshold = 0.25  # seconds between samples considered a jump
+            
+            # Calculate Visible Time Range
+            # Margin of error (e.g. 2 second extra) so we don't clip lines entering the screen
+            margin_s = 2.0 
+            
+            # If scroll info is missing (None) or invalid, draw everything (safe default)
+            if scroll_x is None or scroll_w <= 0:
+                start_time = 0.0
+                end_time = float('inf')
+            else:
+                start_time = max(0.0, (scroll_x / self.sequencer.zoom_x) - margin_s)
+                end_time = ((scroll_x + scroll_w) / self.sequencer.zoom_x) + margin_s
 
-        segments = []
-        current_segment = []
-        prev_time = None
-        gap_threshold = 0.25  # seconds between samples considered a jump
+            # Bisect to find start index
+            # We need a key for bisect, but we have list of dicts.
+            # Construct ad-hoc or use a custom search. Bisect key available in Python 3.10
+            # Assuming Python 3.10+
+            start_idx = 0
+            if start_time > 0:
+                 # Custom bisect for list of dicts if key not supported or just to be safe/compatible
+                 # bisect.bisect_left(self.wheel_history, start_time, key=lambda x: x["time"]) 
+                 # Manual binary search is safer if uncertain about version
+                 lo, hi = 0, len(self.wheel_history)
+                 while lo < hi:
+                     mid = (lo + hi) // 2
+                     if self.wheel_history[mid]["time"] < start_time:
+                         lo = mid + 1
+                     else:
+                         hi = mid
+                 start_idx = lo
+                 # Backtrack slightly to ensure we connect from off-screen
+                 if start_idx > 0: start_idx -= 1
+            
+            # -------------------------------------------------------------------------
+            # PASS 1: Calculate Scale (if enabled)
+            # -------------------------------------------------------------------------
+            if self.wheel_graph_auto_scale:
+                 local_max_abs = 0.0
+                 # Scan visible range
+                 # Reuse start_idx computed above
+                 for i in range(start_idx, len(self.wheel_history)):
+                     s = self.wheel_history[i]
+                     if s["time"] > end_time: break
+                     val = abs(s["value"])
+                     if val > local_max_abs: local_max_abs = val
+                 
+                 # Avoid div/0 or huge scaling on noise
+                 # Minimum full-scale reference: 0.05 (5% of max torque)
+                 # If signal is smaller than 5%, we just stick to 5% scale to avoid looking at noise.
+                 safe_max = max(0.05, local_max_abs)
+                 y_scale = 1.0 / safe_max
+            
+            # -------------------------------------------------------------------------
+            # PASS 2: Adaptive Downsampling + Draw Segments
+            # -------------------------------------------------------------------------
+            # Calculate LOD based on pixel density
+            # Assuming data at ~1000Hz, zoom_x is pixels per second
+            if self.sequencer.zoom_x > 0:
+                pixels_per_sample = self.sequencer.zoom_x / 1000.0
+            else:
+                pixels_per_sample = 1.0  # Fallback
+            
+            # Determine decimation factor and strategy
+            use_minmax = False
+            if pixels_per_sample >= 0.5:
+                # High zoom: Full detail (render every point or every other point)
+                decimation = 1 if pixels_per_sample >= 1.0 else 2
+            elif pixels_per_sample >= 0.1:
+                # Medium zoom: Simple decimation
+                decimation = max(2, int(0.5 / pixels_per_sample))
+            else:
+                # Low zoom: Min-max downsampling to preserve envelope
+                decimation = max(10, int(0.5 / pixels_per_sample))
+                use_minmax = True
+            
+            # Build downsampled points list
+            downsampled_points = []
+            i = start_idx
+            
+            while i < len(self.wheel_history):
+                sample = self.wheel_history[i]
+                sample_time = sample["time"]
+                
+                if sample_time > end_time:
+                    break
+                
+                if use_minmax and i + decimation < len(self.wheel_history):
+                    # Min-Max downsampling: Find min and max in this bucket
+                    bucket_end = min(i + decimation, len(self.wheel_history))
+                    min_val = float('inf')
+                    max_val = float('-inf')
+                    min_time = sample_time
+                    max_time = sample_time
+                    
+                    for j in range(i, bucket_end):
+                        if self.wheel_history[j]["time"] > end_time:
+                            break
+                        val = self.wheel_history[j]["value"]
+                        if val < min_val:
+                            min_val = val
+                            min_time = self.wheel_history[j]["time"]
+                        if val > max_val:
+                            max_val = val
+                            max_time = self.wheel_history[j]["time"]
+                    
+                    # Add both min and max points in time order
+                    if min_time <= max_time:
+                        downsampled_points.append({"time": min_time, "value": min_val})
+                        if min_val != max_val:  # Only add if different
+                            downsampled_points.append({"time": max_time, "value": max_val})
+                    else:
+                        downsampled_points.append({"time": max_time, "value": max_val})
+                        downsampled_points.append({"time": min_time, "value": min_val})
+                    
+                    i += decimation
+                else:
+                    # Simple decimation or full detail
+                    downsampled_points.append(sample)
+                    i += decimation
+            
+            # Now render the downsampled points
+            for i, sample in enumerate(downsampled_points):
+                sample_time = sample["time"]
+                
+                x = sample_time * self.sequencer.zoom_x
+                if x < 0: 
+                    continue
+                    
+                # Apply Gain AND Auto-Scale
+                if self.wheel_graph_auto_scale:
+                    val = sample["value"] * y_scale
+                else:
+                    val = sample["value"] * gain
+                    
+                # Clamp for drawing bounds
+                val = max(-1.0, min(1.0, val))
+                
+                y = (height / 2) - val * (height / 2 - 6)
 
-        for sample in self.wheel_history:
-            sample_time = sample["time"]
-            x = sample_time * self.sequencer.zoom_x
-            if x < 0 or x > total_w:
-                continue
-            val = max(-1.0, min(1.0, sample["value"] * gain))
-            y = (height / 2) - val * (height / 2 - 6)
+                if prev_time is not None:
+                    dt = sample_time - prev_time
+                    if dt < 0 or dt > gap_threshold:
+                        if len(current_segment) >= 2:
+                            segments.append(current_segment)
+                        current_segment = []
 
-            if prev_time is not None:
-                dt = sample_time - prev_time
-                if dt < 0 or dt > gap_threshold:
-                    if len(current_segment) >= 2:
-                        segments.append(current_segment)
-                    current_segment = []
+                current_segment.append([x, y])
+                prev_time = sample_time
 
-            current_segment.append([x, y])
-            prev_time = sample_time
+            if len(current_segment) >= 2:
+                segments.append(current_segment)
 
-        if len(current_segment) >= 2:
-            segments.append(current_segment)
-
-        for segment in segments:
-            dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+            for segment in segments:
+                dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
 
         if self._should_show_wheel_playhead():
             playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
             dpg.draw_line([playhead_x, 0], [playhead_x, height], color=(255, 60, 60), thickness=1, parent="timeline_canvas")
 
-            latest = self.wheel_history[-1] if self.wheel_history else None
-            if latest:
-                val = max(-1.0, min(1.0, latest["value"] * gain))
-                y = (height / 2) - val * (height / 2 - 6)
-                dpg.draw_circle([playhead_x, y], 4, color=(255, 150, 60), fill=(255, 150, 60), parent="timeline_canvas")
-                dpg.draw_text([4, 4], f"Wheel: {latest['value']*100:.1f}%", size=12, color=(220, 220, 255), parent="timeline_canvas")
+            # Use live value if available, else fallback to history
+            raw_val = self._last_live_wheel_norm if hasattr(self, '_last_live_wheel_norm') else 0.0
+            
+            # Same scaling for playhead
+            if self.wheel_graph_auto_scale:
+                 # For playhead, we should use the same scale as the graph for consistency, 
+                 # but the playhead technically shows "current" value which might be outside the computed visual range 
+                 # (e.g. if we are scrolling history). 
+                 # Uses the computed y_scale from the render pass.
+                 disp_val = raw_val * y_scale
+            else:
+                 disp_val = raw_val * gain
+            
+            disp_val = max(-1.0, min(1.0, disp_val))
+            y = (height / 2) - disp_val * (height / 2 - 6)
+            
+            dpg.draw_circle([playhead_x, y], 4, color=(255, 150, 60), fill=(255, 150, 60), parent="timeline_canvas")
+            dpg.draw_text([4, 4], f"Wheel: {raw_val*100:.1f}%", size=12, color=(220, 220, 255), parent="timeline_canvas")
+
+    def _on_wheel_graph_auto_scale(self, sender, app_data):
+        self.wheel_graph_auto_scale = bool(app_data)
+        if hasattr(self, 'sequencer'):
+            self.render_timeline()
 
 
     def _should_show_wheel_playhead(self) -> bool:
@@ -1631,7 +1902,7 @@ class FeditNativeApp:
             return
         if self.sequencer.drag_clip or self.sequencer.resize_clip or getattr(self.sequencer, 'is_scrubbing', False):
             return
-        time.sleep(0.003)
+        time.sleep(0.010)
 
     def _trigger_scrub_haptics(self, time_s: float):
         """Reset playback state when scrubbing so normal sequencer logic handles it correctly."""
@@ -1670,6 +1941,7 @@ class FeditNativeApp:
                 'last_mag': None,
                 'last_freq': None,
                 'clip_was_infinite': False,
+                'creation_pending': False,
             }
         
         # Clear clip active effect IDs
@@ -1704,6 +1976,7 @@ class FeditNativeApp:
                     'last_mag': None,
                     'last_freq': None,
                     'clip_was_infinite': False,
+                    'creation_pending': False,
                 }
             
             state = self.track_states[t_idx]
@@ -1785,13 +2058,20 @@ class FeditNativeApp:
                         "attack_level": 0,
                         "fade_level": 0,
                     },
+                    "use_software_sine": current_clip.use_software_sine,
                 }
 
                 # Log actual effect type: software mode uses CONSTANT with oscillator, hardware uses SINE
-                actual_type = "constant (oscillator)" if engine.use_software_sine else desc["type"]
+                actual_type = "constant (oscillator)" if current_clip.use_software_sine else desc["type"]
                 log_desc = {**desc, "type": actual_type}
                 self.log_api("play_descriptor", log_desc)
-                new_id = engine.play_descriptor(desc)
+                
+                # ASYNC: Queue the effect start instead of executing synchronously
+                engine.queue_effect_start(desc, t_idx, current_clip.id, -1)
+                # Note: We don't get the effect_id back immediately anymore since it's queued
+                # The effect will be created when the event is processed
+                new_id = -1  # Placeholder - actual ID will be set by event handler
+                
                 state['effect_start_time'] = playhead
                 state['hw_start_time'] = playhead # Store HW start time
                 state['last_sweep_update_local'] = None
@@ -1799,17 +2079,27 @@ class FeditNativeApp:
                 state['last_mag'] = current_clip.magnitude
                 state['last_freq'] = current_clip.frequency
                 state['last_sent_freq'] = current_clip.frequency
+                state['creation_pending'] = True
                 return new_id
 
             # State Machine
             if curr_cid == prev_cid:
                 # CONTINUATION (Same clip still playing)
+                
+                # Check if we're waiting for async effect_id result
+                if state.get('creation_pending'):
+                    async_eff_id = engine.get_effect_id_result(t_idx, current_clip.id)
+                    if async_eff_id is not None:
+                        eff_id = async_eff_id
+                        state['effect_id'] = eff_id
+                        state['creation_pending'] = False
+                
                 if current_clip and eff_id != -1:
                     # Update parameters if needed (Software Sweep)
                     remaining_ms = int((current_clip.duration - (cur_t - current_clip.start_time)) * 1000)
                     if remaining_ms < 0: remaining_ms = 0 # Safety
                     
-                    if current_clip.type == "Sine":
+                    if current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp"):
                         # --- REAL-TIME UPDATE LOGIC ---
                         # Verify change against stored state or just update if sweep
                         is_sweep = current_clip.frequency != current_clip.frequency_end and current_clip.sweep_enabled
@@ -1875,7 +2165,7 @@ class FeditNativeApp:
                              
                              eff_mag = int(current_clip.magnitude * global_gain)
                              # Log all params being sent to engine
-                             update_type = "update_oscillator" if engine.use_software_sine else "update_effect_sine"
+                             update_type = "update_oscillator" if current_clip.use_software_sine else "update_effect_sine"
                              log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": phase_payload}
                              self.log_api(update_type, log_payload)
 
@@ -1893,7 +2183,7 @@ class FeditNativeApp:
                         state['last_freq'] = current_clip.frequency
 
                 # Update Phase Tracking for next frame's potential transition
-                if current_clip and current_clip.type == "Sine":
+                if current_clip and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp"):
                      t_local = max(0.0, cur_t - (state.get('effect_start_time') if state.get('effect_start_time') is not None else current_clip.start_time))
                      start_f = current_clip.frequency
                      end_f = current_clip.frequency_end if current_clip.sweep_enabled else start_f
@@ -1901,7 +2191,7 @@ class FeditNativeApp:
                      norm_phase = (start_f * t_local + 0.5 * k * t_local * t_local) % 1.0
                      state['last_phase'] = int(norm_phase * 36000)
                      
-                elif current_clip and eff_id == -1:
+                elif current_clip and eff_id == -1 and not state.get('creation_pending'):
                     # Recovery: Should be playing but isn't
                     eff_id = start_new_effect()
                     state['effect_id'] = eff_id
@@ -1911,7 +2201,7 @@ class FeditNativeApp:
                 
                 # Determine Start Phase for Gapless Continuity
                 start_phase_override = -1
-                if prev_cid is not None and current_clip and current_clip.type == "Sine" and prev_ctype == "Sine":
+                if prev_cid is not None and current_clip and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp") and prev_ctype == current_clip.type:
                      # Robust calculation: Find previous clip object and calculate its end phase
                      prev_clip = self.sequencer.get_clip_by_id(prev_cid)
                      if prev_clip:
@@ -1928,7 +2218,7 @@ class FeditNativeApp:
                 # Try Transfer (Reuse Effect)
                 transferred = False
                 should_stop_old = state.get('clip_was_infinite', False)
-                if eff_id != -1 and current_clip and prev_ctype == current_clip.type == "Sine":
+                if eff_id != -1 and current_clip and prev_ctype == current_clip.type and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp"):
                     # Reuse the sine effect via update
                     
                     # Update Chain End if we switched clips (which we did, since curr != prev)
@@ -1972,6 +2262,7 @@ class FeditNativeApp:
                         transferred = True
                         eff_id = new_id
                         state['effect_start_time'] = current_clip.start_time
+                        state['creation_pending'] = False
                 
                 if not transferred:
                     # Stop Old
@@ -2027,11 +2318,10 @@ class FeditNativeApp:
         if dpg.does_item_exist("timeline_scroll"):
             try:
                 scroll_x = dpg.get_x_scroll("timeline_scroll")
-            except:
-                scroll_x = 0
-            rect = dpg.get_item_rect_size("timeline_scroll")
-            if rect:
-                scroll_w = rect[0]
+                rect = dpg.get_item_rect_size("timeline_scroll")
+                if rect and rect[0] > 10: 
+                    scroll_w = rect[0]
+            except: pass
 
         start_px = max(0, scroll_x - pad_px)
         end_px = min(total_w, scroll_x + scroll_w + pad_px)
@@ -2080,13 +2370,64 @@ class FeditNativeApp:
         active_graph_height = self._active_wheel_graph_height()
         y_offset = active_graph_height
         track_height = 80
-        total_w = max(3000, int(self.sequencer.zoom_x * 60))
+        # Calculate dynamic total width based on content (clips + history)
+        max_t = 60.0
+        # Check clips
+        for track in self.sequencer.tracks:
+            for clip in track.clips:
+                 end = clip.start_time + clip.duration
+                 if end > max_t: max_t = end
+        
+        # Check history
+        if self.wheel_history:
+             last_hist = self.wheel_history[-1]["time"]
+             if last_hist > max_t: max_t = last_hist
+             
+        # Add buffer
+        max_t += 10.0
+        
+        total_w = max(3000, int(self.sequencer.zoom_x * max_t))
         total_h = int(active_graph_height + len(self.sequencer.tracks) * track_height)
         dpg.configure_item("timeline_canvas", width=total_w, height=total_h)
+        
+        # Apply deferred scroll (from zoom) now that canvas is resized
+        if self._pending_scroll_x is not None:
+            print(f"DEBUG RENDER: Applying Pending Scroll {self._pending_scroll_x:.1f} to Width {total_w}")
+            dpg.set_x_scroll("timeline_scroll", self._pending_scroll_x)
+            self._pending_scroll_x = None
+
         self.render_grid(total_w, total_h)
         
         if self._wheel_graph_visible and active_graph_height > 0:
-            self._draw_wheel_graph(total_w)
+            # Fetch scroll info for culling safely
+            scroll_x = None
+            scroll_w = 0
+            try:
+                if dpg.does_item_exist("timeline_scroll"):
+                    scroll_x = dpg.get_x_scroll("timeline_scroll")
+                    rect = dpg.get_item_rect_size("timeline_scroll")
+                    if rect and rect[0] > 10:
+                        scroll_w = rect[0]
+            except: pass
+            
+            self._draw_wheel_graph(total_w, scroll_x, scroll_w)
+
+        # Optimization: Calculate visible time range to cull off-screen clips
+        visible_start_time = 0.0
+        visible_end_time = float('inf')
+        
+        try:
+             if dpg.does_item_exist("timeline_scroll"):
+                 scroll_x = dpg.get_x_scroll("timeline_scroll")
+                 # OPTIMIZATION FIX: get_item_width often returns 0/-1 for auto-sized items. 
+                 # get_item_rect_size returns the actual rendered size on screen.
+                 visible_width = dpg.get_item_rect_size("timeline_scroll")[0]
+                 
+                 # Map pixels to time (add buffer)
+                 visible_start_time = max(0.0, (scroll_x - 300) / self.sequencer.zoom_x)
+                 visible_end_time = (scroll_x + visible_width + 300) / self.sequencer.zoom_x
+        except Exception:
+            pass
 
         for i, track in enumerate(self.sequencer.tracks):
             is_target = (i == self.drag_target_track_idx)
@@ -2100,6 +2441,11 @@ class FeditNativeApp:
             dpg.draw_text([10, y_offset + 5], track.name, size=15, color=(200, 200, 200), parent="timeline_canvas")
             
             for clip in track.clips:
+                # OPTIMIZATION: Visibility Check
+                clip_end = clip.start_time + clip.duration
+                if clip_end < visible_start_time or clip.start_time > visible_end_time:
+                    continue
+
                 x_start = clip.start_time * self.sequencer.zoom_x
                 width = clip.duration * self.sequencer.zoom_x
                 
@@ -2359,18 +2705,46 @@ class FeditNativeApp:
         if dpg.is_item_hovered("timeline_canvas") or dpg.is_item_hovered("timeline_scroll"):
             self.manual_timebase_override = False
             self.manual_timebase_value = None
-            # Zoom
-            scale_factor = 1.15
-            if app_data > 0:
-                self.sequencer.zoom_x *= scale_factor
-            elif app_data < 0:
-                self.sequencer.zoom_x /= scale_factor
-
-            # Clamp settings
-            self.sequencer.zoom_x = max(10.0, min(50000.0, self.sequencer.zoom_x))
             
-            # Prevent Vertical Scroll Drift?
-            # If content fits, ensure Y scroll is 0?
+            # --- Zoom to Mouse Logic ---
+            scale_factor = 1.15
+            
+            # Get Current State
+            scroll_x = dpg.get_x_scroll("timeline_scroll")
+            
+            # Robust Calculation using Drawing Mouse Pos (Canvas Space)
+            # This avoids unreliable global screen coordinate calculations
+            canvas_mouse_x, _ = dpg.get_drawing_mouse_pos()
+            
+            # Canvas X is effectively (Scroll X + Viewport Relative X)
+            content_x_px = canvas_mouse_x
+            
+            # Calculate Viewport Relative X for re-centering later
+            viewport_rel_x = content_x_px - scroll_x
+            
+            # Current time at mouse cursor
+            mouse_time = content_x_px / max(0.1, self.sequencer.zoom_x)
+            
+            # Apply Zoom
+            new_zoom = self.sequencer.zoom_x
+            if app_data > 0:
+                new_zoom *= scale_factor
+            elif app_data < 0:
+                new_zoom /= scale_factor
+            
+            # Clamp settings
+            new_zoom = max(10.0, min(50000.0, new_zoom))
+            self.sequencer.zoom_x = new_zoom
+            
+            # Calculate new scroll position to match mouse_time at same screen position
+            target_scroll_x = (mouse_time * new_zoom) - viewport_rel_x
+            
+            # Defer the scroll update until AFTER the timeline is resized in render_timeline
+            # preventing the value from being clamped to the old width
+            self._pending_scroll_x = max(0, target_scroll_x)
+            print(f"DEBUG ZOOM: MouseT={mouse_time:.2f}, Zoom={new_zoom:.1f}, TargetScroll={target_scroll_x:.1f}, ViewportRel={viewport_rel_x}")
+
+            # Prevent Vertical Scroll Drift
             total_h = self._active_wheel_graph_height() + len(self.sequencer.tracks) * 80
             win_h = dpg.get_item_height("timeline_scroll")
             if total_h <= win_h:
@@ -2468,8 +2842,17 @@ class FeditNativeApp:
 
     def apply_theme(self, mode):
         self.current_theme_mode = mode
+        # self.save_settings() # Method not present in current native_app.py
+        
+        # Update Menu Checkmarks
+        themes = ["Classic", "Dark Mode", "Retro"]
+        for t in themes:
+            tag = f"menu_theme_{t}"
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, t == mode)
+
         # define colors
-        if mode == "Dark":
+        if mode == "Dark Mode":
              cols = {
                  "grid_line": (60, 60, 60, 100),
                  "track_bg_even": (40, 40, 45, 50),
@@ -2487,32 +2870,225 @@ class FeditNativeApp:
                  "ruler_text": (200, 200, 200),
                  "playhead": (255, 50, 50),
                  "playhead_fill": (255, 100, 100),
+                 "text_green": (0, 255, 0),
              }
-        else:
-             # Light Mode
+             
+             # Global UI Colors (Dark)
+             ui = {
+                 "win_bg": (20, 20, 25),
+                 "text": (220, 220, 220),
+                 "btn": (45, 45, 50),
+                 "btn_hov": (60, 60, 65),
+                 "btn_act": (80, 80, 85),
+                 "frame_bg": (30, 30, 35),
+                 "frame_hov": (40, 40, 45),
+                 "menu_bg": (30, 30, 35),
+                 "popup_bg": (30, 30, 35),
+                 "border": (60, 60, 60),
+                 "check": (100, 150, 255),
+                 "link_color": (100, 200, 255),
+             }
+
+        elif mode == "Retro":
+             # Retro / Sunset Palette
+             orange_accent = (255, 145, 40)
+             deep_bg = (40, 35, 42)
+             lighter_bg = (55, 50, 60)
+             
              cols = {
-                 "grid_line": (200, 200, 200, 100),
-                 "track_bg_even": (240, 240, 245, 200),
-                 "track_bg_odd": (230, 230, 235, 200),
-                 "track_border": (180, 180, 180),
-                 "text_track": (50, 50, 50),
-                 "clip_sine": (50, 100, 200),
-                 "clip_const": (100, 200, 50),
-                 "clip_ramp": (200, 100, 50),
-                 "clip_saw": (200, 50, 50),
-                 "ruler_bg": (220, 220, 225),
-                 "ruler_border": (180, 180, 180),
-                 "ruler_line": (150, 150, 150),
-                 "ruler_tick": (100, 100, 100),
-                 "ruler_text": (50, 50, 50),
-                 "playhead": (200, 20, 20),
-                 "playhead_fill": (255, 50, 50),
+                 "grid_line": (80, 70, 90, 80),
+                 "track_bg_even": (45, 40, 48, 200),
+                 "track_bg_odd": (40, 35, 42, 200),
+                 "track_border": (70, 60, 80),
+                 "text_track": (200, 180, 170),
+                 "clip_sine": orange_accent,      # Main Accent
+                 "clip_const": (255, 200, 60),    # Yellow
+                 "clip_ramp": (255, 90, 60),      # Red-Orange
+                 "clip_saw": (200, 60, 60),       # Deep Red
+                 "ruler_bg": (35, 30, 38),
+                 "ruler_border": (70, 60, 80),
+                 "ruler_text": (180, 170, 160),
+                 "timeline_bg": (30, 25, 32),
+                 "playhead": (255, 220, 100),
+                 "playhead_fill": (255, 180, 50),
+                 "text_green": (255, 160, 60), # Status Orange
              }
+             
+             ui = {
+                 "win_bg": deep_bg,
+                 "text": (240, 230, 225),
+                 "btn": lighter_bg,
+                 "btn_hov": (75, 70, 85),
+                 "btn_act": orange_accent,
+                 "frame_bg": (30, 25, 32),
+                 "frame_hov": (60, 55, 65),
+                 "check": orange_accent,
+                 "border": (80, 70, 90),
+                 "menu_bg": (35, 30, 38),
+                 "popup_bg": (45, 40, 48),
+                 "scrollbar_bg": (30, 25, 32),
+                 "scrollbar_grab": (70, 60, 75),
+                 "scrollbar_grab_hov": (90, 80, 95),
+                 "scrollbar_grab_act": orange_accent,
+                 "header": (255, 145, 40, 150),
+                 "header_hover": (255, 160, 60, 180),
+                 "header_active": orange_accent,
+                 "tab": deep_bg,
+                 "tab_hov": (60, 55, 65),
+                 "tab_act": orange_accent,
+                 "tab_act": orange_accent,
+                 "tab_act_unfocused": (200, 120, 30),
+                 "link_color": orange_accent,
+             }
+
+        elif mode == "Classic":
+             # Warm Paper / Sage Palette (Classic)
+             sage_accent = (100, 150, 110)
+             paper_bg = (245, 245, 240)   # Warm off-white
+             darker_paper = (235, 235, 230)
+             white_paper = (252, 252, 250)
+             
+             cols = {
+                 "grid_line": (180, 180, 175, 120),
+                 "track_bg_even": (240, 240, 235, 255),
+                 "track_bg_odd": (230, 230, 225, 255),
+                 "track_border": (200, 200, 195),
+                 "text_track": (60, 60, 65),
+                 "clip_sine": sage_accent,        # Sage
+                 "clip_const": (100, 120, 130),   # Slate
+                 "clip_ramp": (180, 100, 80),     # Muted Clay
+                 "clip_saw": (200, 120, 100),     # Terracotta
+                 "ruler_bg": darker_paper,
+                 "ruler_border": (190, 190, 185),
+                 "ruler_text": (70, 70, 75),
+                 "timeline_bg": paper_bg,
+                 "playhead": (40, 40, 45),        # Charcoal
+                 "playhead_fill": (80, 80, 85),
+                 "text_green": (60, 120, 70),     # Dark Green
+             }
+             
+             ui = {
+                 "win_bg": paper_bg,
+                 "text": (40, 40, 45),
+                 "btn": white_paper,
+                 "btn_hov": (230, 230, 225),
+                 "btn_act": sage_accent,
+                 "frame_bg": white_paper,
+                 "frame_hov": (230, 230, 225),
+                 "check": sage_accent,
+                 "border": (200, 200, 195),
+                 "menu_bg": paper_bg,
+                 "popup_bg": white_paper,
+                 "scrollbar_bg": paper_bg,
+                 "scrollbar_grab": (180, 180, 175),
+                 "scrollbar_grab_hov": (160, 160, 155),
+                 "scrollbar_grab_act": sage_accent,
+                 "header": (235, 235, 230),
+                 "header_hover": (225, 225, 220),
+                 "header_active": sage_accent,
+                 "tab": paper_bg,
+                 "tab_hov": (235, 235, 230),
+                 "tab_act": sage_accent,
+                 "tab_act_unfocused": (130, 160, 140),
+                 "link_color": sage_accent,
+             }
+
         self.theme_colors = cols
+        
+        with dpg.theme() as global_theme:
+            with dpg.theme_component(dpg.mvAll):
+                # Ensure borders are visible (Soft Light needs this specifically)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
+                
+                # Core
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, ui["win_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_Text, ui["text"])
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 8)
+                dpg.add_theme_color(dpg.mvThemeCol_Border, ui["border"])
+                
+                # Buttons
+                dpg.add_theme_color(dpg.mvThemeCol_Button, ui["btn"])
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, ui["btn_hov"])
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, ui["btn_act"])
+                
+                # Frames (Inputs)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, ui["frame_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, ui["frame_hov"])
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, ui["frame_hov"])
+                
+                # Menu / Popup
+                dpg.add_theme_color(dpg.mvThemeCol_MenuBarBg, ui["menu_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_PopupBg, ui["popup_bg"])
+                
+                # Child Windows (Panels)
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, ui["win_bg"])
+                
+                # Title Bars
+                title_bg = ui["menu_bg"]
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg, title_bg)
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, title_bg)
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgCollapsed, title_bg)
+                
+                # Table Borders
+                dpg.add_theme_color(dpg.mvThemeCol_TableBorderLight, ui["border"])
+                dpg.add_theme_color(dpg.mvThemeCol_TableBorderStrong, ui["border"])
+                
+                # Misc
+                dpg.add_theme_color(dpg.mvThemeCol_CheckMark, ui["check"])
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, ui["check"])
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, ui["check"])
+                dpg.add_theme_color(dpg.mvThemeCol_Button, ui["btn"]) # Ensure buttons are correct
+                
+                # Scrollbars
+                if "scrollbar_bg" in ui:
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg, ui["scrollbar_bg"])
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab, ui["scrollbar_grab"])
+                     scrollbar_hov = ui.get("scrollbar_grab_hov", ui["scrollbar_grab"])
+                     scrollbar_act = ui.get("scrollbar_grab_act", ui["check"])
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabHovered, scrollbar_hov)
+                     dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabActive, scrollbar_act)
+
+                # Headers (Selectables, Menus, Collapsing Headers)
+                if "header" in ui:
+                    dpg.add_theme_color(dpg.mvThemeCol_Header, ui["header"])
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, ui.get("header_hover", ui["header"]))
+                    dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, ui.get("header_active", ui["header"]))
+
+                # Tabs
+                if "tab" in ui or "btn" in ui: 
+                    # Fallback to btn if tab not defined, or specific tab color
+                    base = ui.get("tab", ui.get("btn", (0,0,0)))
+                    hov = ui.get("tab_hov", ui.get("btn_hov", (0,0,0)))
+                    act = ui.get("tab_act", ui.get("btn_act", (0,0,0)))
+                    
+                    dpg.add_theme_color(dpg.mvThemeCol_Tab, base)
+                    dpg.add_theme_color(dpg.mvThemeCol_TabHovered, hov)
+                    dpg.add_theme_color(dpg.mvThemeCol_TabActive, act)
+                    dpg.add_theme_color(dpg.mvThemeCol_TabUnfocused, ui.get("tab_act_unfocused", base))
+                    dpg.add_theme_color(dpg.mvThemeCol_TabUnfocusedActive, ui.get("tab_act_unfocused", act))
+
+        
+        dpg.bind_theme(global_theme)
         
         # Trigger redraw if needed
         if hasattr(self, 'sequencer'):
             self.render_timeline()
+
+        # Update specific items that don't auto-update with theme
+        if dpg.does_item_exist("status_text"):
+             # Only color it green if it's actually connected/green-candidate
+             # Otherwise respect the Red disconnected state (or whatever current color is)
+             curr_s = dpg.get_value("status_text")
+             if "Connected" in curr_s:
+                 dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
+        if dpg.does_item_exist("monitor_freq"):
+             dpg.configure_item("monitor_freq", color=self.theme_colors.get("text_green", (0, 255, 0)))
+
+        if dpg.does_item_exist("txt_license_link"):
+             # Use defined link color, fallback to Blue if missing
+             link_col = ui.get("link_color", (100, 200, 255))
+             dpg.configure_item("txt_license_link", color=link_col)
+
 
     def setup_ui(self):
         with dpg.theme() as global_theme:
@@ -2571,84 +3147,100 @@ class FeditNativeApp:
                 print(f"Failed to load icon texture: {e}")
 
             # Custom Header
-            with dpg.group(horizontal=True, tag="custom_title_bar"):
-                 # Left Padding for Icon
-                 dpg.add_spacer(width=8) 
-                 
-                 if texture_loaded:
-                     dpg.add_image("icon_texture", width=20, height=20) 
-                 
-                 dpg.add_spacer(width=5)
-                 dpg.add_text("FFeditor", color=(200, 200, 200))
-                 dpg.add_spacer(width=20)
-                 
-                 # Menu Bar (popups work better in horizontal group)
-                 # File Menu
-                 dpg.add_button(label="File", tag="btn_file_menu")
-                 with dpg.popup("btn_file_menu", mousebutton=dpg.mvMouseButton_Left):
-                    dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
-                    dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
-                    dpg.add_separator()
-                    dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
+            # Custom Header (Table Layout)
+            with dpg.table(tag="custom_title_bar", header_row=False, borders_innerH=False, borders_innerV=False, 
+                           borders_outerH=False, borders_outerV=False, scrollY=False, width=-1):
+                dpg.add_table_column(init_width_or_weight=1.0)
+                dpg.add_table_column(width_fixed=True, init_width_or_weight=120)
 
-                 # View Menu
-                 dpg.add_button(label="View", tag="btn_view_menu")
-                 with dpg.popup("btn_view_menu", mousebutton=dpg.mvMouseButton_Left):
-                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
-                    dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
-                    dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
-                    dpg.add_menu_item(label="Mouse Status", check=True, default_value=True, callback=self._on_mouse_status_checkbox)
-                 
-                 dpg.add_spacer(width=10)
-                 dpg.add_combo(tag="device_combo", width=200, callback=self.on_device_selected)
-                 dpg.add_button(label="Scan", callback=self.scan_devices)
-                 dpg.add_button(label="Connect", callback=self.connect_callback)
-                 dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
-                 
-                 dpg.add_spacer(width=100, tag="title_bar_spacer") 
-            
-                 # Window Controls
-                 # Icons: —  □  ×
-                 # Taller buttons (height=28)
-                 b_min = dpg.add_button(label="—", width=34, height=28, callback=lambda: dpg.minimize_viewport())
-                 b_max = dpg.add_button(label="□", width=34, height=28, callback=self.toggle_maximize)
-                 b_close = dpg.add_button(label="×", width=34, height=28, callback=lambda: dpg.stop_dearpygui())
-                 
-                 # Bind large font to buttons
-                 if hasattr(self, 'font_large_icons'):
-                     dpg.bind_item_font(b_min, self.font_large_icons)
-                     dpg.bind_item_font(b_max, self.font_large_icons)
-                     dpg.bind_item_font(b_close, self.font_large_icons)
+                with dpg.table_row():
+                    with dpg.group(horizontal=True):
+                         dpg.add_spacer(width=8) 
+                         
+                         if texture_loaded:
+                             dpg.add_image("icon_texture", width=20, height=20) 
+                         
+                         dpg.add_spacer(width=5)
+                         dpg.add_text("FFeditor", color=(200, 200, 200))
+                         dpg.add_spacer(width=20)
+                         
+                         dpg.add_button(label="File", tag="btn_file_menu")
+                         with dpg.popup("btn_file_menu", mousebutton=dpg.mvMouseButton_Left):
+                            dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
+                            dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
+                            dpg.add_separator()
+                            dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
+
+                         dpg.add_button(label="View", tag="btn_view_menu")
+                         with dpg.popup("btn_view_menu", mousebutton=dpg.mvMouseButton_Left):
+                            dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
+                            dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
+                            dpg.add_menu_item(label="Mouse Status", check=True, tag="menu_mouse_status", default_value=self._mouse_status_visible, callback=self._on_mouse_status_checkbox)
+                         
+                         dpg.add_button(label="Theme", tag="btn_theme_menu")
+                         with dpg.popup("btn_theme_menu", mousebutton=dpg.mvMouseButton_Left):
+                            dpg.add_menu_item(label="Classic", check=True, tag="menu_theme_Classic", callback=lambda: self.apply_theme("Classic"))
+                            dpg.add_menu_item(label="Dark Mode", check=True, tag="menu_theme_Dark Mode", callback=lambda: self.apply_theme("Dark Mode"))
+                            dpg.add_menu_item(label="Retro", check=True, tag="menu_theme_Retro", callback=lambda: self.apply_theme("Retro"))
+
+                         dpg.add_button(label="About", callback=lambda: dpg.configure_item("win_about", show=True))
+                         
+                         dpg.add_spacer(width=10)
+                         dpg.add_combo(tag="device_combo", width=200, callback=self.on_device_selected)
+                         dpg.add_button(label="Scan", callback=self.scan_devices)
+                         dpg.add_button(label="Connect", callback=self.connect_callback)
+                         dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                         dpg.add_spacer(width=15)
+                         dpg.add_text("Rate:", color=(180, 180, 180))
+                         dpg.add_input_int(tag="poll_rate_input", width=50, default_value=500, min_value=10, max_value=1000, min_clamped=True, max_clamped=True, step=0, step_fast=0, callback=self._on_poll_rate_changed)
+                         dpg.add_text("Hz", color=(180, 180, 180))
+
+                    with dpg.group(horizontal=True):
+                         b_min = dpg.add_button(label="—", width=34, height=28, callback=lambda: dpg.minimize_viewport())
+                         b_max = dpg.add_button(label="□", width=34, height=28, callback=self.toggle_maximize)
+                         b_close = dpg.add_button(label="×", width=34, height=28, callback=lambda: dpg.stop_dearpygui())
+                         
+                         if hasattr(self, 'font_large_icons'):
+                             dpg.bind_item_font(b_min, self.font_large_icons)
+                             dpg.bind_item_font(b_max, self.font_large_icons)
+                             dpg.bind_item_font(b_close, self.font_large_icons)
 
             dpg.add_separator()  
             # Spacing below title bar - Reduced to 0/minimal as requested
             # Content will sit flush against separator
             
-            # Torque Monitor Window (Initially Hidden or Shown)
-            with dpg.window(tag="win_torque_monitor", label="Torque Monitor", width=250, height=200, pos=[400, 100], show=False):
-                 dpg.add_text("Real-time Torque", color=(150, 255, 150))
-                 dpg.add_text("0.00 Nm", tag="txt_torque_val") # Standard size for now to avoid crash
-                 # We'll stick to standard text for now, maybe add a progress bar.
-                 dpg.add_progress_bar(tag="bar_torque", width=-1, height=20)
-                 
-                 dpg.add_spacer(height=5)
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Peak: --", tag="txt_peak", color=(255, 100, 100))
-                     dpg.add_spacer(width=10)
-                     dpg.add_text("Avg: --", tag="txt_avg", color=(100, 200, 255))
-                     dpg.add_spacer(width=10)
-                     dpg.add_text("Min: --", tag="txt_min", color=(200, 200, 200))
+            # About Dialog (v12 Content)
+            with dpg.theme() as theme_about:
+                with dpg.theme_component(dpg.mvAll):
+                    dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 20, 20)
+            
+            with dpg.item_handler_registry(tag="handler_github_link"):
+                dpg.add_item_clicked_handler(callback=lambda: webbrowser.open("https://github.com/"))
+            
+            # Centered position (assuming 1280x800 viewport: x=365, y=210)
+            with dpg.window(tag="win_about", label="About Fedit", width=550, height=380, modal=True, show=False, pos=[365, 210], no_resize=True, no_collapse=True):
+                dpg.add_text("FFeditor (Version 1.0)")
+                dpg.add_spacer(height=10)
+                dpg.add_text("A modern spiritual successor to Microsoft Fedit (1999).")
+                dpg.add_spacer(height=10)
+                dpg.add_text("Created by Swift & Napman")
+                dpg.add_spacer(height=10)
+                with dpg.group(horizontal=True, horizontal_spacing=0):
+                    dpg.add_text("Source Code: Available on ")
+                    dpg.add_text("GitHub", tag="txt_license_link", color=(100, 200, 255))
+                    dpg.bind_item_handler_registry("txt_license_link", "handler_github_link")
+                dpg.add_text("License: MIT License")
+                dpg.add_spacer(height=10)
+                dpg.add_text("This software is an independent project and is not affiliated with,\nendorsed by, or sponsored by Microsoft Corporation.", wrap=500)
+                dpg.add_spacer(height=10)
+                dpg.add_text("Copyright (c) 2025. Free and open source.")
+                
+                dpg.add_spacer(height=20)
+                dpg.add_button(label="Close", width=100, callback=lambda: dpg.hide_item("win_about"))
+                
+            dpg.bind_item_theme("win_about", theme_about)
 
-                 dpg.add_separator()
-                 dpg.add_text("Settings:")
 
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Base Torque (Ref):")
-                     dpg.add_input_float(tag="input_max_torque", default_value=8.0, width=100, step=0.5)
-                     
-                 with dpg.group(horizontal=True):
-                     dpg.add_text("Master Gain (%):  ")
-                     dpg.add_slider_int(tag="slider_gain", default_value=100, min_value=0, max_value=100, width=100)
 
             
             # Set Main as a fallback drop target without payload type check
@@ -2691,6 +3283,8 @@ class FeditNativeApp:
                 dpg.add_spacer(width=20)
                 dpg.add_text("T:")
                 dpg.add_input_float(tag="input_timebase", width=60, default_value=0.1, step=0, callback=self.on_timebase_change)
+                dpg.add_spacer(width=15)
+                dpg.add_checkbox(label="Track", tag="chk_track_playhead", default_value=False)
 
             dpg.add_separator()
 
@@ -2701,7 +3295,7 @@ class FeditNativeApp:
                        borders_innerV=True, parent="Main"):
             dpg.add_table_column(width_fixed=True, init_width_or_weight=100) # Palette
             dpg.add_table_column() # Timeline
-            dpg.add_table_column(width_fixed=True, init_width_or_weight=300) # Inspector & Log
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=400) # Inspector & Log
 
             with dpg.table_row():
                 
@@ -2731,7 +3325,7 @@ class FeditNativeApp:
                             pass
 
                     dpg.add_text("Drop Effects Here", parent="timeline_scroll", color=(100,100,100))
-                    dpg.add_text("", tag=self._mouse_status_tag, parent="timeline_scroll", color=(200, 210, 255))
+                    dpg.add_text("", tag=self._mouse_status_tag, parent="timeline_scroll", color=(200, 210, 255), show=self._mouse_status_visible)
 
                     with dpg.item_handler_registry(tag="timeline_click_handler"):
                         dpg.add_item_clicked_handler(callback=self.canvas_click)
@@ -2794,10 +3388,12 @@ class FeditNativeApp:
                     dpg.add_separator()
                     dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
                  with dpg.menu(label="View", tag="title_menu_view"):
-                    dpg.add_menu_item(label="Torque Monitor", callback=lambda: dpg.show_item("win_torque_monitor"))
+
                     dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
                     dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
-                    dpg.add_menu_item(label="Mouse Status", check=True, default_value=True, callback=self._on_mouse_status_checkbox)
+                    dpg.add_menu_item(label="Force Graph", check=True, default_value=self._force_graph_visible, tag="menu_force_graph", callback=self._on_force_graph_checkbox)
+                    dpg.add_menu_item(label="Auto Scale Graph", check=True, default_value=self.wheel_graph_auto_scale, callback=self._on_wheel_graph_auto_scale)
+                    dpg.add_menu_item(label="Mouse Status", check=True, default_value=self._mouse_status_visible, callback=self._on_mouse_status_checkbox)
                  # Re-add Device Controls to Menu Bar area
                  dpg.add_spacer(width=20)
                  dpg.add_combo(tag="device_combo", width=200, callback=self.on_device_selected)
@@ -2863,10 +3459,8 @@ class FeditNativeApp:
         try:
              vp_width = dpg.get_viewport_width()
              # Reserve enough space for Left Content (Icon/Menu) + Right Content (Buttons)
-             # Buttons(~120) + Safe Margin(~50) + Left Content(~500) = ~670+
-             # Decreasing this moves buttons to the right (larger spacer)
-             # Set to 815 to position buttons 15px right from previous 830 position
-             fixed_content_width = 815
+             # Set to 930 to position buttons correctly (approx 1273px edge)
+             fixed_content_width = 930
              new_spacer_width = max(10, vp_width - fixed_content_width)
              dpg.set_item_width("title_bar_spacer", new_spacer_width)
         except: pass
@@ -2925,20 +3519,7 @@ class FeditNativeApp:
              elif my < BORDER: hit_code = 12  # HTTOP
              elif my > vh - BORDER: hit_code = 15  # HTBOTTOM
          
-         if hit_code != 0:
-             c_map = {10:32644, 11:32644, 12:32645, 13:32642, 14:32643, 15:32645, 16:32643, 17:32642}
-             new_cursor_id = c_map.get(hit_code, 0)
-         
-         if new_cursor_id != 0:
-             if new_cursor_id != self.last_cursor:
-                  ctypes.windll.user32.SetCursor(self._cursor_cache.get(new_cursor_id))
-                  self.last_cursor = new_cursor_id
-         elif self.last_cursor != 0:
-             ctypes.windll.user32.SetCursor(self._cursor_cache.get(0))
-             self.last_cursor = 0
-
-         # SIMPLE GEOMETRIC DRAG ZONES: Top-left area + middle-right area
-         # Resize still works from edges
+         # Note: Moved drag/key dependency here to support cursor syncing
          import win32api
          mouse_down = win32api.GetKeyState(0x01) < 0
          
@@ -2947,7 +3528,7 @@ class FeditNativeApp:
              self._drag_start_pos = None
          if not hasattr(self, '_window_drag_offset'):
              self._window_drag_offset = None
-         
+
          # Track if we're hovering over an edge with mouse up (ready for resize)
          if not hasattr(self, '_edge_hover_ready'):
              self._edge_hover_ready = False
@@ -2958,6 +3539,18 @@ class FeditNativeApp:
          elif hit_code == 0:
              # Not on edge anymore, reset ready state
              self._edge_hover_ready = False
+
+         if hit_code != 0:
+             c_map = {10:32644, 11:32644, 12:32645, 13:32642, 14:32643, 15:32645, 16:32643, 17:32642}
+             new_cursor_id = c_map.get(hit_code, 0)
+         
+         if new_cursor_id != 0 and self._edge_hover_ready:
+              # Always set cursor to override DPG reset
+              ctypes.windll.user32.SetCursor(self._cursor_cache.get(new_cursor_id))
+              self.last_cursor = new_cursor_id
+         elif self.last_cursor != 0:
+             ctypes.windll.user32.SetCursor(self._cursor_cache.get(0))
+             self.last_cursor = 0
          
          if mouse_down:
              if not self._drag_initiated:
@@ -2966,8 +3559,9 @@ class FeditNativeApp:
                      ctypes.windll.user32.ReleaseCapture()
                      ctypes.windll.user32.SendMessageW(self._hwnd, 0xA1, hit_code, 0)
                      self._drag_initiated = True
-                 elif (0 <= mx <= 140 and 0 <= my <= 40) or (555 <= mx <= 1145 and 0 <= my <= 40):
-                     # In drag zone - track position for threshold check
+                 elif hit_code == 0 and my < 40 and mx < vw - 150:
+                     # Title Bar Drag Zone (Manual, non-blocking)
+                     # Exclude right-side buttons to prevent hijacking clicks
                      if self._drag_start_pos is None:
                          # First frame in drag zone - record position
                          self._drag_start_pos = (mx, my)
@@ -3008,10 +3602,108 @@ class FeditNativeApp:
              self._window_drag_offset = None
              # Restore focus when drag completes
              if self._drag_initiated:
-                 # Re-focus and bring window to foreground
-                 ctypes.windll.user32.SetForegroundWindow(self._hwnd)
-                 ctypes.windll.user32.SetFocus(self._hwnd)
+                 # Use multiple methods to ensure focus is restored
+                 try:
+                     # Bring window to top of Z-order
+                     ctypes.windll.user32.BringWindowToTop(self._hwnd)
+                     # Set as active window
+                     ctypes.windll.user32.SetActiveWindow(self._hwnd)
+                     # Set foreground
+                     ctypes.windll.user32.SetForegroundWindow(self._hwnd)
+                     # Simulate a left mouse button up event to clear any stuck state
+                     ctypes.windll.user32.SendMessageW(self._hwnd, 0x0202, 0, 0)  # WM_LBUTTONUP
+                 except: pass
              self._drag_initiated = False
+
+    def get_settings_path(self):
+        import os
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_path, "user_settings.json")
+
+    def load_settings(self):
+        # Defaults
+        self.window_width = 1280
+        self.window_height = 800
+        self.window_x = 100
+        self.window_y = 100
+        self.maximized = False
+        self.current_theme_mode = "Dark Mode"
+        
+        path = self.get_settings_path()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    settings = json.load(f)
+                    self.window_width = settings.get("width", 1280)
+                    self.window_height = settings.get("height", 800)
+                    self.window_x = settings.get("x", 100)
+                    self.window_y = settings.get("y", 100)
+                    self.maximized = settings.get("maximized", False)
+                    self.current_theme_mode = settings.get("theme", "Dark Mode")
+                    
+                    self.show_redlines = settings.get("show_redlines", True)
+                    self._wheel_graph_visible = settings.get("wheel_graph_visible", True)
+                    self._mouse_status_visible = settings.get("mouse_status_visible", True)
+                    self.wheel_graph_gain = settings.get("wheel_graph_gain", 1.0)
+                    
+                    # Validate Coordinates (Fix for invisible window issue)
+                    if self.window_x < -10000 or self.window_y < -10000:
+                        self.window_x = 100
+                        self.window_y = 100
+                    
+                    if self.window_width < 100: self.window_width = 800
+                    if self.window_height < 100: self.window_height = 600
+            except Exception as e:
+                self.log(f"Failed to load settings: {e}")
+
+    def save_settings(self):
+        width = dpg.get_viewport_width()
+        height = dpg.get_viewport_height()
+        pos = dpg.get_viewport_pos()
+        
+        is_maximized = False
+        is_minimized = False
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            if hwnd:
+                if ctypes.windll.user32.IsZoomed(hwnd):
+                    is_maximized = True
+                if ctypes.windll.user32.IsIconic(hwnd):
+                    is_minimized = True
+        except: pass
+
+        # Prevent saving invalid coordinates if minimized
+        save_x = int(pos[0])
+        save_y = int(pos[1])
+        save_w = width
+        save_h = height
+        
+        if is_minimized or save_x < -10000 or save_y < -10000:
+             # Fallback to loaded settings (preserve last known good state)
+             save_x = self.window_x
+             save_y = self.window_y
+             save_w = self.window_width
+             save_h = self.window_height
+
+        settings = {
+            "width": save_w,
+            "height": save_h,
+            "x": save_x,
+            "y": save_y,
+            "maximized": is_maximized,
+            "theme": getattr(self, "current_theme_mode", "Dark Mode"),
+            "show_redlines": self.show_redlines,
+            "wheel_graph_visible": self._wheel_graph_visible,
+            "mouse_status_visible": self._mouse_status_visible,
+            "wheel_graph_gain": self.wheel_graph_gain
+        }
+        
+        try:
+            with open(self.get_settings_path(), 'w') as f:
+                json.dump(settings, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save settings: {e}")
 
     def run(self):
         # Resolve absolute path for icon
@@ -3021,12 +3713,25 @@ class FeditNativeApp:
         
         # Disable VSync for Haptics
         # DECORATED=False for Borderless
-        dpg.create_viewport(title='FFeditor', width=1280, height=800, vsync=False, 
+        dpg.create_viewport(title='FFeditor', width=self.window_width, height=self.window_height, 
+                            x_pos=self.window_x, y_pos=self.window_y,
+                            vsync=False, 
                             small_icon=icon_path, large_icon=icon_path, 
                             decorated=False) 
                             
         dpg.setup_dearpygui()
         dpg.show_viewport()
+        
+        # Restore Maximized State / Apply Theme
+        if self.maximized:
+             try:
+                import ctypes
+                hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+                if hwnd: ctypes.windll.user32.ShowWindow(hwnd, 3) # SW_MAXIMIZE
+             except: pass
+        
+        self.apply_theme(self.current_theme_mode)
+
         dpg.set_primary_window("Main", True)
         
         # Enable resizing logic (Native Style)
@@ -3039,32 +3744,161 @@ class FeditNativeApp:
         
         self.frame_count = 0
 
+        # Precise Timing Loop
+        import time
+        from time import perf_counter
+        import ctypes
+        
+        # Enable high resolution timer for Windows to allow granular sleeps (1ms)
+        try:
+            winmm = ctypes.windll.winmm
+            winmm.timeBeginPeriod(1)
+            high_res_timer = True
+        except:
+            high_res_timer = False
+
+        # Decoupled Loop State
+        UI_TARGET_FPS = 60
+        ui_interval = 1.0 / UI_TARGET_FPS
+        last_ui_time = 0.0
+        
+        last_effects_time = 0.0
+
+        # Input Polling State (High Freq)
+        POLL_TARGET_HZ = 500 # 500Hz Polling (sufficient for high precision without spin-wait)
+        poll_interval = 1.0 / POLL_TARGET_HZ
+        last_poll_time = 0.0
+
+        
         try:
             while dpg.is_dearpygui_running():
-                # Force redraw of title bar spacer
-                self._update_title_bar_layout()
+                now = perf_counter()
                 
-                # Throttle CPU when idle (but still run edge detection every frame)
-                is_dragging = hasattr(self, '_window_drag_offset') and self._window_drag_offset is not None
-                
-                if not is_dragging and self.frame_count % 2 == 0:
-                    self._throttle_when_idle()
-                
-                # Always run resize cursor/edge detection for responsive hover detection
-                self._update_resize_cursor_and_drag()
+                # --- 1. Determine Target Rates ---
+                is_interacting = (getattr(self.sequencer, 'is_scrubbing', False) or 
+                                  self.sequencer.drag_clip is not None or 
+                                  self.sequencer.resize_clip is not None)
 
-                try:
-                    self.update_loop()
-                except Exception as e:
-                    print(f"Update Loop Crash: {e}")
-                    self.log(f"CRITICAL: {e}")
-                    # Optional: pause playback on crash to prevent loop
-                    self.sequencer.is_playing = False
+                if self.sequencer.is_playing:
+                    # Active Mode: Use User Selected Rate
+                    try:
+                        target_rate = engine.target_update_rate_hz
+                    except: 
+                        target_rate = 500
+                    effects_interval = 1.0 / max(10, target_rate)
+                elif is_interacting:
+                    # Interaction Mode: High rate for smooth UI feedback
+                    effects_interval = 1.0 / 120.0
+                else:
+                    # Idle Mode: Low rate for basic connectivity/monitoring (saves CPU)
+                    effects_interval = 1.0 / 20.0 # 20 Hz when idle
+                
+                # --- 2. Check Timers ---
+                time_since_ui = now - last_ui_time
+                time_since_effects = now - last_effects_time
+                time_since_poll = now - last_poll_time
+                
+                should_run_ui = time_since_ui >= ui_interval
+                should_run_effects = time_since_effects >= effects_interval
+                should_run_poll = time_since_poll >= poll_interval
+
+                # --- 2a. Input Polling (Highest Priority, independent of effects) ---
+                if should_run_poll:
+                    if self._wheel_graph_visible:
+                         engine.poll_input()
+                         
+                         rec_time = self.sequencer.current_time
+                         if self.sequencer.is_playing:
+                             # Use time.time() because last_tick uses time.time()
+                             dt_tick = time.time() - self.sequencer.last_tick
+                             rec_time += dt_tick
+                         
+                         self._record_wheel_sample(rec_time)
+                         self._record_force_sample(rec_time)
                     
-                dpg.render_dearpygui_frame()
-                self.frame_count += 1
+                    last_poll_time = now
+                
+                # --- 3. Effects & Input Loop (High Priority) ---
+                if should_run_effects:
+                    # Always Update Drag State
+                    self._update_resize_cursor_and_drag()
+                    
+                    try:
+                        self.update_loop()
+                    except Exception as e:
+                        print(f"Update Loop Crash: {e}")
+                        self.log(f"CRITICAL: {e}")
+                        self.sequencer.is_playing = False
+                        
+                    # Process SDL Event Queue (NEW: Execute queued API calls)
+                    engine.process_event_queue(max_events=32)
+                    
+                    # Advance timer (drift correction: add interval, but don't fall behind if laggy)
+                    # Simple reset to 'now' avoids "catching up" spiral
+                    last_effects_time = now
+
+
+                # --- 4. UI Loop (60Hz) ---
+                if should_run_ui:
+                    # Update Visual Elements
+                    dpg.set_value("time_display", f"{self.sequencer.current_time:.2f}s")
+                    
+                    # Only re-render timeline if it's visible (optimization)
+                    self.render_timeline() 
+                    
+                    # Update Cursor Visuals (if not handled in effects loop this frame)
+                    if not should_run_effects:
+                         mpos = dpg.get_mouse_pos(local=False)
+                         rel_x, rel_y = self.get_canvas_relative_pos(mpos)
+                         if self._is_mouse_in_timeline_viewport(mpos):
+                             track_idx = self._track_index_from_rel_y(rel_y)
+                             resize_clip_hover, resize_edge = self._get_resize_hover(track_idx, rel_x)
+                             should_hide_system = bool(resize_clip_hover or self.sequencer.resize_clip)
+                             if should_hide_system:
+                                 self._draw_resize_cursor(rel_x, rel_y)
+                             self._set_system_cursor_visible(not should_hide_system)
+
+                    dpg.render_dearpygui_frame()
+                    last_ui_time = now
+                    
+                    # FPS Stats
+                    self.frame_count += 1
+                    try:
+                        if not hasattr(self, 'fps_last_time_stat'):
+                             self.fps_last_time_stat = time.time()
+                             self.fps_frames_stat = 0
+                        self.fps_frames_stat += 1
+                        if time.time() - self.fps_last_time_stat >= 1.0:
+                             self.fps_frames_stat = 0
+                             self.fps_last_time_stat = time.time()
+                    except: pass
+
+                # --- 5. Sleep Schedule ---
+                # Calculate time to next event
+                next_ui = last_ui_time + ui_interval
+                next_effects = last_effects_time + effects_interval
+                next_poll = last_poll_time + poll_interval
+                next_event = min(next_ui, next_effects, next_poll)
+                
+                sleep_duration = next_event - perf_counter()
+                
+                if sleep_duration > 0:
+                    # Tuned sleep threshold: 0.5ms if high resolution timer is enabled.
+                    # This allows sleeping for 1ms intervals (approx) without spinning.
+                    sleep_threshold = 0.002 if not high_res_timer else 0.0005
+                    if sleep_duration > sleep_threshold:
+                        time.sleep(sleep_duration - 0.0005) # Sleep most of the time, spin remaining ~0.5ms
+                    else:
+                        pass # Spin wait for precision
         finally:
+            if high_res_timer:
+                try:
+                    winmm.timeEndPeriod(1)
+                except: pass
+                
+            self.save_settings()
             try:
+
                 engine.stop_effect()
 
                 self.log_api("stop_effect", {"scope": "all"})
