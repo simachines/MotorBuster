@@ -767,14 +767,14 @@ class FeditNativeApp:
         if path:
              self.load_project_from_file(path)
 
-    def scan_devices(self):
+    def scan_devices(self, sender=None, app_data=None):
         self.log("Scanning devices...")
         devs = engine.list_devices()
         items = [f"{d.name} (#{d.index})" for d in devs]
         dpg.configure_item("device_combo", items=items)
         if items: 
             dpg.set_value("device_combo", items[0])
-            self.connect_device_by_name(items[0])
+            self.connect_device_by_name(items[0]) # Auto-connect on scan/startup
         else:
             dpg.set_value("device_combo", "No Devices Found")
 
@@ -853,12 +853,21 @@ class FeditNativeApp:
                  
          except: pass
 
+    def on_device_selected(self, sender, app_data):
+        """Callback for device combo: auto-connect when user selects a new device."""
+        if app_data and "No Devices" not in app_data:
+            self.connect_device_by_name(app_data)
+
     def connect_callback(self):
         val = dpg.get_value("device_combo")
+        
+        # If no device selected or list empty, try scanning first
+        if not val or "No Devices" in val:
+            self.scan_devices()
+            val = dpg.get_value("device_combo")
+            
         if val and "No Devices" not in val:
             self.connect_device_by_name(val)
-        else:
-            self.scan_devices()
 
     # --- Torque Telemetry ---
     def calculate_current_force(self):
@@ -2591,7 +2600,7 @@ class FeditNativeApp:
                     dpg.add_menu_item(label="Mouse Status", check=True, default_value=True, callback=self._on_mouse_status_checkbox)
                  
                  dpg.add_spacer(width=10)
-                 dpg.add_combo(tag="device_combo", width=200)
+                 dpg.add_combo(tag="device_combo", width=200, callback=self.on_device_selected)
                  dpg.add_button(label="Scan", callback=self.scan_devices)
                  dpg.add_button(label="Connect", callback=self.connect_callback)
                  dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
@@ -2791,7 +2800,7 @@ class FeditNativeApp:
                     dpg.add_menu_item(label="Mouse Status", check=True, default_value=True, callback=self._on_mouse_status_checkbox)
                  # Re-add Device Controls to Menu Bar area
                  dpg.add_spacer(width=20)
-                 dpg.add_combo(tag="device_combo", width=200)
+                 dpg.add_combo(tag="device_combo", width=200, callback=self.on_device_selected)
                  dpg.add_button(label="Scan", callback=self.scan_devices)
                  dpg.add_button(label="Connect", callback=self.connect_callback)
                  dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
