@@ -710,6 +710,13 @@ class HapticController:
         if not self.haptic:
             return -1
         
+        # Check if device supports CONSTANT effects
+        caps = sdl_haptic.SDL_GetHapticFeatures(self.haptic)
+        if not (caps & sdl_haptic.SDL_HAPTIC_CONSTANT):
+            logger.error(f"Device does not support SDL_HAPTIC_CONSTANT (caps: {caps:08x})")
+            logger.error("Software oscillator requires CONSTANT force capability")
+            return -1
+        
         self._stop_oscillator()
         
         # Destroy existing effect
@@ -722,7 +729,14 @@ class HapticController:
             self.effect_id = -1
         
         # Build direction from descriptor
-        direction = self._make_direction(desc.get("direction_mode", "polar"), desc.get("direction"))
+        # IMPORTANT: CONSTANT effects MUST use CARTESIAN direction mode
+        # Many devices (like Simagic) don't support CONSTANT with POLAR direction
+        # Force CARTESIAN regardless of what descriptor specifies
+        direction = sdl_haptic.SDL_HapticDirection()
+        direction.type = sdl_haptic.SDL_HAPTIC_CARTESIAN
+        direction.dir[0] = 1  # X-axis (primary axis for wheels)
+        direction.dir[1] = 0
+        direction.dir[2] = 0
         
         sdl_error.SDL_ClearError()
         effect = sdl_haptic.SDL_HapticEffect()
@@ -737,7 +751,9 @@ class HapticController:
         try:
             new_id = sdl_haptic.SDL_CreateHapticEffect(self.haptic, ctypes.byref(effect))
             if new_id == -1:
-                logger.error(f"CreateEffect FAILED: {_sdl_error()}")
+                sdl_err = _sdl_error()
+                logger.error(f"CreateEffect FAILED: {sdl_err}")
+                logger.error(f"Effect details - type: CONSTANT, direction_mode: {desc.get('direction_mode', 'polar')}, magnitude: {magnitude}")
                 return -1
             self.effect_id = new_id
             
