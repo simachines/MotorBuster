@@ -96,6 +96,8 @@ class HapticController:
         }
         # Store effect_ids created by async events: (track_idx, clip_id) -> effect_id
         self._effect_id_results: Dict[tuple, int] = {}
+        # High-water mark before purging stale events (SDL queue limit ~65535)
+        self._event_queue_high_watermark = 65000
         
     def init_sdl(self):
         flags = (
@@ -901,8 +903,9 @@ class HapticController:
         return new_id
         
     def stop_effect(self, effect_id: int = -1):
+        self._flush_custom_event_queue()
         if not self.haptic: return
-        
+
         try:
             if effect_id == -1:
                 # Stop All
@@ -919,11 +922,22 @@ class HapticController:
     # --- Event Queue Methods ---
     def queue_effect_start(self, descriptor: Dict, track_idx: int, clip_id: str, effect_id: int = -1) -> bool:
         """Queue an effect start command as SDL event. Returns True if queued successfully."""
+
         if not self._event_queue_enabled:
             # Fallback to synchronous execution
             result_id = self.play_descriptor(descriptor)
             return result_id != -1
-        
+
+        pending = max(0, self._queue_stats["events_queued"] - self._queue_stats["events_processed"])
+        if pending >= self._event_queue_high_watermark:
+            logger.warning(
+                "SDL event queue near limit (%d pending entries), purging stale events",
+                pending,
+            )
+
+        # Always clear stale events before adding another start request
+        self._flush_custom_event_queue()
+
         try:
             import uuid
             
@@ -974,6 +988,15 @@ class HapticController:
             self.stop_effect(effect_id)
             return True
         
+        pending = max(0, self._queue_stats["events_queued"] - self._queue_stats["events_processed"])
+        if pending >= self._event_queue_high_watermark:
+            logger.warning(
+                "SDL event queue near limit (%d pending entries) before stop, purging",
+                pending,
+            )
+
+        self._flush_custom_event_queue()
+
         try:
             import uuid
             
@@ -1011,7 +1034,31 @@ class HapticController:
         except Exception as e:
             logger.error(f"Error queuing effect stop: {e}")
             return False
-            
+
+    def _flush_custom_event_queue(self):
+        """Drop pending SDL custom events and clear their payloads."""
+        if not self._event_queue_enabled or not self._event_types_registered:
+            return
+
+        if not self._custom_event_types:
+            return
+
+        min_type = self._custom_event_types.get("EFFECT_START")
+        max_type = self._custom_event_types.get("POSITION_REQUEST")
+        if min_type is None or max_type is None:
+            return
+
+        pending_before = max(0, self._queue_stats["events_queued"] - self._queue_stats["events_processed"])
+        sdl_events.SDL_FlushEvents(min_type, max_type)
+
+        with self._payload_lock:
+            self._pending_payloads.clear()
+
+        self._queue_stats["events_queued"] = 0
+        self._queue_stats["events_processed"] = 0
+        if pending_before:
+            logger.info("Flushed %d pending SDL custom events", pending_before)
+
     def process_event_queue(self, max_events: int = 32):
         """Process pending SDL events from the queue. Call this regularly from logic thread."""
         if not self._event_queue_enabled or not self._event_types_registered:

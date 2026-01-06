@@ -55,7 +55,7 @@ class Clip:
     fade_length: int = 0
     name: str = "Clip"
     active_effect_id: int = -1
-    use_software_sine: bool = False
+    use_software_sine: bool = True
 
     def to_dict(self):
         return {
@@ -122,7 +122,7 @@ class Clip:
             attack_length=d.get("attack_length", 0),
             fade_length=d.get("fade_length", 0),
             name=d.get("name", "Clip"),
-            use_software_sine=d.get("use_software_sine", False),
+            use_software_sine=d.get("use_software_sine", True),
         )
  
 @dataclass
@@ -437,6 +437,7 @@ class FeditNativeApp:
         self._wheel_graph_visible = True
         self.wheel_graph_gain = 1.0
         self.wheel_history = []
+        self._wheel_history_max_time = 0.0
         self._last_live_wheel_norm = 0.0 # Live value for dot, separate from history
         self.wheel_history_limit = None
         self.wheel_axis_scale = 32767.0
@@ -476,6 +477,7 @@ class FeditNativeApp:
         self._mouse_status_tag = "txt_mouse_status"
         self._mouse_status_visible = True
         self._pending_scroll_x = None # For deferred zoom scrolling
+        self._normal_geometry = None
         
         # Pre-load Cursors
         self.cursor_hand = ctypes.windll.user32.LoadCursorW(0, 32649) # IDC_HAND
@@ -1638,13 +1640,9 @@ class FeditNativeApp:
         if not self.sequencer.is_playing:
             return
 
-        if self.wheel_history:
-            last_t = self.wheel_history[-1]["time"]
-            # Detect loop or rewind -> Clear history to maintain sorted order for bisect
-            if current_time < last_t:
-                 self.wheel_history.clear()
-
         self.wheel_history.append({"time": current_time, "value": norm})
+        if current_time > self._wheel_history_max_time:
+            self._wheel_history_max_time = current_time
         if self.wheel_history_limit and len(self.wheel_history) > self.wheel_history_limit:
             excess = len(self.wheel_history) - self.wheel_history_limit
             if excess > 0:
@@ -1678,6 +1676,7 @@ class FeditNativeApp:
 
     def _clear_wheel_history(self):
         self.wheel_history.clear()
+        self._wheel_history_max_time = 0.0
         self.hide_playhead_until_next_sample = False
 
     def _draw_wheel_graph(self, total_w: float, scroll_x: Optional[float] = None, scroll_w: float = 0):
@@ -1709,160 +1708,114 @@ class FeditNativeApp:
             current_segment = []
             prev_time = None
             gap_threshold = 0.25  # seconds between samples considered a jump
-            
-            # Calculate Visible Time Range
-            # Margin of error (e.g. 2 second extra) so we don't clip lines entering the screen
-            margin_s = 2.0 
-            
-            # If scroll info is missing (None) or invalid, draw everything (safe default)
-            if scroll_x is None or scroll_w <= 0:
+            margin_s = 2.0
+
+            if scroll_x is None or scroll_w <= 0 or self.sequencer.zoom_x <= 0:
                 start_time = 0.0
                 end_time = float('inf')
             else:
                 start_time = max(0.0, (scroll_x / self.sequencer.zoom_x) - margin_s)
                 end_time = ((scroll_x + scroll_w) / self.sequencer.zoom_x) + margin_s
 
-            # Bisect to find start index
-            # We need a key for bisect, but we have list of dicts.
-            # Construct ad-hoc or use a custom search. Bisect key available in Python 3.10
-            # Assuming Python 3.10+
-            start_idx = 0
-            if start_time > 0:
-                 # Custom bisect for list of dicts if key not supported or just to be safe/compatible
-                 # bisect.bisect_left(self.wheel_history, start_time, key=lambda x: x["time"]) 
-                 # Manual binary search is safer if uncertain about version
-                 lo, hi = 0, len(self.wheel_history)
-                 while lo < hi:
-                     mid = (lo + hi) // 2
-                     if self.wheel_history[mid]["time"] < start_time:
-                         lo = mid + 1
-                     else:
-                         hi = mid
-                 start_idx = lo
-                 # Backtrack slightly to ensure we connect from off-screen
-                 if start_idx > 0: start_idx -= 1
-            
-            # -------------------------------------------------------------------------
-            # PASS 1: Calculate Scale (if enabled)
-            # -------------------------------------------------------------------------
-            if self.wheel_graph_auto_scale:
-                 local_max_abs = 0.0
-                 # Scan visible range
-                 # Reuse start_idx computed above
-                 for i in range(start_idx, len(self.wheel_history)):
-                     s = self.wheel_history[i]
-                     if s["time"] > end_time: break
-                     val = abs(s["value"])
-                     if val > local_max_abs: local_max_abs = val
-                 
-                 # Avoid div/0 or huge scaling on noise
-                 # Minimum full-scale reference: 0.05 (5% of max torque)
-                 # If signal is smaller than 5%, we just stick to 5% scale to avoid looking at noise.
-                 safe_max = max(0.05, local_max_abs)
-                 y_scale = 1.0 / safe_max
-            
-            # -------------------------------------------------------------------------
-            # PASS 2: Adaptive Downsampling + Draw Segments
-            # -------------------------------------------------------------------------
-            # Calculate LOD based on pixel density
-            # Assuming data at ~1000Hz, zoom_x is pixels per second
-            if self.sequencer.zoom_x > 0:
-                pixels_per_sample = self.sequencer.zoom_x / 1000.0
+            if math.isinf(end_time):
+                visible_samples = self.wheel_history
             else:
-                pixels_per_sample = 1.0  # Fallback
-            
-            # Determine decimation factor and strategy
-            use_minmax = False
-            if pixels_per_sample >= 0.5:
-                # High zoom: Full detail (render every point or every other point)
-                decimation = 1 if pixels_per_sample >= 1.0 else 2
-            elif pixels_per_sample >= 0.1:
-                # Medium zoom: Simple decimation
-                decimation = max(2, int(0.5 / pixels_per_sample))
-            else:
-                # Low zoom: Min-max downsampling to preserve envelope
-                decimation = max(10, int(0.5 / pixels_per_sample))
-                use_minmax = True
-            
-            # Build downsampled points list
-            downsampled_points = []
-            i = start_idx
-            
-            while i < len(self.wheel_history):
-                sample = self.wheel_history[i]
-                sample_time = sample["time"]
-                
-                if sample_time > end_time:
-                    break
-                
-                if use_minmax and i + decimation < len(self.wheel_history):
-                    # Min-Max downsampling: Find min and max in this bucket
-                    bucket_end = min(i + decimation, len(self.wheel_history))
-                    min_val = float('inf')
-                    max_val = float('-inf')
-                    min_time = sample_time
-                    max_time = sample_time
-                    
-                    for j in range(i, bucket_end):
-                        if self.wheel_history[j]["time"] > end_time:
-                            break
-                        val = self.wheel_history[j]["value"]
-                        if val < min_val:
-                            min_val = val
-                            min_time = self.wheel_history[j]["time"]
-                        if val > max_val:
-                            max_val = val
-                            max_time = self.wheel_history[j]["time"]
-                    
-                    # Add both min and max points in time order
-                    if min_time <= max_time:
-                        downsampled_points.append({"time": min_time, "value": min_val})
-                        if min_val != max_val:  # Only add if different
-                            downsampled_points.append({"time": max_time, "value": max_val})
-                    else:
-                        downsampled_points.append({"time": max_time, "value": max_val})
-                        downsampled_points.append({"time": min_time, "value": min_val})
-                    
-                    i += decimation
-                else:
-                    # Simple decimation or full detail
-                    downsampled_points.append(sample)
-                    i += decimation
-            
-            # Now render the downsampled points
-            for i, sample in enumerate(downsampled_points):
-                sample_time = sample["time"]
-                
-                x = sample_time * self.sequencer.zoom_x
-                if x < 0: 
-                    continue
-                    
-                # Apply Gain AND Auto-Scale
+                visible_samples = []
+                for sample in self.wheel_history:
+                    sample_time = sample["time"]
+                    if sample_time < start_time or sample_time > end_time:
+                        continue
+                    visible_samples.append(sample)
+
+            if visible_samples:
                 if self.wheel_graph_auto_scale:
-                    val = sample["value"] * y_scale
+                    local_max_abs = 0.0
+                    for sample in visible_samples:
+                        val = abs(sample["value"])
+                        if val > local_max_abs:
+                            local_max_abs = val
+                    safe_max = max(0.05, local_max_abs)
+                    y_scale = 1.0 / safe_max
+
+                if self.sequencer.zoom_x > 0:
+                    pixels_per_sample = self.sequencer.zoom_x / 1000.0
                 else:
-                    val = sample["value"] * gain
-                    
-                # Clamp for drawing bounds
-                val = max(-1.0, min(1.0, val))
-                
-                y = (height / 2) - val * (height / 2 - 6)
+                    pixels_per_sample = 1.0
 
-                if prev_time is not None:
-                    dt = sample_time - prev_time
-                    if dt < 0 or dt > gap_threshold:
-                        if len(current_segment) >= 2:
-                            segments.append(current_segment)
-                        current_segment = []
+                use_minmax = False
+                if pixels_per_sample >= 0.5:
+                    decimation = 1 if pixels_per_sample >= 1.0 else 2
+                elif pixels_per_sample >= 0.1:
+                    decimation = max(2, int(0.5 / pixels_per_sample))
+                else:
+                    decimation = max(10, int(0.5 / pixels_per_sample))
+                    use_minmax = True
 
-                current_segment.append([x, y])
-                prev_time = sample_time
+                downsampled_points = []
+                idx = 0
+                total_visible = len(visible_samples)
 
-            if len(current_segment) >= 2:
-                segments.append(current_segment)
+                while idx < total_visible:
+                    if use_minmax:
+                        bucket_end = min(idx + decimation, total_visible)
+                        min_val = float('inf')
+                        max_val = float('-inf')
+                        min_sample = None
+                        max_sample = None
+                        min_time = 0.0
+                        max_time = 0.0
+                        for j in range(idx, bucket_end):
+                            sample = visible_samples[j]
+                            val = sample["value"]
+                            if val < min_val:
+                                min_val = val
+                                min_sample = sample
+                                min_time = sample["time"]
+                            if val > max_val:
+                                max_val = val
+                                max_sample = sample
+                                max_time = sample["time"]
+                        if min_sample and max_sample:
+                            if min_time <= max_time:
+                                downsampled_points.append(min_sample)
+                                if max_sample is not min_sample:
+                                    downsampled_points.append(max_sample)
+                            else:
+                                downsampled_points.append(max_sample)
+                                if min_sample is not max_sample:
+                                    downsampled_points.append(min_sample)
+                        elif min_sample:
+                            downsampled_points.append(min_sample)
+                        idx += decimation
+                    else:
+                        downsampled_points.append(visible_samples[idx])
+                        idx += decimation
 
-            for segment in segments:
-                dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
+                for sample in downsampled_points:
+                    sample_time = sample["time"]
+                    x = sample_time * self.sequencer.zoom_x if self.sequencer.zoom_x > 0 else 0
+                    if self.wheel_graph_auto_scale:
+                        val = sample["value"] * y_scale
+                    else:
+                        val = sample["value"] * gain
+                    val = max(-1.0, min(1.0, val))
+                    y = (height / 2) - val * (height / 2 - 6)
+
+                    if prev_time is not None:
+                        dt = sample_time - prev_time
+                        if dt < 0 or dt > gap_threshold:
+                            if len(current_segment) >= 2:
+                                segments.append(current_segment)
+                            current_segment = []
+
+                    current_segment.append([x, y])
+                    prev_time = sample_time
+
+                if len(current_segment) >= 2:
+                    segments.append(current_segment)
+
+                for segment in segments:
+                    dpg.draw_polyline(segment, color=(100, 220, 255, 220), thickness=2, parent="timeline_canvas")
 
         if self._should_show_wheel_playhead():
             playhead_x = self.sequencer.current_time * self.sequencer.zoom_x
@@ -2380,9 +2333,8 @@ class FeditNativeApp:
         
         # Check history
         if self.wheel_history:
-             last_hist = self.wheel_history[-1]["time"]
-             if last_hist > max_t: max_t = last_hist
-             
+            last_hist = self._wheel_history_max_time
+            if last_hist > max_t: max_t = last_hist
         # Add buffer
         max_t += 10.0
         
@@ -3424,8 +3376,12 @@ class FeditNativeApp:
             if hwnd:
                 if ctypes.windll.user32.IsZoomed(hwnd):
                     ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
+                    self.maximized = False
+                    self._apply_geometry_to_viewport(self._normal_geometry)
                 else:
+                    self._store_current_normal_geometry()
                     ctypes.windll.user32.ShowWindow(hwnd, 3) # SW_MAXIMIZE = 3
+                    self.maximized = True
         except Exception as e:
             print(f"Maximize failed: {e}")
 
@@ -3615,6 +3571,73 @@ class FeditNativeApp:
                  except: pass
              self._drag_initiated = False
 
+    def _update_normal_geometry(self, x=None, y=None, width=None, height=None):
+        if self._normal_geometry is None:
+            self._normal_geometry = {
+                "x": int(getattr(self, "window_x", 0)),
+                "y": int(getattr(self, "window_y", 0)),
+                "width": max(100, int(getattr(self, "window_width", 1280))),
+                "height": max(100, int(getattr(self, "window_height", 720))),
+            }
+        if x is not None:
+            self._normal_geometry["x"] = int(x)
+        if y is not None:
+            self._normal_geometry["y"] = int(y)
+        if width is not None:
+            self._normal_geometry["width"] = max(100, int(width))
+        if height is not None:
+            self._normal_geometry["height"] = max(100, int(height))
+
+    def _store_current_normal_geometry(self):
+        try:
+            pos = dpg.get_viewport_pos()
+            width = dpg.get_viewport_width()
+            height = dpg.get_viewport_height()
+            self._update_normal_geometry(x=pos[0], y=pos[1], width=width, height=height)
+        except Exception:
+            pass
+
+    def _apply_geometry_to_viewport(self, geometry: Optional[dict]):
+        if not geometry:
+            return
+
+        try:
+            cfg = {
+                "x_pos": geometry["x"],
+                "y_pos": geometry["y"],
+                "width": geometry["width"],
+                "height": geometry["height"],
+            }
+            dpg.configure_viewport(0, **cfg)
+        except Exception:
+            pass
+
+        try:
+            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            if hwnd:
+                flags = 0x0034  # SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED
+                ctypes.windll.user32.SetWindowPos(hwnd, 0, geometry["x"], geometry["y"], geometry["width"], geometry["height"], flags)
+        except Exception:
+            pass
+
+    def _center_window_on_screen(self):
+        try:
+            screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+            screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+        except Exception:
+            return
+
+        width = min(int(self.window_width), screen_w)
+        height = min(int(self.window_height), screen_h)
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+
+        self.window_width = width
+        self.window_height = height
+        self.window_x = x
+        self.window_y = y
+        self._update_normal_geometry(x=x, y=y, width=width, height=height)
+
     def get_settings_path(self):
         import os
         base_path = os.path.dirname(os.path.abspath(__file__))
@@ -3656,6 +3679,10 @@ class FeditNativeApp:
             except Exception as e:
                 self.log(f"Failed to load settings: {e}")
 
+        self._center_window_on_screen()
+        if self._normal_geometry is None:
+            self._update_normal_geometry()
+
     def save_settings(self):
         width = dpg.get_viewport_width()
         height = dpg.get_viewport_height()
@@ -3676,15 +3703,35 @@ class FeditNativeApp:
         # Prevent saving invalid coordinates if minimized
         save_x = int(pos[0])
         save_y = int(pos[1])
-        save_w = width
-        save_h = height
-        
+        save_w = int(width)
+        save_h = int(height)
+
         if is_minimized or save_x < -10000 or save_y < -10000:
-             # Fallback to loaded settings (preserve last known good state)
+             # Fallback to cached geometry (preserve last known good state)
              save_x = self.window_x
              save_y = self.window_y
              save_w = self.window_width
              save_h = self.window_height
+             self._update_normal_geometry(x=save_x, y=save_y, width=save_w, height=save_h)
+
+        if is_maximized:
+            normal = self._normal_geometry or {
+                "x": save_x,
+                "y": save_y,
+                "width": save_w,
+                "height": save_h,
+            }
+            save_x = normal["x"]
+            save_y = normal["y"]
+            save_w = normal["width"]
+            save_h = normal["height"]
+        else:
+            self._update_normal_geometry(x=save_x, y=save_y, width=save_w, height=save_h)
+
+        self.window_x = save_x
+        self.window_y = save_y
+        self.window_width = save_w
+        self.window_height = save_h
 
         settings = {
             "width": save_w,
