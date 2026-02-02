@@ -12,6 +12,7 @@ import bisect
 from typing import Optional
 import warnings
 import ctypes
+import threading
 
 # Filter benign PySDL2 warning
 warnings.filterwarnings("ignore", message="pysdl2-dll is installed as source-only")
@@ -476,6 +477,13 @@ class FeditNativeApp:
         self._mouse_status_tag = "txt_mouse_status"
         self._mouse_status_visible = True
         self._pending_scroll_x = None # For deferred zoom scrolling
+        self.freeze_test_active = False # For diagnostic freeze test
+        self._should_trigger_freeze_now = False # Immediate freeze trigger for HW mode start
+        
+        # Probe State
+        self._probe_thread = None
+        self._probe_feedback_event = threading.Event()
+        self._probe_feedback_result = None
         
         # Pre-load Cursors
         self.cursor_hand = ctypes.windll.user32.LoadCursorW(0, 32649) # IDC_HAND
@@ -932,6 +940,94 @@ class FeditNativeApp:
         if val and "No Devices" not in val:
             self.connect_device_by_name(val)
 
+    def run_diag_test(self):
+        """Triggers the strict HW Periodic test with integrated freeze to prove hardware independence."""
+        self.log("Starting Force HW Periodic Test (Strict HW, Integrated Freeze)...")
+        # Integrated Freeze is now handled INSIDE engine.diag_test_hw_sine via 1s sleep
+        # but we can still stop the UI thread here if we want simultaneous freeze.
+        # Actually, let's let the engine handle the 'PC freeze' simulation.
+        threading.Thread(target=engine.diag_test_hw_sine, daemon=True).start()
+
+    # --- Hardware Effects Probe ---
+    def start_ffb_probe(self):
+        dpg.set_value("txt_probe_status", "Status: Ready")
+        dpg.set_value("progress_probe", 0.0)
+        dpg.set_value("txt_probe_log", "Waiting to start...")
+        dpg.configure_item("group_probe_results", show=False)
+        dpg.configure_item("group_probe_feedback", show=False)
+        dpg.configure_item("group_probe_controls", show=True)
+        dpg.configure_item("btn_probe_start", enabled=True)
+        dpg.show_item("win_ffb_probe")
+
+    def _exec_ffb_probe(self):
+        dpg.configure_item("btn_probe_start", enabled=False)
+        dpg.set_value("txt_probe_status", "Status: Running...")
+        
+        def probe_wrapper():
+            def feedback_cb(name, msg):
+                self._probe_feedback_result = None
+                self._probe_feedback_event.clear()
+                
+                # Update UI to ask user
+                dpg.set_value("txt_probe_feedback_msg", msg)
+                dpg.configure_item("group_probe_feedback", show=True)
+                
+                # Wait for user input
+                self._probe_feedback_event.wait()
+                
+                dpg.configure_item("group_probe_feedback", show=False)
+                return self._probe_feedback_result
+
+            # Connect engine's HWP log callback to our UI
+            def ui_hwp_log(msg):
+                curr = dpg.get_value("txt_probe_log")
+                if curr == "Waiting to start...":
+                    curr = ""
+                dpg.set_value("txt_probe_log", f"{curr}\n{msg}")
+            
+            engine._probe_log_callback = ui_hwp_log
+            
+            try:
+                report = engine.run_hardware_effects_probe(feedback_callback=feedback_cb)
+                
+                # Finalize UI
+                dpg.set_value("txt_probe_status", "Status: Completed")
+                dpg.set_value("progress_probe", 1.0)
+                dpg.configure_item("group_probe_results", show=True)
+                dpg.configure_item("group_probe_controls", show=False)
+                
+                rec = report.get("recommendation", "N/A")
+                if "tests" in report and "sine" in report["tests"]:
+                     rec = f"Sine Status: {report['tests']['sine']}"
+                
+                # Use engine's cached result for better recommendation display
+                last_res = engine.last_probe_result
+                dpg.set_value("txt_probe_recommendation", f"Recommendation: {last_res.get('recommendation', 'N/A')}")
+                
+            except Exception as e:
+                self.log(f"Probe Error: {e}")
+                ui_hwp_log(f"HWP: Probe Error: {e}")
+            finally:
+                engine._probe_log_callback = None
+
+        self._probe_thread = threading.Thread(target=probe_wrapper, daemon=True)
+        self._probe_thread.start()
+
+    def _on_probe_feedback(self, result: str):
+        self._probe_feedback_result = result
+        self._probe_feedback_event.set()
+
+    def _close_ffb_probe(self):
+        dpg.hide_item("win_ffb_probe")
+        # Save report automatically
+        engine.diag_export_report("fedit_ffb_report.txt")
+        self.log("FFB Probe Completed. Report saved to fedit_ffb_report.txt")
+        
+        # Apply recommendation global default? 
+        # For now, we'll just log it. The user can see it in clips.
+        rec = engine.recommendation_hw_sine
+        self.log(f"Global Recommendation: {'HARDWARE' if rec else 'SOFTWARE'} SINE")
+
     # --- Torque Telemetry ---
     def calculate_current_force(self):
         """Calculates theoretical total force output at current time."""
@@ -999,6 +1095,8 @@ class FeditNativeApp:
             dpg.configure_item("btn_play", label="Play")
             engine.stop_effect() # Stop all
             self.log_api("stop_effect", {"scope": "all"})
+            if dpg.does_item_exist("status_fallback"):
+                dpg.configure_item("status_fallback", show=False)
             
             # Reset valid states (HEAD)
             for k in self.track_states:
@@ -1025,6 +1123,8 @@ class FeditNativeApp:
         # Reset effect states
         engine.stop_effect()
         self.log_api("stop_effect", {"scope": "all"})
+        if dpg.does_item_exist("status_fallback"):
+            dpg.configure_item("status_fallback", show=False)
         for k in self.track_states:
             self.track_states[k] = {
                 'effect_id': -1,
@@ -1582,6 +1682,18 @@ class FeditNativeApp:
 
             if self.sequencer.is_playing: self.process_sequencer_logic()
             
+            # --- Diagnostic Freeze Test ---
+            # Integrated Freeze: triggered once when a HW effect starts
+            if getattr(self, '_should_trigger_freeze_now', False):
+                 self._should_trigger_freeze_now = False
+                 self.log("Built-in Freeze Test: Sleeping 1s (PC update thread paused)...")
+                 time.sleep(1.0)
+            
+            # Manual Mode: continuous freeze if active (affects both HW and SW updates)
+            elif self.freeze_test_active and self.sequencer.is_playing:
+                 self.log("Manual Freeze Loop: Sleeping 0.5s...")
+                 time.sleep(0.5)
+            
             # Update Telemetry
             force, is_active = self.calculate_current_force()
             dpg.set_value("force_gauge", force)
@@ -2009,7 +2121,7 @@ class FeditNativeApp:
 
                 # Build descriptor for engine.play_descriptor
                 type_map = {
-                    "Sine": "sine",
+                    "Sine": "periodic_sine" if not current_clip.use_software_sine else "software_sine_stream",
                     "Square": "square",
                     "Triangle": "triangle",
                     "SawtoothUp": "sawtoothup",
@@ -2023,7 +2135,7 @@ class FeditNativeApp:
                     "Friction": "friction",
                     "LeftRight": "leftright",
                 }
-                tkey = type_map.get(current_clip.type, "sine")
+                tkey = type_map.get(current_clip.type, "periodic_sine" if not current_clip.use_software_sine else "software_sine_stream")
 
                 direction_mode = (current_clip.direction_mode or "Polar").lower()
                 direction = {}
@@ -2059,15 +2171,21 @@ class FeditNativeApp:
                         "fade_level": 0,
                     },
                     "use_software_sine": current_clip.use_software_sine,
+                    "allow_fallback": current_clip.use_software_sine, # Force HW if not using SW sine
                 }
 
-                # Log actual effect type: software mode uses CONSTANT with oscillator, hardware uses SINE
-                actual_type = "constant (oscillator)" if current_clip.use_software_sine else desc["type"]
+                # Log actual effect type: use explicit diagnostic naming
+                actual_type = tkey
                 log_desc = {**desc, "type": actual_type}
                 self.log_api("play_descriptor", log_desc)
                 
                 # ASYNC: Queue the effect start instead of executing synchronously
                 engine.queue_effect_start(desc, t_idx, current_clip.id, -1)
+                
+                # --- Built-in Freeze Test Trigger ---
+                # Trigger freeze for both HW and SW modes if diagnostic test is active
+                if self.freeze_test_active:
+                     self._should_trigger_freeze_now = True
                 # Note: We don't get the effect_id back immediately anymore since it's queued
                 # The effect will be created when the event is processed
                 new_id = -1  # Placeholder - actual ID will be set by event handler
@@ -2093,6 +2211,12 @@ class FeditNativeApp:
                         eff_id = async_eff_id
                         state['effect_id'] = eff_id
                         state['creation_pending'] = False
+                        
+                        if eff_id == -1 and not current_clip.use_software_sine:
+                            self.log(f"ERROR: HW Effect creation FAILED for Clip '{current_clip.name or current_clip.type}'. MODE: STRICT HW. No playback.")
+                            # Force reset state so we don't spam errors
+                            state['effect_id'] = -1
+                            state['creation_pending'] = False
                 
                 if current_clip and eff_id != -1:
                     # Update parameters if needed (Software Sweep)
@@ -3182,6 +3306,16 @@ class FeditNativeApp:
                             dpg.add_menu_item(label="Classic", check=True, tag="menu_theme_Classic", callback=lambda: self.apply_theme("Classic"))
                             dpg.add_menu_item(label="Dark Mode", check=True, tag="menu_theme_Dark Mode", callback=lambda: self.apply_theme("Dark Mode"))
                             dpg.add_menu_item(label="Retro", check=True, tag="menu_theme_Retro", callback=lambda: self.apply_theme("Retro"))
+ 
+                         dpg.add_button(label="Diagnose", tag="btn_diag_menu")
+                         with dpg.popup("btn_diag_menu", mousebutton=dpg.mvMouseButton_Left):
+                            dpg.add_menu_item(label="Hardware Effects Probe...", callback=self.start_ffb_probe)
+                            dpg.add_menu_item(label="Force HW Periodic Test", callback=self.run_diag_test)
+                            dpg.add_menu_item(label="Export Capability Report", callback=lambda: engine.diag_export_report("fedit_ffb_report.txt"))
+                            dpg.add_separator()
+                            dpg.add_menu_item(label="Freeze Test Mode", check=True, tag="menu_freeze_test", 
+                                             default_value=self.freeze_test_active, 
+                                             callback=lambda s, v: setattr(self, 'freeze_test_active', v))
 
                          dpg.add_button(label="About", callback=lambda: dpg.configure_item("win_about", show=True))
                          
@@ -3190,6 +3324,7 @@ class FeditNativeApp:
                          dpg.add_button(label="Scan", callback=self.scan_devices)
                          dpg.add_button(label="Connect", callback=self.connect_callback)
                          dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                         dpg.add_text(" (SOFTWARE FALLBACK)", tag="status_fallback", color=(255, 200, 0), show=False)
                          dpg.add_spacer(width=15)
                          dpg.add_text("Rate:", color=(180, 180, 180))
                          dpg.add_input_int(tag="poll_rate_input", width=50, default_value=500, min_value=10, max_value=1000, min_clamped=True, max_clamped=True, step=0, step_fast=0, callback=self._on_poll_rate_changed)
@@ -3239,6 +3374,39 @@ class FeditNativeApp:
                 dpg.add_button(label="Close", width=100, callback=lambda: dpg.hide_item("win_about"))
                 
             dpg.bind_item_theme("win_about", theme_about)
+
+            # Hardware Effects Probe Modal
+            with dpg.window(tag="win_ffb_probe", label="FFB Hardware Effects Probe", width=600, height=500, modal=True, show=False, pos=[340, 150], no_resize=False):
+                dpg.add_text("This probe will test your device's hardware FFB capabilities.")
+                dpg.add_text("Please keep your hands ON the wheel/device but be prepared for movement.")
+                dpg.add_spacer(height=10)
+                
+                dpg.add_text("Status: Idle", tag="txt_probe_status")
+                dpg.add_progress_bar(tag="progress_probe", width=-1, default_value=0.0)
+                
+                dpg.add_spacer(height=10)
+                with dpg.child_window(tag="child_probe_log", height=200, border=True):
+                    dpg.add_text("Waiting to start...", tag="txt_probe_log", wrap=570)
+                
+                dpg.add_spacer(height=10)
+                with dpg.group(tag="group_probe_feedback", show=False):
+                    dpg.add_text("INTERACTIVE TEST:", color=(255, 200, 0))
+                    dpg.add_text(tag="txt_probe_feedback_msg", wrap=570)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="YES, I feel it", width=120, callback=lambda: self._on_probe_feedback("YES"))
+                        dpg.add_button(label="NO, I don't", width=120, callback=lambda: self._on_probe_feedback("NO"))
+                        dpg.add_button(label="UNSURE", width=120, callback=lambda: self._on_probe_feedback("UNSURE"))
+                
+                dpg.add_spacer(height=10)
+                with dpg.group(horizontal=True, tag="group_probe_controls"):
+                    dpg.add_button(label="Start Probe", tag="btn_probe_start", width=120, callback=self._exec_ffb_probe)
+                    dpg.add_button(label="Cancel", width=100, callback=lambda: dpg.hide_item("win_ffb_probe"))
+                
+                with dpg.group(tag="group_probe_results", show=False):
+                    dpg.add_separator()
+                    dpg.add_text("PROBE RESULTS:", color=(100, 255, 100))
+                    dpg.add_text(tag="txt_probe_recommendation", color=(255, 255, 255))
+                    dpg.add_button(label="Close & Apply", width=150, callback=self._close_ffb_probe)
 
 
 

@@ -1,0 +1,50 @@
+=== Fedit 2.0 FFB Capability Report ===
+Generated: Mon Feb  2 16:17:30 2026
+
+--- Device Identity ---
+name: CONSPIT Ares
+vid: 3514
+pid: 0301
+serial: Unknown
+
+--- Hardware Effects Probe (HWP Logs) ---
+HWP: --- STARTING HARDWARE EFFECTS PROBE ---
+HWP: SDL version: 3.4.0
+HWP: Platform: Windows
+HWP: Device: CONSPIT Ares
+HWP: Haptic open path: FromJoystick
+HWP: SDL_HapticQuery caps=0x000D07FF plus decoded flags:
+HWP: CONSTANT=1 SINE=1 SPRING=1 DAMPER=1 FRICTION=1 CUSTOM=0
+HWP: SDL_InitHaptic(haptic) rc=0 err=""
+HWP: SDL_SetHapticGain rc=0 err=""
+HWP: SDL_StopHapticEffects rc=0 err=""
+HWP: TEST effect=CONSTANT advertised=1
+HWP: Params: level=15000, length=4000ms, direction=CARTESIAN(1,0,0)
+HWP: NewEffect(effect=CONSTANT) ...
+HWP: NewEffect(effect=CONSTANT) id=2 rc=0 err=""
+HWP: RunEffect(effect=CONSTANT) rc=0 err=""
+HWP: FreezeTest(effect=CONSTANT) sleeping=2000ms (no updates)
+HWP: FreezeTest(effect=CONSTANT) user=YES
+HWP: StopEffect(effect=CONSTANT) rc=0 err=""
+HWP: DestroyEffect(effect=CONSTANT) destroyed
+HWP: RESULT effect=CONSTANT status=OK
+HWP: TEST effect=SINE advertised=1
+HWP: Params: magnitude=15000, period=500ms, offset=0, phase=0, length=4000ms, direction=CARTESIAN(1,0,0)
+HWP: NewEffect(effect=SINE) ...
+HWP: NewEffect(effect=SINE) id=2 rc=0 err=""
+HWP: RunEffect(effect=SINE) rc=0 err=""
+HWP: FreezeTest(effect=SINE) sleeping=2000ms (no updates)
+HWP: FreezeTest(effect=SINE) user=YES
+HWP: StopEffect(effect=SINE) rc=0 err=""
+HWP: DestroyEffect(effect=SINE) destroyed
+HWP: RESULT effect=SINE status=OK
+HWP: CONCLUSION hardware_sine=OK reason=Final
+
+--- Probe Summary ---
+Recommendation: Hardware Wave supported
+Sine Conclusion: OK
+
+--- Engine Stats ---
+Target Update Rate: 431 Hz
+Measured USB Rate: 431 Hz
+Global Recommendation (HW Sine): True
