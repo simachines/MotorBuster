@@ -1835,7 +1835,7 @@ class HapticController:
             
             # Small sleep to prevent CPU spin
             time.sleep(0.0001)
-    def run_hardware_effects_probe(self, feedback_callback=None) -> Dict:
+    def run_hardware_effects_probe(self, feedback_callback=None, progress_callback=None) -> Dict:
         """
         Runs a comprehensive hardware effects probe with strict HWP logging.
         feedback_callback: function(test_name, message) -> str ("YES", "NO", "UNSURE")
@@ -1908,15 +1908,15 @@ class HapticController:
         conclusion_sine = "NOT_ADVERTISED"
 
         # Section C/D: Strict Effect Trace
-        def test_effect(name, sdl_type, is_periodic=True):
+        def test_effect(name, sdl_type, is_periodic=True, test_index=1, test_total=1):
             nonlocal conclusion_sine
-            hwp_log(f"TEST effect={name.upper()} advertised={'1' if caps & sdl_type else '0'}")
+            hwp_log(f"TEST {test_index}/{test_total} effect={name.upper()} advertised={'1' if caps & sdl_type else '0'}")
             if not (caps & sdl_type):
                 return "NOT_ADVERTISED"
             
             # Parameters
             if is_periodic:
-                mag, period, offset, phase, length = 15000, 500, 0, 0, 4000
+                mag, period, offset, phase, length = 3277, 500, 0, 0, 4000
                 hwp_log(f"Params: magnitude={mag}, period={period}ms, offset={offset}, phase={phase}, length={length}ms, direction=CARTESIAN(1,0,0)")
                 effect = sdl_haptic.SDL_HapticEffect()
                 ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
@@ -1927,8 +1927,10 @@ class HapticController:
                 effect.periodic.period = period
                 effect.periodic.magnitude = mag
                 effect.periodic.length = length
+                effect.periodic.attack_length = 0
+                effect.periodic.fade_length = 0
             else:
-                level, length = 15000, 4000
+                level, length = 3277, 4000
                 hwp_log(f"Params: level={level}, length={length}ms, direction=CARTESIAN(1,0,0)")
                 effect = sdl_haptic.SDL_HapticEffect()
                 ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
@@ -1938,6 +1940,8 @@ class HapticController:
                 effect.constant.direction.dir[0] = 1
                 effect.constant.level = level
                 effect.constant.length = length
+                effect.constant.attack_length = 0
+                effect.constant.fade_length = 0
 
             # 1) Create effect
             hwp_log(f"NewEffect(effect={name.upper()}) ...")
@@ -1963,31 +1967,46 @@ class HapticController:
                 sdl_haptic.SDL_DestroyHapticEffect(self.haptic, eff_id)
                 return "RUN_FAILED"
 
-            # 3) Freeze proof
-            hwp_log(f"FreezeTest(effect={name.upper()}) sleeping=2000ms (no updates)")
+            # 3) Signal + Block (simplified)
+            signal_s = 2
+            block_s = 3
+            hwp_log(f"Signal(effect={name.upper()}) duration={signal_s}s")
+            for remaining in range(signal_s, 0, -1):
+                if progress_callback:
+                    progress_callback(name.upper(), "SIGNAL", remaining, test_index, test_total)
+                time.sleep(1.0)
+
+            hwp_log(f"Block(effect={name.upper()}) duration={block_s}s (no updates)")
             
             # CRITICAL: If a software wave is running in the background, we must pause it
             # so the "Freeze" is truly silent across all threads.
             was_osc_active = self._oscillator_active
             self._oscillator_active = False
-            
-            time.sleep(2.0)
+            for remaining in range(block_s, 0, -1):
+                if progress_callback:
+                    progress_callback(name.upper(), "BLOCK", remaining, test_index, test_total)
+                time.sleep(1.0)
             
             self._oscillator_active = was_osc_active
-            
-            user_res = "UNSURE"
-            if feedback_callback:
-                user_res = feedback_callback(name.upper(), f"During the 2s wait, did {name.upper()} force continue?")
-            hwp_log(f"FreezeTest(effect={name.upper()}) user={user_res}")
 
-            # 4) Stop + destroy
+            # Stop immediately after 2s signal + 3s block (total 5s)
             sdl_error.SDL_ClearError()
             stop_rc = sdl_haptic.SDL_StopHapticEffect(self.haptic, eff_id)
             stop_err = sdl_error.SDL_GetError().decode("utf-8") if not stop_rc else ""
             hwp_log(f"StopEffect(effect={name.upper()}) rc={0 if stop_rc else -1} err=\"{stop_err}\"")
-            
             sdl_haptic.SDL_DestroyHapticEffect(self.haptic, eff_id)
             hwp_log(f"DestroyEffect(effect={name.upper()}) destroyed")
+            eff_id = -1
+
+            if progress_callback:
+                progress_callback(name.upper(), "DONE", 0, test_index, test_total)
+            
+            user_res = "UNSURE"
+            if feedback_callback:
+                user_res = feedback_callback(name.upper(), f"During the 3s block, did {name.upper()} force continue?")
+            hwp_log(f"FreezeTest(effect={name.upper()}) user={user_res}")
+
+            # 4) Stop + destroy (already handled after block)
 
             status = "OK"
             if user_res == "NO":
@@ -1998,8 +2017,15 @@ class HapticController:
             hwp_log(f"RESULT effect={name.upper()} status={status}")
             return status
 
-        report["tests"]["constant"] = test_effect("Constant", sdl_haptic.SDL_HAPTIC_CONSTANT, False)
-        conclusion_sine = test_effect("Sine", sdl_haptic.SDL_HAPTIC_SINE, True)
+        tests = [
+            ("Constant", sdl_haptic.SDL_HAPTIC_CONSTANT, False),
+            ("Sine", sdl_haptic.SDL_HAPTIC_SINE, True),
+        ]
+        for idx, (name, sdl_type, is_periodic) in enumerate(tests, start=1):
+            result = test_effect(name, sdl_type, is_periodic, idx, len(tests))
+            report["tests"][name.lower()] = result
+            if name.lower() == "sine":
+                conclusion_sine = result
 
         # Section E: Conclusion
         hwp_log(f"CONCLUSION hardware_sine={conclusion_sine} reason=Final")

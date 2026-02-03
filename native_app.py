@@ -950,7 +950,7 @@ class FeditNativeApp:
         # Actually, let's let the engine handle the 'PC freeze' simulation.
         threading.Thread(target=engine.diag_test_hw_sine, daemon=True).start()
 
-    # --- Hardware Effects Probe ---
+    # --- Hardware Effects Capability Mode ---
     def start_ffb_probe(self):
         dpg.set_value("txt_probe_status", "Status: Ready")
         dpg.set_value("progress_probe", 0.0)
@@ -988,9 +988,21 @@ class FeditNativeApp:
                 dpg.set_value("txt_probe_log", f"{curr}\n{msg}")
             
             engine._probe_log_callback = ui_hwp_log
+
+            def progress_cb(effect_name, phase, remaining_s, test_idx=1, test_total=1):
+                label = f"Test {test_idx}/{test_total}: {effect_name}"
+                if phase == "DONE":
+                    dpg.set_value("txt_probe_status", f"Status: {label} complete")
+                    ui_hwp_log(f"{label} complete")
+                else:
+                    dpg.set_value("txt_probe_status", f"Status: {label} {phase} ({remaining_s}s)")
+                    ui_hwp_log(f"{label} {phase}: {remaining_s}s remaining")
             
             try:
-                report = engine.run_hardware_effects_probe(feedback_callback=feedback_cb)
+                report = engine.run_hardware_effects_probe(
+                    feedback_callback=feedback_cb,
+                    progress_callback=progress_cb,
+                )
                 
                 # Finalize UI
                 dpg.set_value("txt_probe_status", "Status: Completed")
@@ -3210,6 +3222,32 @@ class FeditNativeApp:
 
         
         dpg.bind_theme(global_theme)
+
+        with dpg.theme(tag="theme_title_bar_bg"):
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 4, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 4, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 6, category=dpg.mvThemeCat_Core)
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, ui["menu_bg"])
+
+        if dpg.does_item_exist("title_bar"):
+            dpg.bind_item_theme("title_bar", "theme_title_bar_bg")
+
+        with dpg.theme(tag="theme_title_controls_box"):
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, ui["menu_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, ui["border"])
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 0, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 3, 0, category=dpg.mvThemeCat_Core)
+            with dpg.theme_component(dpg.mvWindowAppItem):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, ui["menu_bg"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, ui["border"])
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 4, 4, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 3, 0, category=dpg.mvThemeCat_Core)
+
+        if dpg.does_item_exist("title_controls_box"):
+            dpg.bind_item_theme("title_controls_box", "theme_title_controls_box")
         
         # Trigger redraw if needed
         if hasattr(self, 'sequencer'):
@@ -3262,10 +3300,29 @@ class FeditNativeApp:
 
         with dpg.theme(tag="theme_no_padding"):
             with dpg.theme_component(dpg.mvAll):
-                # WindowPadding y=6 to vertically center the title bar contents (avoids sticking to top)
-                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 8, category=dpg.mvThemeCat_Core)
+                # WindowPadding y=0 to avoid extra gray area below the title bar
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 0, category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 4, 3, category=dpg.mvThemeCat_Core) # Restore default frame padding for buttons
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 4, category=dpg.mvThemeCat_Core)
+
+        with dpg.theme(tag="theme_menu_popup"):
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 6, category=dpg.mvThemeCat_Core)
+
+        with dpg.theme(tag="theme_title_controls"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (0, 0, 0, 0))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (80, 80, 90, 80))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (120, 120, 140, 120))
+                dpg.add_theme_color(dpg.mvThemeCol_Border, (0, 0, 0, 0))
+                dpg.add_theme_style(dpg.mvStyleVar_ButtonTextAlign, 0.5, 0.45, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 1, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 0, category=dpg.mvThemeCat_Core)
+
+        with dpg.theme(tag="theme_title_combo"):
+            with dpg.theme_component(dpg.mvCombo):
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 3, 6, category=dpg.mvThemeCat_Core)
 
         with dpg.window(tag="Main"):
             dpg.bind_item_theme("Main", "theme_no_padding")
@@ -3287,75 +3344,75 @@ class FeditNativeApp:
             except Exception as e:
                 print(f"Failed to load icon texture: {e}")
 
-            # Custom Header
-            # Custom Header (Table Layout)
-            with dpg.table(tag="custom_title_bar", header_row=False, borders_innerH=False, borders_innerV=False, 
-                           borders_outerH=False, borders_outerV=False, scrollY=False, width=-1):
-                dpg.add_table_column(init_width_or_weight=1.0)
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=120)
+            # Custom Header (Single Bar + Right Controls Box)
+            with dpg.child_window(tag="title_bar", width=-1, height=32, border=True, no_scrollbar=True, no_scroll_with_mouse=True, menubar=True):
+                with dpg.menu_bar():
+                    dpg.add_spacer(width=8)
 
-                with dpg.table_row():
-                    with dpg.group(horizontal=True):
-                         dpg.add_spacer(width=8) 
-                         
-                         if texture_loaded:
-                             dpg.add_image("icon_texture", width=20, height=20) 
-                         
-                         dpg.add_spacer(width=5)
-                         dpg.add_text("FFeditor", color=(200, 200, 200))
-                         dpg.add_spacer(width=20)
-                         
-                         dpg.add_button(label="File", tag="btn_file_menu")
-                         with dpg.popup("btn_file_menu", mousebutton=dpg.mvMouseButton_Left):
-                            dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
-                            dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
-                            dpg.add_separator()
-                            dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
+                    if texture_loaded:
+                        dpg.add_image("icon_texture", width=20, height=20)
 
-                         dpg.add_button(label="View", tag="btn_view_menu")
-                         with dpg.popup("btn_view_menu", mousebutton=dpg.mvMouseButton_Left):
-                            dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
-                            dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
-                            dpg.add_menu_item(label="Mouse Status", check=True, tag="menu_mouse_status", default_value=self._mouse_status_visible, callback=self._on_mouse_status_checkbox)
-                         
-                         dpg.add_button(label="Theme", tag="btn_theme_menu")
-                         with dpg.popup("btn_theme_menu", mousebutton=dpg.mvMouseButton_Left):
-                            dpg.add_menu_item(label="Classic", check=True, tag="menu_theme_Classic", callback=lambda: self.apply_theme("Classic"))
-                            dpg.add_menu_item(label="Dark Mode", check=True, tag="menu_theme_Dark Mode", callback=lambda: self.apply_theme("Dark Mode"))
-                            dpg.add_menu_item(label="Retro", check=True, tag="menu_theme_Retro", callback=lambda: self.apply_theme("Retro"))
- 
-                         dpg.add_button(label="Diagnose", tag="btn_diag_menu")
-                         with dpg.popup("btn_diag_menu", mousebutton=dpg.mvMouseButton_Left):
-                            dpg.add_menu_item(label="Hardware Effects Probe...", callback=self.start_ffb_probe)
-                            dpg.add_menu_item(label="Force HW Periodic Test", callback=self.run_diag_test)
-                            dpg.add_menu_item(label="Export Capability Report", callback=lambda: engine.diag_export_report("fedit_ffb_report.txt"))
-                            dpg.add_separator()
-                            dpg.add_menu_item(label="Freeze Test Mode", check=True, tag="menu_freeze_test", 
-                                             default_value=self.freeze_test_active, 
-                                             callback=lambda s, v: setattr(self, 'freeze_test_active', v))
+                    dpg.add_spacer(width=5)
+                    dpg.add_text("FFeditor", color=(200, 200, 200))
+                    dpg.add_spacer(width=20)
 
-                         dpg.add_button(label="About", callback=lambda: dpg.configure_item("win_about", show=True))
-                         
-                         dpg.add_spacer(width=10)
-                         dpg.add_combo(tag="device_combo", width=200, callback=self.on_device_selected)
-                         dpg.add_button(label="Scan", callback=self.scan_devices)
-                         dpg.add_button(label="Connect", callback=self.connect_callback)
-                         dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
-                         dpg.add_text(" (SOFTWARE FALLBACK)", tag="status_fallback", color=(255, 200, 0), show=False)
-                         dpg.add_spacer(width=15)
-                         dpg.add_text("Rate:", color=(180, 180, 180))
-                         dpg.add_input_int(tag="poll_rate_input", width=50, default_value=500, min_value=10, max_value=1000, min_clamped=True, max_clamped=True, step=0, step_fast=0, callback=self._on_poll_rate_changed)
-                         dpg.add_text("Hz", color=(180, 180, 180))
+                    with dpg.menu(label="File", tag="menu_file"):
+                        dpg.add_menu_item(label="Save Project", shortcut="(Ctrl+S)", callback=lambda: dpg.show_item("dlg_save"))
+                        dpg.add_menu_item(label="Open Project", shortcut="(Ctrl+O)", callback=lambda: dpg.show_item("dlg_load"))
+                        dpg.add_separator()
+                        dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
 
-                    with dpg.group(horizontal=True):
-                         b_min = dpg.add_button(label="—", width=34, height=28, callback=lambda: dpg.minimize_viewport())
-                         b_max = dpg.add_button(label="□", width=34, height=28, callback=self.toggle_maximize)
-                         b_close = dpg.add_button(label="×", width=34, height=28, callback=lambda: dpg.stop_dearpygui())
-                         
-                         if hasattr(self, 'font_large_icons'):
-                             dpg.bind_item_font(b_min, self.font_large_icons)
-                             dpg.bind_item_font(b_max, self.font_large_icons)
-                             dpg.bind_item_font(b_close, self.font_large_icons)
+                    with dpg.menu(label="View", tag="menu_view"):
+                        dpg.add_menu_item(label="Show Redlines", check=True, default_value=self.show_redlines, callback=self.toggle_redlines)
+                        dpg.add_menu_item(label="Wheel Graph", check=True, default_value=self._wheel_graph_visible, callback=self._on_wheel_graph_checkbox)
+                        dpg.add_menu_item(label="Mouse Status", check=True, tag="menu_mouse_status", default_value=self._mouse_status_visible, callback=self._on_mouse_status_checkbox)
+
+                    with dpg.menu(label="Theme", tag="menu_theme"):
+                        dpg.add_menu_item(label="Classic", check=True, tag="menu_theme_Classic", callback=lambda: self.apply_theme("Classic"))
+                        dpg.add_menu_item(label="Dark Mode", check=True, tag="menu_theme_Dark Mode", callback=lambda: self.apply_theme("Dark Mode"))
+                        dpg.add_menu_item(label="Retro", check=True, tag="menu_theme_Retro", callback=lambda: self.apply_theme("Retro"))
+
+                    with dpg.menu(label="Diagnose", tag="menu_diagnose"):
+                        dpg.add_menu_item(label="Hardware Effects Capability Mode...", callback=self.start_ffb_probe)
+                        dpg.add_menu_item(label="Quick HW Periodic Test", callback=self.run_diag_test)
+                        dpg.add_menu_item(label="Export Capability Report", callback=lambda: engine.diag_export_report("fedit_ffb_report.txt"))
+                        dpg.add_separator()
+                        dpg.add_menu_item(label="Freeze Test Mode", check=True, tag="menu_freeze_test",
+                                         default_value=self.freeze_test_active,
+                                         callback=lambda s, v: setattr(self, 'freeze_test_active', v))
+
+                    with dpg.menu(label="About", tag="menu_about"):
+                        dpg.add_menu_item(label="About FFeditor", callback=lambda: dpg.configure_item("win_about", show=True))
+
+                    dpg.bind_item_theme("menu_file", "theme_menu_popup")
+                    dpg.bind_item_theme("menu_view", "theme_menu_popup")
+                    dpg.bind_item_theme("menu_theme", "theme_menu_popup")
+                    dpg.bind_item_theme("menu_diagnose", "theme_menu_popup")
+                    dpg.bind_item_theme("menu_about", "theme_menu_popup")
+
+                    dpg.add_spacer(width=10)
+                    dpg.add_combo(tag="device_combo", width=280, callback=self.on_device_selected)
+                    dpg.add_button(label="Scan", callback=self.scan_devices)
+                    dpg.add_button(label="Connect", callback=self.connect_callback)
+                    dpg.add_text("Status: Disconnected", tag="status_text", color=(255, 100, 100))
+                    dpg.add_text(" (SOFTWARE FALLBACK)", tag="status_fallback", color=(255, 200, 0), show=False)
+                    dpg.add_spacer(width=15)
+                    dpg.add_text("Rate:", color=(180, 180, 180))
+                    dpg.add_input_int(tag="poll_rate_input", width=50, default_value=500, min_value=10, max_value=1000, min_clamped=True, max_clamped=True, step=0, step_fast=0, callback=self._on_poll_rate_changed)
+                    dpg.add_text("Hz", color=(180, 180, 180))
+
+            with dpg.child_window(tag="title_controls_box", pos=[0, 0], width=96, height=30,
+                                   border=True, no_scrollbar=True, no_scroll_with_mouse=True):
+                with dpg.group(horizontal=True):
+                    b_min = dpg.add_button(label="—", width=26, height=24, callback=lambda: dpg.minimize_viewport())
+                    b_max = dpg.add_button(label="□", width=26, height=24, callback=self.toggle_maximize)
+                    b_close = dpg.add_button(label="×", width=26, height=24, callback=lambda: dpg.stop_dearpygui())
+
+            dpg.bind_item_theme(b_min, "theme_title_controls")
+            dpg.bind_item_theme(b_max, "theme_title_controls")
+            dpg.bind_item_theme(b_close, "theme_title_controls")
+            dpg.bind_item_theme("device_combo", "theme_title_combo")
+
 
             dpg.add_separator()  
             # Spacing below title bar - Reduced to 0/minimal as requested
@@ -3392,9 +3449,9 @@ class FeditNativeApp:
                 
             dpg.bind_item_theme("win_about", theme_about)
 
-            # Hardware Effects Probe Modal
-            with dpg.window(tag="win_ffb_probe", label="FFB Hardware Effects Probe", width=600, height=500, modal=True, show=False, pos=[340, 150], no_resize=False):
-                dpg.add_text("This probe will test your device's hardware FFB capabilities.")
+            # Hardware Effects Capability Mode Modal
+            with dpg.window(tag="win_ffb_probe", label="Hardware Effects Capability Mode", width=600, height=500, modal=True, show=False, pos=[340, 150], no_resize=False):
+                dpg.add_text("This mode will test your device's hardware FFB capabilities.")
                 dpg.add_text("Please keep your hands ON the wheel/device but be prepared for movement.")
                 dpg.add_spacer(height=10)
                 
@@ -3421,7 +3478,7 @@ class FeditNativeApp:
                 
                 with dpg.group(tag="group_probe_results", show=False):
                     dpg.add_separator()
-                    dpg.add_text("PROBE RESULTS:", color=(100, 255, 100))
+                    dpg.add_text("RESULTS:", color=(100, 255, 100))
                     dpg.add_text(tag="txt_probe_recommendation", color=(255, 255, 255))
                     dpg.add_button(label="Close & Apply", width=150, callback=self._close_ffb_probe)
 
@@ -3549,6 +3606,29 @@ class FeditNativeApp:
     def toggle_redlines(self, sender, app_data, user_data=None):
         self.show_redlines = bool(app_data)
 
+    def _on_title_menu_button(self, sender, app_data, user_data):
+        popup_tag = user_data
+        all_popups = [
+            "popup_file_menu",
+            "popup_view_menu",
+            "popup_theme_menu",
+            "popup_diag_menu",
+            "popup_about_menu",
+        ]
+        for tag in all_popups:
+            if tag != popup_tag and dpg.does_item_exist(tag):
+                dpg.configure_item(tag, show=False)
+        if not dpg.does_item_exist(popup_tag):
+            return
+        try:
+            min_x, min_y = dpg.get_item_rect_min(sender)
+            max_x, max_y = dpg.get_item_rect_max(sender)
+            dpg.set_item_pos(popup_tag, (min_x, max_y))
+            dpg.configure_item(popup_tag, show=True)
+            dpg.focus_item(popup_tag)
+        except Exception:
+            return
+
     
     # --- Custom Title Bar Logic ---
     def _render_custom_title_bar(self):
@@ -3642,12 +3722,7 @@ class FeditNativeApp:
     def _update_title_bar_layout(self):
         """Calculates spacer width to push window controls to right edge."""
         try:
-             vp_width = dpg.get_viewport_width()
-             # Reserve enough space for Left Content (Icon/Menu) + Right Content (Buttons)
-             # Set to 930 to position buttons correctly (approx 1273px edge)
-             fixed_content_width = 930
-             new_spacer_width = max(10, vp_width - fixed_content_width)
-             dpg.set_item_width("title_bar_spacer", new_spacer_width)
+            return
         except: pass
 
     def _update_resize_cursor_and_drag(self):
@@ -4026,6 +4101,21 @@ class FeditNativeApp:
                 # --- 4. UI Loop (60Hz) ---
                 if should_run_ui:
                     # Update Visual Elements
+                    self._update_title_bar_layout()
+                    if dpg.does_item_exist("title_controls_box") and dpg.does_item_exist("title_bar"):
+                        try:
+                            bar_pos_x, bar_pos_y = dpg.get_item_pos("title_bar")
+                            bar_w, bar_h = dpg.get_item_rect_size("title_bar")
+                            box_w = dpg.get_item_rect_size("title_controls_box")[0]
+                            box_h = max(24, int(bar_h) - 2)
+                            pos_x = max(0, int(bar_pos_x + bar_w - box_w - 4))
+                            pos_y = max(0, int(bar_pos_y + bar_h - box_h - 1))
+                            dpg.configure_item("title_controls_box", height=box_h)
+                            dpg.set_item_pos("title_controls_box", (pos_x, pos_y))
+                            dpg.configure_item("title_controls_box", show=True)
+                            dpg.bring_item_to_front("title_controls_box")
+                        except Exception:
+                            pass
                     dpg.set_value("time_display", f"{self.sequencer.current_time:.2f}s")
                     
                     # Only re-render timeline if it's visible (optimization)
