@@ -3225,8 +3225,8 @@ class FeditNativeApp:
 
         with dpg.theme(tag="theme_title_bar_bg"):
             with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 4, category=dpg.mvThemeCat_Core)
-                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 4, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 6, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 6, category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 6, category=dpg.mvThemeCat_Core)
             with dpg.theme_component(dpg.mvChildWindow):
                 dpg.add_theme_color(dpg.mvThemeCol_ChildBg, ui["menu_bg"])
@@ -3322,7 +3322,7 @@ class FeditNativeApp:
 
         with dpg.theme(tag="theme_title_combo"):
             with dpg.theme_component(dpg.mvCombo):
-                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 3, 6, category=dpg.mvThemeCat_Core)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 3, 8, category=dpg.mvThemeCat_Core)
 
         with dpg.window(tag="Main"):
             dpg.bind_item_theme("Main", "theme_no_padding")
@@ -3345,7 +3345,7 @@ class FeditNativeApp:
                 print(f"Failed to load icon texture: {e}")
 
             # Custom Header (Single Bar + Right Controls Box)
-            with dpg.child_window(tag="title_bar", width=-1, height=32, border=True, no_scrollbar=True, no_scroll_with_mouse=True, menubar=True):
+            with dpg.child_window(tag="title_bar", width=-1, height=36, border=True, no_scrollbar=True, no_scroll_with_mouse=True, menubar=True):
                 with dpg.menu_bar():
                     dpg.add_spacer(width=8)
 

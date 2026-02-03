@@ -1,12 +1,12 @@
 {
-    "width": 1589,
-    "height": 967,
-    "x": 246,
-    "y": 430,
+    "width": 1570,
+    "height": 1050,
+    "x": 286,
+    "y": 703,
     "maximized": false,
     "theme": "Dark Mode",
     "show_redlines": true,
     "wheel_graph_visible": true,
-    "mouse_status_visible": false,
+    "mouse_status_visible": true,
     "wheel_graph_gain": 1.0
 }
