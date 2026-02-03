@@ -1,4 +1,5 @@
-('c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\FFeditor.pkg',
+('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+ 'FFeditor\\fedit_2\\build\\FFeditor\\FFeditor.pkg',
  {'BINARY': True,
   'DATA': True,
   'EXECUTABLE': True,
@@ -10,42 +11,54 @@
   'SYMLINK': False},
  [('pyi-contents-directory _internal', '', 'OPTION'),
   ('PYZ-00.pyz',
-   'c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\PYZ-00.pyz',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\build\\FFeditor\\PYZ-00.pyz',
    'PYZ'),
   ('struct',
-   'c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\localpycs\\struct.pyc',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\build\\FFeditor\\localpycs\\struct.pyc',
    'PYMODULE'),
   ('pyimod01_archive',
-   'c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\localpycs\\pyimod01_archive.pyc',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\build\\FFeditor\\localpycs\\pyimod01_archive.pyc',
    'PYMODULE'),
   ('pyimod02_importers',
-   'c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\localpycs\\pyimod02_importers.pyc',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\build\\FFeditor\\localpycs\\pyimod02_importers.pyc',
    'PYMODULE'),
   ('pyimod03_ctypes',
-   'c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\localpycs\\pyimod03_ctypes.pyc',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\build\\FFeditor\\localpycs\\pyimod03_ctypes.pyc',
    'PYMODULE'),
   ('pyimod04_pywin32',
-   'c:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\build\\FFeditor\\localpycs\\pyimod04_pywin32.pyc',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\build\\FFeditor\\localpycs\\pyimod04_pywin32.pyc',
    'PYMODULE'),
   ('pyiboot01_bootstrap',
-   'C:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
    'PYSOURCE'),
   ('pyi_rth_inspect',
-   'E:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
    'PYSOURCE'),
   ('pyi_rth_pkgutil',
-   'E:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
    'PYSOURCE'),
   ('pyi_rth_multiprocessing',
-   'E:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
    'PYSOURCE'),
   ('pyi_rth_setuptools',
-   'E:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_setuptools.py',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_setuptools.py',
    'PYSOURCE'),
   ('native_app',
-   'E:\\Users\\ernes\\.gemini\\antigravity\\scratch\\fedit_2\\native_app.py',
+   'C:\\Users\\nishi\\OneDrive\\Desktop\\VScode '
+   'FFeditor\\fedit_2\\native_app.py',
    'PYSOURCE')],
- 'python312.dll',
+ 'python313.dll',
  True,
  False,
  False,

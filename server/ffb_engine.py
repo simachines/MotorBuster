@@ -193,6 +193,25 @@ class HapticController:
         self.hw_sine_active = False # Flag to prevent mixing
         self.device_caps_log = [] # Store capabilities for export
         self.device_identity = {} # Store VID/PID etc
+        self._oscillator_paused = False
+        self._oscillator_active_before_pause = False
+        self._transport_blocked = False
+        self._transport_target_blocked = False
+        self._transport_window_state = None
+        self._transport_window_start_ms = 0
+        self._transport_window_start_counts = None
+        self._transport_window_count = 0
+        self._osc_verbose_log = False
+        self._osc_last_level = 0
+        self._osc_seq = 0
+        self._osc_xor = 0
+        self._osc_last_tick_ms = 0
+        self._osc_stats = {
+            "generated": 0,
+            "blocked": 0,
+            "sent": 0,
+            "device_writes": 0,
+        }
         
     def init_sdl(self):
         flags = (
@@ -288,6 +307,25 @@ class HapticController:
         self._stop_oscillator_event = threading.Event()
         self._osc_params = {}
         self._oscillator_active = False  # Track if oscillator should run at full speed
+        self._oscillator_paused = False
+        self._oscillator_active_before_pause = False
+        self._transport_blocked = False
+        self._transport_target_blocked = False
+        self._transport_window_state = None
+        self._transport_window_start_ms = 0
+        self._transport_window_start_counts = None
+        self._transport_window_count = 0
+        self._osc_verbose_log = False
+        self._osc_last_level = 0
+        self._osc_seq = 0
+        self._osc_xor = 0
+        self._osc_last_tick_ms = 0
+        self._osc_stats = {
+            "generated": 0,
+            "blocked": 0,
+            "sent": 0,
+            "device_writes": 0,
+        }
         self._device_version += 1  # Increment to invalidate old oscillator threads
         self.hw_sine_active = False
 
@@ -1466,6 +1504,25 @@ class HapticController:
     # --- Software Oscillator ---
     def _stop_oscillator(self):
         self._oscillator_active = False  # Trigger idle sleep mode
+        self._oscillator_paused = False
+        self._oscillator_active_before_pause = False
+        self._transport_blocked = False
+        self._transport_target_blocked = False
+        self._transport_window_state = None
+        self._transport_window_start_ms = 0
+        self._transport_window_start_counts = None
+        self._transport_window_count = 0
+        self._osc_verbose_log = False
+        self._osc_last_level = 0
+        self._osc_seq = 0
+        self._osc_xor = 0
+        self._osc_last_tick_ms = 0
+        self._osc_stats = {
+            "generated": 0,
+            "blocked": 0,
+            "sent": 0,
+            "device_writes": 0,
+        }
         
         # Zero the level before stopping to prevent force spike
         if hasattr(self, '_cached_effect') and self.haptic and self.effect_id != -1:
@@ -1480,6 +1537,76 @@ class HapticController:
             self._oscillator_thread.join()
             self._oscillator_thread = None
             print("[OSC] Thread stopped")
+
+    def set_oscillator_pause(self, paused: bool):
+        """Pause/resume software oscillator updates without destroying the thread."""
+        if paused:
+            if not self._oscillator_paused:
+                self._oscillator_active_before_pause = self._oscillator_active
+            self._oscillator_paused = True
+            self._oscillator_active = False
+        else:
+            if self._oscillator_paused:
+                self._oscillator_active = bool(self._oscillator_active_before_pause)
+            self._oscillator_paused = False
+
+    def set_oscillator_transport_blocked(self, blocked: bool):
+        """Request transport block/unblock while keeping generation running."""
+        self._transport_target_blocked = bool(blocked)
+
+    def _transport_snapshot_counts(self) -> dict:
+        return {
+            "generated": self._osc_stats.get("generated", 0),
+            "blocked": self._osc_stats.get("blocked", 0),
+            "sent": self._osc_stats.get("sent", 0),
+            "device_writes": self._osc_stats.get("device_writes", 0),
+            "osc_seq": self._osc_seq,
+            "osc_xor": self._osc_xor,
+            "osc_last_tick_ms": self._osc_last_tick_ms,
+        }
+
+    def _transport_log_window_start(self, state: str, now_ms: int):
+        return
+
+    def _transport_log_window_end(self, state: str, now_ms: int, start_ms: int, start_counts: dict):
+        from datetime import datetime
+        duration_ms = max(1, now_ms - start_ms)
+        duration_s = duration_ms / 1000.0
+        end_counts = self._transport_snapshot_counts()
+        osc_seq_start = start_counts.get("osc_seq", 0)
+        osc_seq_end = end_counts.get("osc_seq", 0)
+        gen_ticks = osc_seq_end - osc_seq_start
+        gen_rate_hz = gen_ticks / duration_s if duration_s > 0 else 0.0
+        samples_enqueued = gen_ticks
+        samples_blocked = end_counts["blocked"] - start_counts["blocked"]
+        transport_writes = end_counts["device_writes"] - start_counts["device_writes"]
+        samples_dropped_due_to_throttle = max(0, samples_enqueued - samples_blocked - transport_writes)
+
+        self._transport_window_count += 1
+        wall = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        logger.info(
+            "%s WIN#%02d %s %dms OSCΔ=%d WRITES=%d",
+            wall,
+            self._transport_window_count,
+            state,
+            duration_ms,
+            gen_ticks,
+            transport_writes,
+        )
+
+        if self._osc_verbose_log:
+            logger.info("gen_ticks=%d gen_rate_hz=%.2f", gen_ticks, gen_rate_hz)
+            logger.info("samples_generated=%d", gen_ticks)
+            logger.info("samples_enqueued_to_transport=%d", samples_enqueued)
+            logger.info("samples_blocked=%d", samples_blocked)
+            logger.info("transport_writes=%d", transport_writes)
+            logger.info("samples_dropped_due_to_throttle=%d", samples_dropped_due_to_throttle)
+            logger.info("osc_ticks_start=%d", osc_seq_start)
+            logger.info("osc_ticks_end=%d", osc_seq_end)
+            logger.info("osc_seq_start=%d", osc_seq_start)
+            logger.info("osc_seq_end=%d", osc_seq_end)
+            logger.info("osc_last_tick_ts=%d", end_counts.get("osc_last_tick_ms", 0))
+            logger.info("osc_sample_hash=%d", start_counts.get("osc_xor", 0) ^ end_counts.get("osc_xor", 0))
             
     def _software_oscillator_worker(self):
         """Thread that updates Constant Force to emulate various periodic waveforms."""
@@ -1525,6 +1652,14 @@ class HapticController:
                 has_captured_home = False
                 update_count = 0
                 continue
+
+            # Initialize transport window on first active loop
+            if self._transport_window_state is None:
+                self._transport_window_state = "BLOCKED" if self._transport_blocked else "UNBLOCKED"
+                now_ms = int(time.monotonic() * 1000)
+                self._transport_window_start_ms = now_ms
+                self._transport_window_start_counts = self._transport_snapshot_counts()
+                self._transport_log_window_start(self._transport_window_state, now_ms)
             
             current_time = time.time()
             dt = current_time - last_time
@@ -1628,6 +1763,15 @@ class HapticController:
             if total_mod < -0.40: total_mod = -0.40
             
             current_level = int((val + total_mod) * mag)
+            self._osc_last_level = current_level
+            self._osc_seq += 1
+            self._osc_stats["generated"] += 1
+            self._osc_last_tick_ms = int(time.monotonic() * 1000)
+            self._osc_xor ^= (current_level & 0xFFFFFFFF)
+            if self._transport_blocked:
+                self._osc_stats["blocked"] += 1
+            else:
+                self._osc_stats["sent"] += 1
             
             # Only send USB update if enough time has passed
             time_since_last_usb = current_time - last_usb_update_time
@@ -1643,14 +1787,51 @@ class HapticController:
                     break
                 
                 if haptic and effect_id != -1:
-                    cached_effect.constant.level = current_level
-                    try:
-                        sdl_haptic.SDL_UpdateHapticEffect(haptic, effect_id, ctypes.byref(cached_effect))
+                    if self._transport_target_blocked and not self._transport_blocked:
+                        cached_effect.constant.level = 0
+                        try:
+                            sdl_haptic.SDL_UpdateHapticEffect(haptic, effect_id, ctypes.byref(cached_effect))
+                            last_usb_update_time = current_time
+                            update_count += 1
+                            self._osc_stats["sent"] += 1
+                            self._osc_stats["device_writes"] += 1
+                            # Transition to BLOCKED window after the zero write
+                            now_ms = int(time.monotonic() * 1000)
+                            prev_state = self._transport_window_state
+                            if prev_state and self._transport_window_start_counts is not None:
+                                self._transport_log_window_end(prev_state, now_ms, self._transport_window_start_ms, self._transport_window_start_counts)
+                            self._transport_blocked = True
+                            self._transport_window_state = "BLOCKED"
+                            self._transport_window_start_ms = now_ms
+                            self._transport_window_start_counts = self._transport_snapshot_counts()
+                            self._transport_log_window_start("BLOCKED", now_ms)
+                        except OSError as e:
+                            print(f"[OSC] SDL_UpdateHapticEffect error: {e}, stopping thread")
+                            break
+                    elif self._transport_blocked:
                         last_usb_update_time = current_time
-                        update_count += 1
-                    except OSError as e:
-                        print(f"[OSC] SDL_UpdateHapticEffect error: {e}, stopping thread")
-                        break
+                        # Handle unblock transition at window boundary
+                        if not self._transport_target_blocked:
+                            now_ms = int(time.monotonic() * 1000)
+                            prev_state = self._transport_window_state
+                            if prev_state and self._transport_window_start_counts is not None:
+                                self._transport_log_window_end(prev_state, now_ms, self._transport_window_start_ms, self._transport_window_start_counts)
+                            self._transport_blocked = False
+                            self._transport_window_state = "UNBLOCKED"
+                            self._transport_window_start_ms = now_ms
+                            self._transport_window_start_counts = self._transport_snapshot_counts()
+                            self._transport_log_window_start("UNBLOCKED", now_ms)
+                    else:
+                        cached_effect.constant.level = self._osc_last_level
+                        try:
+                            sdl_haptic.SDL_UpdateHapticEffect(haptic, effect_id, ctypes.byref(cached_effect))
+                            last_usb_update_time = current_time
+                            update_count += 1
+                            self._osc_stats["sent"] += 1
+                            self._osc_stats["device_writes"] += 1
+                        except OSError as e:
+                            print(f"[OSC] SDL_UpdateHapticEffect error: {e}, stopping thread")
+                            break
             
             # Small sleep to prevent CPU spin
             time.sleep(0.0001)

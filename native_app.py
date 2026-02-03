@@ -479,6 +479,8 @@ class FeditNativeApp:
         self._pending_scroll_x = None # For deferred zoom scrolling
         self.freeze_test_active = False # For diagnostic freeze test
         self._should_trigger_freeze_now = False # Immediate freeze trigger for HW mode start
+        self._freeze_cycle_phase = "pause"
+        self._freeze_cycle_phase_end = 0.0
         
         # Probe State
         self._probe_thread = None
@@ -1683,16 +1685,31 @@ class FeditNativeApp:
             if self.sequencer.is_playing: self.process_sequencer_logic()
             
             # --- Diagnostic Freeze Test ---
-            # Integrated Freeze: triggered once when a HW effect starts
-            if getattr(self, '_should_trigger_freeze_now', False):
-                 self._should_trigger_freeze_now = False
-                 self.log("Built-in Freeze Test: Sleeping 1s (PC update thread paused)...")
-                 time.sleep(1.0)
-            
-            # Manual Mode: continuous freeze if active (affects both HW and SW updates)
-            elif self.freeze_test_active and self.sequencer.is_playing:
-                 self.log("Manual Freeze Loop: Sleeping 0.5s...")
-                 time.sleep(0.5)
+            # Freeze cycle: 2s pause, 1s breathe, 2s pause, repeat
+            if self.sequencer.is_playing and self.freeze_test_active:
+                 now_freeze = time.time()
+                 if self._should_trigger_freeze_now:
+                     self._should_trigger_freeze_now = False
+                     self._freeze_cycle_phase = "pause"
+                     self._freeze_cycle_phase_end = now_freeze + 2.0
+                 elif now_freeze >= self._freeze_cycle_phase_end:
+                     if self._freeze_cycle_phase == "pause":
+                         self._freeze_cycle_phase = "breathe"
+                         self._freeze_cycle_phase_end = now_freeze + 1.0
+                     else:
+                         self._freeze_cycle_phase = "pause"
+                         self._freeze_cycle_phase_end = now_freeze + 2.0
+
+                 if self._freeze_cycle_phase == "pause":
+                     engine.set_oscillator_transport_blocked(True)
+                     remaining = max(0.0, self._freeze_cycle_phase_end - now_freeze)
+                     if remaining > 0:
+                         self.log("Freeze Test: Pausing 2s...")
+                         time.sleep(remaining)
+                 else:
+                     engine.set_oscillator_transport_blocked(False)
+            else:
+                 engine.set_oscillator_transport_blocked(False)
             
             # Update Telemetry
             force, is_active = self.calculate_current_force()
