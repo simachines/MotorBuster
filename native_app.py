@@ -1697,20 +1697,20 @@ class FeditNativeApp:
             if self.sequencer.is_playing: self.process_sequencer_logic()
             
             # --- Diagnostic Freeze Test ---
-            # Freeze cycle: 2s pause, 1s breathe, 2s pause, repeat
+            # Freeze cycle: 1s breathe, 2s pause, repeat
             if self.sequencer.is_playing and self.freeze_test_active:
                  now_freeze = time.time()
                  if self._should_trigger_freeze_now:
                      self._should_trigger_freeze_now = False
-                     self._freeze_cycle_phase = "pause"
-                     self._freeze_cycle_phase_end = now_freeze + 2.0
+                     self._freeze_cycle_phase = "breathe"
+                     self._freeze_cycle_phase_end = now_freeze + 1.0
                  elif now_freeze >= self._freeze_cycle_phase_end:
-                     if self._freeze_cycle_phase == "pause":
-                         self._freeze_cycle_phase = "breathe"
-                         self._freeze_cycle_phase_end = now_freeze + 1.0
-                     else:
+                     if self._freeze_cycle_phase == "breathe":
                          self._freeze_cycle_phase = "pause"
                          self._freeze_cycle_phase_end = now_freeze + 2.0
+                     else:
+                         self._freeze_cycle_phase = "breathe"
+                         self._freeze_cycle_phase_end = now_freeze + 1.0
 
                  if self._freeze_cycle_phase == "pause":
                      engine.set_oscillator_transport_blocked(True)

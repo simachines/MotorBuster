@@ -1916,7 +1916,7 @@ class HapticController:
             
             # Parameters
             if is_periodic:
-                mag, period, offset, phase, length = 3277, 500, 0, 0, 4000
+                mag, period, offset, phase, length = 3277, 500, 0, 0, 5000
                 hwp_log(f"Params: magnitude={mag}, period={period}ms, offset={offset}, phase={phase}, length={length}ms, direction=CARTESIAN(1,0,0)")
                 effect = sdl_haptic.SDL_HapticEffect()
                 ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))
@@ -1930,7 +1930,7 @@ class HapticController:
                 effect.periodic.attack_length = 0
                 effect.periodic.fade_length = 0
             else:
-                level, length = 3277, 4000
+                level, length = 3277, 5000
                 hwp_log(f"Params: level={level}, length={length}ms, direction=CARTESIAN(1,0,0)")
                 effect = sdl_haptic.SDL_HapticEffect()
                 ctypes.memset(ctypes.addressof(effect), 0, ctypes.sizeof(effect))

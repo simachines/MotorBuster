@@ -1,5 +1,5 @@
 === Fedit 2.0 FFB Capability Report ===
-Generated: Tue Feb  3 10:54:54 2026
+Generated: Wed Feb  4 06:52:06 2026
 
 --- Device Identity ---
 name: Asetek SimSports LaPrima Wheelbase
@@ -18,8 +18,8 @@ HWP: CONSTANT=1 SINE=1 SPRING=1 DAMPER=1 FRICTION=1 CUSTOM=1
 HWP: SDL_InitHaptic(haptic) rc=0 err=""
 HWP: SDL_SetHapticGain rc=0 err=""
 HWP: SDL_StopHapticEffects rc=0 err=""
-HWP: TEST effect=CONSTANT advertised=1
-HWP: Params: level=3277, length=4000ms, direction=CARTESIAN(1,0,0)
+HWP: TEST 1/2 effect=CONSTANT advertised=1
+HWP: Params: level=3277, length=5000ms, direction=CARTESIAN(1,0,0)
 HWP: NewEffect(effect=CONSTANT) ...
 HWP: NewEffect(effect=CONSTANT) id=1 rc=0 err=""
 HWP: RunEffect(effect=CONSTANT) rc=0 err=""
@@ -29,8 +29,8 @@ HWP: StopEffect(effect=CONSTANT) rc=0 err=""
 HWP: DestroyEffect(effect=CONSTANT) destroyed
 HWP: FreezeTest(effect=CONSTANT) user=YES
 HWP: RESULT effect=CONSTANT status=OK
-HWP: TEST effect=SINE advertised=1
-HWP: Params: magnitude=3277, period=500ms, offset=0, phase=0, length=4000ms, direction=CARTESIAN(1,0,0)
+HWP: TEST 2/2 effect=SINE advertised=1
+HWP: Params: magnitude=3277, period=500ms, offset=0, phase=0, length=5000ms, direction=CARTESIAN(1,0,0)
 HWP: NewEffect(effect=SINE) ...
 HWP: NewEffect(effect=SINE) id=1 rc=0 err=""
 HWP: RunEffect(effect=SINE) rc=0 err=""
