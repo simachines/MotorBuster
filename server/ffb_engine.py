@@ -1633,6 +1633,8 @@ class HapticController:
         home_position = 0.0   # Physical wheel position when vibration starts
         has_captured_home = False
         update_count = 0
+        adaptive_window_start = time.monotonic()
+        adaptive_updates = 0
         
         two_pi = 2 * math.pi
         
@@ -1651,6 +1653,8 @@ class HapticController:
                 energy_balance = 0.0  # Reset balance when idle
                 has_captured_home = False
                 update_count = 0
+                adaptive_window_start = time.monotonic()
+                adaptive_updates = 0
                 continue
 
             # Initialize transport window on first active loop
@@ -1795,6 +1799,7 @@ class HapticController:
                             update_count += 1
                             self._osc_stats["sent"] += 1
                             self._osc_stats["device_writes"] += 1
+                            adaptive_updates += 1
                             # Transition to BLOCKED window after the zero write
                             now_ms = int(time.monotonic() * 1000)
                             prev_state = self._transport_window_state
@@ -1829,10 +1834,32 @@ class HapticController:
                             update_count += 1
                             self._osc_stats["sent"] += 1
                             self._osc_stats["device_writes"] += 1
+                            adaptive_updates += 1
                         except OSError as e:
                             print(f"[OSC] SDL_UpdateHapticEffect error: {e}, stopping thread")
                             break
             
+            # Adaptive USB update rate (skip if user set manual override)
+            if self.manual_poll_rate_override is None:
+                now_mono = time.monotonic()
+                window_elapsed = now_mono - adaptive_window_start
+                if window_elapsed >= 1.0:
+                    if adaptive_updates > 0:
+                        measured_rate = int(adaptive_updates / window_elapsed)
+                        safe_rate = max(10, min(1000, int(measured_rate * 0.9)))
+                        if safe_rate != self.target_update_rate_hz:
+                            prev_rate = self.target_update_rate_hz
+                            self.measured_usb_rate_hz = safe_rate
+                            self.detected_poll_rate_hz = safe_rate
+                            self.target_update_rate_hz = safe_rate
+                            self._min_update_interval_s = 1.0 / safe_rate
+                            if abs(safe_rate - prev_rate) >= 10:
+                                logger.info(
+                                    f"Adaptive USB rate: {safe_rate}Hz (interval: {self._min_update_interval_s*1000:.2f}ms)"
+                                )
+                    adaptive_updates = 0
+                    adaptive_window_start = now_mono
+
             # Small sleep to prevent CPU spin
             time.sleep(0.0001)
     def run_hardware_effects_probe(self, feedback_callback=None, progress_callback=None) -> Dict:

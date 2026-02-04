@@ -1300,7 +1300,11 @@ class FeditNativeApp:
         auto_rate = int(engine.detected_poll_rate_hz * 0.75)
         is_manual = abs(rate - auto_rate) > 5  # 5Hz tolerance for rounding
         
-        engine.set_target_update_rate(rate, is_manual_override=is_manual)
+        if is_manual:
+            engine.set_target_update_rate(rate, is_manual_override=True)
+        else:
+            engine.clear_manual_poll_rate_override()
+            engine.set_target_update_rate(rate, is_manual_override=False)
         
         if is_manual:
             self.log(f"Manual poll rate override: {rate}Hz")
