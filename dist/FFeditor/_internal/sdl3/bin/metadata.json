@@ -1,0 +1,20 @@
+{
+    "arch": "AMD64",
+    "system": "Windows",
+    "target": "v0.9.10b0",
+    "version": "v3.4.0",
+    "url": "https://github.com/Aermoss/PySDL3-Build/releases/download/v3.4.0/Windows-AMD64-v3.4.0.zip",
+    "created": "2026-01-07T18:19:36Z",
+    "updated": "2026-01-07T18:19:37Z",
+    "uploader": "Aermoss",
+    "files": [
+        "./SDL3.dll",
+        "./SDL3_image.dll",
+        "./SDL3_mixer.dll",
+        "./SDL3_net.dll",
+        "./SDL3_rtf.dll",
+        "./SDL3_ttf.dll"
+    ],
+    "repair": true,
+    "find": true
+}

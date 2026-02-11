@@ -1,17 +1,18 @@
 === Fedit 2.0 FFB Capability Report ===
-Generated: Wed Feb  4 06:52:06 2026
+Generated: Wed Feb  4 09:42:06 2026
 
 --- Device Identity ---
-name: Asetek SimSports LaPrima Wheelbase
-vid: 2433
-pid: f303
+name: SIMAGIC Alpha Ultimate
+vid: 0483
+pid: 0522
 serial: Unknown
 
 --- Hardware Effects Probe (HWP Logs) ---
 HWP: --- STARTING HARDWARE EFFECTS PROBE ---
+HWP: Streamed updates: on
 HWP: SDL version: 3.4.0
 HWP: Platform: Windows
-HWP: Device: LaPrima Wheelbase
+HWP: Device: SIMAGIC Alpha Series Wheelbase
 HWP: Haptic open path: FromJoystick
 HWP: SDL_HapticQuery caps=0x000D87FF plus decoded flags:
 HWP: CONSTANT=1 SINE=1 SPRING=1 DAMPER=1 FRICTION=1 CUSTOM=1
