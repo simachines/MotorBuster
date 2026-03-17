@@ -807,7 +807,11 @@ class HapticController:
         if period_override and period_override > 0:
             return max(1, int(period_override))
         safe_freq = max(0.1, float(freq_hz))
-        return max(1, min(1000, int(round(1000.0 / safe_freq))))
+        period_ms = max(1, min(1000, int(round(1000.0 / safe_freq))))
+        actual_freq = round(1000.0 / period_ms, 2)
+        if actual_freq != round(safe_freq, 2):
+            logger.warning(f"Frequency rounded: requested {safe_freq}Hz -> actual {actual_freq}Hz (period={period_ms}ms)")
+        return period_ms
 
     def _build_periodic(self, effect, kind: str, desc: Dict) -> None:
         periodic_type = PERIODIC_TYPES.get(kind, sdl_haptic.SDL_HAPTIC_SINE)
