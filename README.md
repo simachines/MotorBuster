@@ -1,4 +1,4 @@
-# MotorBuster
+# Motor Buster
 
 **MotorBuster** is a specialized FFB and motor performance testing toolkit. It allows you to sequence haptic effects (vibrations, forces, textures). It is work in-progress.
 
