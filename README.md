@@ -4,6 +4,8 @@
 
 <img width="1895" height="1188" alt="image" src="https://github.com/user-attachments/assets/43e7f935-1c6e-44d4-b459-97b9709e49a3" />
 <img width="100" height="100" alt="Generated Image March 27, 2026 - 4_53AM (2)" src="https://github.com/user-attachments/assets/a2b23d80-2724-454a-b7a6-475f140ba010" />
+
+
 ## 🚀 Features
 
 *   **Haptic Sequencing**: arrange haptic clips on a timeline just like audio.
