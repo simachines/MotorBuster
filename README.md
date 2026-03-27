@@ -9,7 +9,7 @@
 
 ## 🚀 Features
 
-*   **Haptic Sequencing**: arrange haptic clips on a timeline just like audio.
+*   **Haptic Sequencing**: arrange haptic clips on a timeline.
 *   **Real-Time Playback**: Feel the effects instantly as the playhead moves.
 *   **Rich Effect Library**:
     *   **Sine**: Smooth periodic vibrations.
@@ -21,7 +21,7 @@
     *   **Resize** clips by dragging edges.
     *   **Move** clips across tracks and time.
 *   **Project Management**: Save and Load your haptic compositions (`.fedit` JSON files).
-*   **Broad Hardware Support**: Built on SDL2, supporting most game controllers.
+*   **Broad Hardware Support**: Built on SDL3, supporting most game controllers.
 
 ## 🛠️ Installation & Build
 
