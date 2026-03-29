@@ -1,12 +1,15 @@
-# Fedit 2.0 - Haptic DAW Sequencer
+#  Motor Buster 
+<img width="100" height="100" alt="Generated Image March 27, 2026 - 4_53AM (2)" src="https://github.com/user-attachments/assets/a2b23d80-2724-454a-b7a6-475f140ba010" />
 
-**Fedit 2.0** is a specialized Digital Audio Workstation (DAW) designed for **Force Feedback** sequencing. Instead of creating audio, it allows you to sequence haptic effects (vibrations, forces, textures) and play them back in real-time on any DirectInput/XInput compatible device (Gamepads, Steering Wheels, Flight Sticks).
+**MotorBuster** is a specialized FFB and motor performance testing toolkit. It allows you to sequence haptic effects (vibrations, forces, textures). It is work in-progress.
 
 <img width="1895" height="1188" alt="image" src="https://github.com/user-attachments/assets/43e7f935-1c6e-44d4-b459-97b9709e49a3" />
 
+
+
 ## 🚀 Features
 
-*   **Haptic Sequencing**: arrange haptic clips on a timeline just like audio.
+*   **Haptic Sequencing**: arrange haptic clips on a timeline.
 *   **Real-Time Playback**: Feel the effects instantly as the playhead moves.
 *   **Rich Effect Library**:
     *   **Sine**: Smooth periodic vibrations.
@@ -18,7 +21,7 @@
     *   **Resize** clips by dragging edges.
     *   **Move** clips across tracks and time.
 *   **Project Management**: Save and Load your haptic compositions (`.fedit` JSON files).
-*   **Broad Hardware Support**: Built on SDL2, supporting most game controllers.
+*   **Broad Hardware Support**: Built on SDL3, supporting most game controllers.
 
 ## 🛠️ Installation & Build
 

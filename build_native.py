@@ -70,8 +70,12 @@ print(f"Running PyInstaller with: {args}")
 PyInstaller.__main__.run(args)
 
 # Post-Build Check
-exe_path = os.path.join(DIST_DIR, "Fedit2.exe")
-if os.path.exists(exe_path):
-    print(f"Build Complete: {exe_path}")
+primary_exe_path = os.path.join(DIST_DIR, "FFeditor", "FFeditor.exe")
+legacy_exe_path = os.path.join(DIST_DIR, "Fedit2.exe")
+
+if os.path.exists(primary_exe_path):
+    print(f"Build Complete: {primary_exe_path}")
+elif os.path.exists(legacy_exe_path):
+    print(f"Build Complete: {legacy_exe_path}")
 else:
     print("Build Failed.")
