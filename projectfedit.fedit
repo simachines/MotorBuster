@@ -1,0 +1,41 @@
+{
+  "tracks": [
+    {
+      "id": "5736f4f0-046c-4652-8ae7-ebc65ddf657d",
+      "name": "1",
+      "gain": 100,
+      "clips": [
+        {
+          "id": "aae5626e-b923-4d22-87f9-b48e27f0bfdc",
+          "type": "Sine",
+          "start_time": 0.0,
+          "duration": 30.0,
+          "track_index": 0,
+          "magnitude": 4915,
+          "frequency": 1,
+          "frequency_end": 30,
+          "sweep_enabled": true,
+          "name": "Clip"
+        }
+      ]
+    },
+    {
+      "id": "fe4abedb-d71a-41d5-bce4-b424259bc24e",
+      "name": "2",
+      "gain": 100,
+      "clips": []
+    },
+    {
+      "id": "7d887b04-288d-4667-89b6-723f7a16b355",
+      "name": "3",
+      "gain": 100,
+      "clips": []
+    },
+    {
+      "id": "49d20861-6321-4771-a37f-373b49c902c9",
+      "name": "4",
+      "gain": 100,
+      "clips": []
+    }
+  ]
+}
