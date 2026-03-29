@@ -413,6 +413,7 @@ class InspectorPanel:
 # --- Application ---
 class FeditNativeApp:
     UPDATE_LENGTH_BUFFER_MS = 10
+    DRAG_ACTIVE_FPS = 60
     def __init__(self):
         self.sequencer = FeditSequencer()
         self.sequencer.is_scrubbing = False # New state for playhead dragging
@@ -469,6 +470,7 @@ class FeditNativeApp:
         }
         self._mouse_status_tag = "txt_mouse_status"
         self._mouse_status_visible = True
+        self._drag_fps_override_hz = 0
         self._pending_scroll_x = None # For deferred zoom scrolling
         self.freeze_test_active = False # For diagnostic freeze test
         self._should_trigger_freeze_now = False # Immediate freeze trigger for HW mode start
@@ -3814,6 +3816,7 @@ class FeditNativeApp:
          
          import ctypes
          if ctypes.windll.user32.GetForegroundWindow() != self._hwnd:
+             self._drag_fps_override_hz = 0
              return
 
          import win32api
@@ -3944,6 +3947,8 @@ class FeditNativeApp:
                      ctypes.windll.user32.SendMessageW(self._hwnd, 0x0202, 0, 0)  # WM_LBUTTONUP
                  except: pass
              self._drag_initiated = False
+
+         self._drag_fps_override_hz = self.DRAG_ACTIVE_FPS if self._window_drag_offset is not None else 0
 
     def get_settings_path(self):
         import os
@@ -4117,6 +4122,8 @@ class FeditNativeApp:
                     except: 
                         target_rate = 500
                     effects_interval = 1.0 / max(10, target_rate)
+                elif self._drag_fps_override_hz > 0:
+                    effects_interval = 1.0 / float(self._drag_fps_override_hz)
                 elif is_interacting:
                     # Interaction Mode: High rate for smooth UI feedback
                     effects_interval = 1.0 / 120.0

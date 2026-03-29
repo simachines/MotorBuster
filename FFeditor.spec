@@ -2,8 +2,8 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\assets', 'assets'), ('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server', 'server')]
-binaries = [('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server\\SDL3.dll', '.'), ('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server\\SDL3_image.dll', '.'), ('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server\\SDL3_mixer.dll', '.'), ('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server\\SDL3_net.dll', '.'), ('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server\\SDL3_rtf.dll', '.'), ('C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\server\\SDL3_ttf.dll', '.')]
+datas = [('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\assets', 'assets'), ('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server', 'server')]
+binaries = [('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server\\SDL3.dll', '.'), ('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server\\SDL3_image.dll', '.'), ('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server\\SDL3_mixer.dll', '.'), ('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server\\SDL3_net.dll', '.'), ('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server\\SDL3_rtf.dll', '.'), ('E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\server\\SDL3_ttf.dll', '.')]
 hiddenimports = ['server.ffb_engine']
 hiddenimports += collect_submodules('server')
 tmp_ret = collect_all('dearpygui')
@@ -15,7 +15,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\native_app.py'],
+    ['E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\native_app.py'],
     pathex=['.'],
     binaries=binaries,
     datas=datas,
@@ -45,7 +45,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\nishi\\OneDrive\\Desktop\\VScode FFeditor\\fedit_2\\assets\\icon.ico'],
+    icon=['E:\\Users\\ernes\\Desktop\\Electronics\\fedit2\\fedit_2\\assets\\icon.ico'],
 )
 coll = COLLECT(
     exe,
