@@ -29,13 +29,13 @@ MotorBuster is built with Python and Dear PyGui.
 
 ### Prerequisites
 *   Python 3.12+
-*   `pip install -r requirements.txt` (see dependencies below)
+*   `python -m pip install -r requirements.txt`
 
 ### Dependencies
 ```bash
-pip install dearpygui pysdl2
+python -m pip install -r requirements.txt
 ```
-*Note: You also need the SDL2 DLLs. The build script handles this for the standalone version.*
+*Note: `requirements.txt` includes build/runtime dependencies, including `PyInstaller`.*
 
 ### Building Standalone (Windows)
 To create a portable `.exe`:

@@ -1,0 +1,8 @@
+PyInstaller
+dearpygui
+pysdl3
+Pillow
+pywin32
+fastapi
+uvicorn
+websockets

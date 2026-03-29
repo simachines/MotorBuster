@@ -1,7 +1,14 @@
-import PyInstaller.__main__
 import os
 import shutil
 import sys
+
+try:
+    import PyInstaller.__main__
+except Exception:
+    print("ERROR: PyInstaller is not installed for this Python interpreter.")
+    print(f"Interpreter: {sys.executable}")
+    print("Run: python -m pip install -r requirements.txt")
+    sys.exit(1)
 
 try:
     from PIL import Image

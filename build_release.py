@@ -1,7 +1,14 @@
-import PyInstaller.__main__
 import os
 import shutil
 import sys
+
+try:
+    import PyInstaller.__main__
+except Exception:
+    print("ERROR: PyInstaller is not installed for this Python interpreter.")
+    print(f"Interpreter: {sys.executable}")
+    print("Run: python -m pip install -r requirements.txt")
+    sys.exit(1)
 
 # Make sure we are in the root of the project
 base_path = os.path.dirname(os.path.abspath(__file__))
