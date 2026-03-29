@@ -16,6 +16,9 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = sys.stdout
 
+os.environ.setdefault("SDL_DISABLE_METADATA", "1")
+os.environ.setdefault("SDL_DOWNLOAD_BINARIES", "0")
+
 from sdl3 import SDL_error as sdl_error
 from sdl3 import SDL_events as sdl_events
 from sdl3 import SDL_gamepad as sdl_gp
@@ -2059,7 +2062,7 @@ class HapticController:
         """Export a comprehensive capability report to a text file."""
         try:
             with open(path, 'w') as f:
-                f.write("=== Fedit 2.0 FFB Capability Report ===\n")
+                f.write("=== MotorBuster 2.0 FFB Capability Report ===\n")
                 f.write(f"Generated: {time.ctime()}\n\n")
                 
                 f.write("--- Device Identity ---\n")

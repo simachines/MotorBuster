@@ -3,13 +3,13 @@ import os
 import shutil
 import sys
 
-# Make sure we are in the root of the project (fedit_2)
+# Make sure we are in the root of the project
 base_path = os.path.dirname(os.path.abspath(__file__))
 server_path = os.path.join(base_path, "server")
 client_dist = os.path.join(base_path, "client", "dist")
 dep_path = os.path.join(base_path, ".dependencies")
 
-print(f"Building Fedit 2.0 from {base_path}")
+print(f"Building MotorBuster 2.0 from {base_path}")
 print(f"Dependencies at {dep_path}")
 
 # 1. Clean previous build
@@ -23,7 +23,7 @@ sep = ";" if os.name == 'nt' else ":"
 
 args = [
     os.path.join(server_path, "main.py"),
-    '--name=Fedit',
+    '--name=MotorBuster',
     '--onedir',
     '--clean',
     f'--paths={dep_path}',  # Help PyInstaller find packages
@@ -41,4 +41,4 @@ print(f"Running PyInstaller with: {args}")
 
 PyInstaller.__main__.run(args)
 
-print("Build Complete. Executable should be in dist/Fedit/Fedit.exe")
+print("Build Complete. Executable should be in dist/MotorBuster/MotorBuster.exe")

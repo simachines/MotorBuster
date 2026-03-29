@@ -133,7 +133,7 @@ else:
 
 def start():
     print("-----------------------------------------")
-    print("   LAUNCHING FEDIT V2.0 (PRO UI)   ")
+    print("   LAUNCHING MOTORBUSTER V2.0 (PRO UI)   ")
     print("-----------------------------------------")
     # Only open browser if we are serving the app
     if static_dir.exists():

@@ -149,7 +149,7 @@ class Track:
         return track
 
 
-class FeditSequencer:
+class MotorBusterSequencer:
     def __init__(self):
         self.tracks = [Track(name=f"{i+1}") for i in range(4)]
         self.is_playing = False
@@ -411,11 +411,11 @@ class InspectorPanel:
             self.app.create_floating_inspector(clip)
 
 # --- Application ---
-class FeditNativeApp:
+class MotorBusterNativeApp:
     UPDATE_LENGTH_BUFFER_MS = 10
     DRAG_ACTIVE_FPS = 60
     def __init__(self):
-        self.sequencer = FeditSequencer()
+        self.sequencer = MotorBusterSequencer()
         self.sequencer.is_scrubbing = False # New state for playhead dragging
         self.log_items = []
         self.fps_frames = 0
@@ -823,7 +823,7 @@ class FeditNativeApp:
         path = app_data.get('file_path_name')
         if path:
              # Ensure extension
-             if not path.endswith(".fedit"): path += ".fedit"
+             if not path.endswith(".motorbuster"): path += ".motorbuster"
              self.save_project_to_file(path)
 
     def action_load_file(self, sender, app_data):
@@ -1061,8 +1061,8 @@ class FeditNativeApp:
     def _close_ffb_probe(self):
         dpg.hide_item("win_ffb_probe")
         # Save report automatically
-        engine.diag_export_report("fedit_ffb_report.txt")
-        self.log("FFB Probe Completed. Report saved to fedit_ffb_report.txt")
+        engine.diag_export_report("motorbuster_ffb_report.txt")
+        self.log("FFB Probe Completed. Report saved to motorbuster_ffb_report.txt")
         
         # Apply recommendation global default? 
         # For now, we'll just log it. The user can see it in clips.
@@ -3332,15 +3332,15 @@ class FeditNativeApp:
         # File Dialogs
         dpg.add_file_dialog(
             directory_selector=False, show=False, callback=self.action_save_file, tag="dlg_save",
-            width=700, height=400, default_filename="project.fedit", label="Save Project As..."
+            width=700, height=400, default_filename="project.motorbuster", label="Save Project As..."
         )
-        dpg.add_file_extension(".fedit", color=(255, 255, 255, 255), parent="dlg_save")
+        dpg.add_file_extension(".motorbuster", color=(255, 255, 255, 255), parent="dlg_save")
         
         dpg.add_file_dialog(
             directory_selector=False, show=False, callback=self.action_load_file, tag="dlg_load",
             width=700, height=400, label="Open Project File..."
         )
-        dpg.add_file_extension(".fedit", color=(255, 255, 255, 255), parent="dlg_load")
+        dpg.add_file_extension(".motorbuster", color=(255, 255, 255, 255), parent="dlg_load")
         dpg.add_file_extension(".*", parent="dlg_load")
 
         # Shortcuts
@@ -3403,10 +3403,10 @@ class FeditNativeApp:
                     dpg.add_spacer(width=8)
 
                     if texture_loaded:
-                        dpg.add_image("icon_texture", width=20, height=20)
+                        dpg.add_image("icon_texture", width=28, height=28)
 
                     dpg.add_spacer(width=5)
-                    dpg.add_text("FFeditor", color=(200, 200, 200))
+                    dpg.add_text("MotorBuster", color=(200, 200, 200))
                     dpg.add_spacer(width=20)
 
                     with dpg.menu(label="File", tag="menu_file"):
@@ -3436,14 +3436,14 @@ class FeditNativeApp:
                     with dpg.menu(label="Diagnose", tag="menu_diagnose"):
                         dpg.add_menu_item(label="HW Capability Mode...", callback=self.start_ffb_probe)
                         dpg.add_menu_item(label="Quick HW Periodic Test", callback=self.run_diag_test)
-                        dpg.add_menu_item(label="Export Capability Report", callback=lambda: engine.diag_export_report("fedit_ffb_report.txt"))
+                        dpg.add_menu_item(label="Export Capability Report", callback=lambda: engine.diag_export_report("motorbuster_ffb_report.txt"))
                         dpg.add_separator()
                         dpg.add_menu_item(label="Freeze Test Mode", check=True, tag="menu_freeze_test",
                                          default_value=self.freeze_test_active,
                                          callback=lambda s, v: setattr(self, 'freeze_test_active', v))
 
                     with dpg.menu(label="About", tag="menu_about"):
-                        dpg.add_menu_item(label="About FFeditor", callback=lambda: dpg.configure_item("win_about", show=True))
+                        dpg.add_menu_item(label="About MotorBuster", callback=lambda: dpg.configure_item("win_about", show=True))
 
                     dpg.bind_item_theme("menu_file", "theme_menu_popup")
                     dpg.bind_item_theme("menu_view", "theme_menu_popup")
@@ -3488,10 +3488,10 @@ class FeditNativeApp:
                 dpg.add_item_clicked_handler(callback=lambda: webbrowser.open("https://github.com/"))
             
             # Centered position (assuming 1280x800 viewport: x=365, y=210)
-            with dpg.window(tag="win_about", label="About Fedit", width=550, height=380, modal=True, show=False, pos=[365, 210], no_resize=True, no_collapse=True):
-                dpg.add_text("FFeditor (Version 1.0)")
+            with dpg.window(tag="win_about", label="About MotorBuster", width=550, height=380, modal=True, show=False, pos=[365, 210], no_resize=True, no_collapse=True):
+                dpg.add_text("MotorBuster (Version 1.0)")
                 dpg.add_spacer(height=10)
-                dpg.add_text("A modern spiritual successor to Microsoft Fedit (1999).")
+                dpg.add_text("A modern force-feedback sequencer for motor and wheel testing.")
                 dpg.add_spacer(height=10)
                 dpg.add_text("Created by Swift & Napman")
                 dpg.add_spacer(height=10)
@@ -3572,7 +3572,7 @@ class FeditNativeApp:
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=10)
                 # Device controls moved to menu bar
-                # dpg.add_text("Fedit DAW", color=(100, 200, 255)) # Removed per request
+                # dpg.add_text("MotorBuster", color=(100, 200, 255)) # Removed per request
                 # dpg.add_text("| Rate: -- Hz", tag="status_fps", color=(150, 255, 150)) # REMOVED per user request
                 
                 dpg.add_spacer(width=20)
@@ -3707,7 +3707,7 @@ class FeditNativeApp:
         with dpg.group(horizontal=True, tag="custom_title_bar"):
             # Icon
             # dpg.add_image("app_icon", width=20, height=20) # Need to load image texture first if we want this
-            dpg.add_button(label="Fedit2", width=100, tag="title_drag_area", callback=None) # Placeholder/Title - DRAGGABLE
+            dpg.add_button(label="MotorBuster", width=100, tag="title_drag_area", callback=None) # Placeholder/Title - DRAGGABLE
             
             # Drag Area (Spacer)
             # We use a button or specific item to catch drag? 
@@ -3757,7 +3757,7 @@ class FeditNativeApp:
         # Native Maximize/Restore to ensure sync with OS state
         try:
             import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            hwnd = ctypes.windll.user32.FindWindowW(None, "MotorBuster")
             if hwnd:
                 if ctypes.windll.user32.IsZoomed(hwnd):
                     ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
@@ -3775,7 +3775,7 @@ class FeditNativeApp:
             WS_THICKFRAME = 0x00040000
             WS_CAPTION = 0x00C00000
             
-            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            hwnd = ctypes.windll.user32.FindWindowW(None, "MotorBuster")
             if hwnd:
                 style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
                 # Ensure WS_THICKFRAME is on, WS_CAPTION is off (already off by decorated=False usually)
@@ -3805,7 +3805,7 @@ class FeditNativeApp:
          if not hasattr(self, '_drag_initiated'): self._drag_initiated = False
          if not hasattr(self, '_hwnd'):
              import ctypes
-             self._hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+             self._hwnd = ctypes.windll.user32.FindWindowW(None, "MotorBuster")
              self._cursor_cache = {
                  0: ctypes.windll.user32.LoadCursorW(0, 32512),
                  32644: ctypes.windll.user32.LoadCursorW(0, 32644),
@@ -4000,7 +4000,7 @@ class FeditNativeApp:
         is_minimized = False
         try:
             import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            hwnd = ctypes.windll.user32.FindWindowW(None, "MotorBuster")
             if hwnd:
                 if ctypes.windll.user32.IsZoomed(hwnd):
                     is_maximized = True
@@ -4048,7 +4048,7 @@ class FeditNativeApp:
         
         # Disable VSync for Haptics
         # DECORATED=False for Borderless
-        dpg.create_viewport(title='FFeditor', width=self.window_width, height=self.window_height, 
+        dpg.create_viewport(title='MotorBuster', width=self.window_width, height=self.window_height, 
                             x_pos=self.window_x, y_pos=self.window_y,
                             vsync=False, 
                             small_icon=icon_path, large_icon=icon_path, 
@@ -4060,11 +4060,13 @@ class FeditNativeApp:
         
         # Restore Maximized State / Apply Theme
         if self.maximized:
-             try:
+            try:
                 import ctypes
-                hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
-                if hwnd: ctypes.windll.user32.ShowWindow(hwnd, 3) # SW_MAXIMIZE
-             except: pass
+                hwnd = ctypes.windll.user32.FindWindowW(None, "MotorBuster")
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 3) # SW_MAXIMIZE
+            except:
+                pass
         
         self.apply_theme(self.current_theme_mode)
 
@@ -4260,5 +4262,5 @@ class FeditNativeApp:
             dpg.destroy_context()
 
 if __name__ == "__main__":
-    app = FeditNativeApp()
+    app = MotorBusterNativeApp()
     app.run()

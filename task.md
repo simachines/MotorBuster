@@ -1,4 +1,4 @@
-# Fedit DAW 2.0 Task List
+# MotorBuster 2.0 Task List
 
 - [x] **Data Model (Tracks/Clips)**
     - [x] Data Model (Tracks/Clips)

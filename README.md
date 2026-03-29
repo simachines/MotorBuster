@@ -20,12 +20,12 @@
     *   **Drag & Drop** from palette.
     *   **Resize** clips by dragging edges.
     *   **Move** clips across tracks and time.
-*   **Project Management**: Save and Load your haptic compositions (`.fedit` JSON files).
+*   **Project Management**: Save and Load your haptic compositions (`.motorbuster` JSON files).
 *   **Broad Hardware Support**: Built on SDL3, supporting most game controllers.
 
 ## 🛠️ Installation & Build
 
-Fedit is built with Python and Dear PyGui.
+MotorBuster is built with Python and Dear PyGui.
 
 ### Prerequisites
 *   Python 3.12+
@@ -45,12 +45,12 @@ To create a portable `.exe`:
     ```bash
     python build_native.py
     ```
-3.  The executable will be in `dist/Fedit.exe`.
+3.  The executable will be in `dist/MotorBuster/MotorBuster.exe`.
 
 ## 🎮 Usage
 
 1.  **Connect Controller**: Plug in your Gamepad or Haptic Device.
-2.  **Launch**: Run `Fedit.exe`.
+2.  **Launch**: Run `MotorBuster.exe`.
 3.  **Connect**: Click **Scan** and then **Connect** in the top bar to initialize your device.
 4.  **Compose**:
     *   Drag effects from the left palette to the timeline.

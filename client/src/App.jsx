@@ -229,7 +229,7 @@ function App() {
           <div className="bg-gradient-to-br from-blue-600 to-purple-600 p-2 rounded-lg shadow-lg shadow-blue-500/20">
             <Zap className="text-white" size={24} fill="currentColor" />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Fedit <span className="text-blue-500">2.0</span></h1>
+          <h1 className="text-2xl font-bold tracking-tight text-white">MotorBuster <span className="text-blue-500">2.0</span></h1>
         </div>
 
         <DeviceStatus status={status} devices={devices}

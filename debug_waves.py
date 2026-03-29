@@ -2,7 +2,7 @@ import math
 import sys
 import os
 
-OUTPUT_FILE = r"c:/Users/ernes/.gemini/antigravity/scratch/fedit_2/debug_output_direct.txt"
+OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_output_direct.txt")
 
 def wave_amplitude(type, t, freq, magnitude, start_phase, sweep_enabled=False):
     mag = magnitude
