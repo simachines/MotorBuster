@@ -3,6 +3,11 @@ import os
 import shutil
 import sys
 
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
 # Define base paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(BASE_DIR, "dist")
@@ -19,6 +24,15 @@ print(f"Building MotorBuster Native 2.0 from {BASE_DIR}")
 print(f"Dependencies at {DEPENDENCIES_DIR}")
 
 icon_path = os.path.join(BASE_DIR, "assets", "icon.ico")
+icon_png_path = os.path.join(BASE_DIR, "assets", "icon.png")
+
+if os.path.exists(icon_png_path) and Image is not None:
+    try:
+        with Image.open(icon_png_path) as image:
+            image.save(icon_path, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+        print(f"Refreshed icon from PNG: {icon_png_path} -> {icon_path}")
+    except Exception as e:
+        print(f"Warning: Failed to refresh icon from PNG: {e}")
 
 # Build Arguments
 args = [
