@@ -12,3 +12,12 @@ debug_out.txt
 debug_output.txt
 manual_log.txt
 py_compile_error.txt
+debug_thread.log
+dpg_dump.txt
+fedit_ffb_report.txt
+
+di_ffb.exp
+di_ffb.lib
+di_ffb.obj
+di_ffb.pdb
+vc140.pdb

@@ -413,6 +413,8 @@ class InspectorPanel:
 # --- Application ---
 class FeditNativeApp:
     UPDATE_LENGTH_BUFFER_MS = 10
+    APP_TITLE = "MotorBuster"
+    DRAG_ACTIVE_FPS = 60
     def __init__(self):
         self.sequencer = FeditSequencer()
         self.sequencer.is_scrubbing = False # New state for playhead dragging
@@ -468,6 +470,7 @@ class FeditNativeApp:
             },
         }
         self._mouse_status_tag = "txt_mouse_status"
+        self._drag_fps_override_hz = 0
         self._mouse_status_visible = True
         self._pending_scroll_x = None # For deferred zoom scrolling
         self.freeze_test_active = False # For diagnostic freeze test
@@ -3404,7 +3407,7 @@ class FeditNativeApp:
                         dpg.add_image("icon_texture", width=20, height=20)
 
                     dpg.add_spacer(width=5)
-                    dpg.add_text("FFeditor", color=(200, 200, 200))
+                    dpg.add_text(self.APP_TITLE, color=(200, 200, 200))
                     dpg.add_spacer(width=20)
 
                     with dpg.menu(label="File", tag="menu_file"):
@@ -3441,7 +3444,7 @@ class FeditNativeApp:
                                          callback=lambda s, v: setattr(self, 'freeze_test_active', v))
 
                     with dpg.menu(label="About", tag="menu_about"):
-                        dpg.add_menu_item(label="About FFeditor", callback=lambda: dpg.configure_item("win_about", show=True))
+                        dpg.add_menu_item(label=f"About {self.APP_TITLE}", callback=lambda: dpg.configure_item("win_about", show=True))
 
                     dpg.bind_item_theme("menu_file", "theme_menu_popup")
                     dpg.bind_item_theme("menu_view", "theme_menu_popup")
@@ -3486,8 +3489,8 @@ class FeditNativeApp:
                 dpg.add_item_clicked_handler(callback=lambda: webbrowser.open("https://github.com/"))
             
             # Centered position (assuming 1280x800 viewport: x=365, y=210)
-            with dpg.window(tag="win_about", label="About Fedit", width=550, height=380, modal=True, show=False, pos=[365, 210], no_resize=True, no_collapse=True):
-                dpg.add_text("FFeditor (Version 1.0)")
+            with dpg.window(tag="win_about", label=f"About {self.APP_TITLE}", width=550, height=380, modal=True, show=False, pos=[365, 210], no_resize=True, no_collapse=True):
+                dpg.add_text(f"{self.APP_TITLE} (Version 1.0)")
                 dpg.add_spacer(height=10)
                 dpg.add_text("A modern spiritual successor to Microsoft Fedit (1999).")
                 dpg.add_spacer(height=10)
@@ -3705,7 +3708,7 @@ class FeditNativeApp:
         with dpg.group(horizontal=True, tag="custom_title_bar"):
             # Icon
             # dpg.add_image("app_icon", width=20, height=20) # Need to load image texture first if we want this
-            dpg.add_button(label="Fedit2", width=100, tag="title_drag_area", callback=None) # Placeholder/Title - DRAGGABLE
+            dpg.add_button(label=self.APP_TITLE, width=100, tag="title_drag_area", callback=None) # Placeholder/Title - DRAGGABLE
             
             # Drag Area (Spacer)
             # We use a button or specific item to catch drag? 
@@ -3755,7 +3758,7 @@ class FeditNativeApp:
         # Native Maximize/Restore to ensure sync with OS state
         try:
             import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            hwnd = ctypes.windll.user32.FindWindowW(None, self.APP_TITLE)
             if hwnd:
                 if ctypes.windll.user32.IsZoomed(hwnd):
                     ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
@@ -3773,7 +3776,7 @@ class FeditNativeApp:
             WS_THICKFRAME = 0x00040000
             WS_CAPTION = 0x00C00000
             
-            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            hwnd = ctypes.windll.user32.FindWindowW(None, self.APP_TITLE)
             if hwnd:
                 style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
                 # Ensure WS_THICKFRAME is on, WS_CAPTION is off (already off by decorated=False usually)
@@ -3803,7 +3806,7 @@ class FeditNativeApp:
          if not hasattr(self, '_drag_initiated'): self._drag_initiated = False
          if not hasattr(self, '_hwnd'):
              import ctypes
-             self._hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+             self._hwnd = ctypes.windll.user32.FindWindowW(None, self.APP_TITLE)
              self._cursor_cache = {
                  0: ctypes.windll.user32.LoadCursorW(0, 32512),
                  32644: ctypes.windll.user32.LoadCursorW(0, 32644),
@@ -3814,6 +3817,7 @@ class FeditNativeApp:
          
          import ctypes
          if ctypes.windll.user32.GetForegroundWindow() != self._hwnd:
+             self._drag_fps_override_hz = 0
              return
 
          import win32api
@@ -3945,6 +3949,8 @@ class FeditNativeApp:
                  except: pass
              self._drag_initiated = False
 
+         self._drag_fps_override_hz = self.DRAG_ACTIVE_FPS if self._window_drag_offset is not None else 0
+
     def get_settings_path(self):
         import os
         base_path = os.path.dirname(os.path.abspath(__file__))
@@ -3995,7 +4001,7 @@ class FeditNativeApp:
         is_minimized = False
         try:
             import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+            hwnd = ctypes.windll.user32.FindWindowW(None, self.APP_TITLE)
             if hwnd:
                 if ctypes.windll.user32.IsZoomed(hwnd):
                     is_maximized = True
@@ -4043,7 +4049,7 @@ class FeditNativeApp:
         
         # Disable VSync for Haptics
         # DECORATED=False for Borderless
-        dpg.create_viewport(title='FFeditor', width=self.window_width, height=self.window_height, 
+        dpg.create_viewport(title=self.APP_TITLE, width=self.window_width, height=self.window_height, 
                             x_pos=self.window_x, y_pos=self.window_y,
                             vsync=False, 
                             small_icon=icon_path, large_icon=icon_path, 
@@ -4057,7 +4063,7 @@ class FeditNativeApp:
         if self.maximized:
              try:
                 import ctypes
-                hwnd = ctypes.windll.user32.FindWindowW(None, "FFeditor")
+                hwnd = ctypes.windll.user32.FindWindowW(None, self.APP_TITLE)
                 if hwnd: ctypes.windll.user32.ShowWindow(hwnd, 3) # SW_MAXIMIZE
              except: pass
         
@@ -4117,6 +4123,8 @@ class FeditNativeApp:
                     except: 
                         target_rate = 500
                     effects_interval = 1.0 / max(10, target_rate)
+                elif self._drag_fps_override_hz > 0:
+                    effects_interval = 1.0 / float(self._drag_fps_override_hz)
                 elif is_interacting:
                     # Interaction Mode: High rate for smooth UI feedback
                     effects_interval = 1.0 / 120.0

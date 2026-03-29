@@ -15,13 +15,13 @@ if os.path.exists(DIST_DIR):
 if os.path.exists(BUILD_DIR):
     shutil.rmtree(BUILD_DIR)
 
-print(f"Building Fedit Native 2.0 from {BASE_DIR}")
+print(f"Building MotorBuster from {BASE_DIR}")
 print(f"Dependencies at {DEPENDENCIES_DIR}")
 
 # Build Arguments
 args = [
     os.path.join(BASE_DIR, 'native_app.py'), # Your main script
-    '--name=FFeditor',              # Executable name
+    '--name=MotorBuster',              # Executable name
     f'--icon={os.path.join(BASE_DIR, "assets", "icon.ico")}', # Exe Icon
     f'--add-data={os.path.join(BASE_DIR, "assets")};assets',  # Bundle assets dir
     '--onedir',                  # Directory with exe and dependencies
@@ -70,8 +70,8 @@ print(f"Running PyInstaller with: {args}")
 PyInstaller.__main__.run(args)
 
 # Post-Build Check
-primary_exe_path = os.path.join(DIST_DIR, "FFeditor", "FFeditor.exe")
-legacy_exe_path = os.path.join(DIST_DIR, "Fedit2.exe")
+primary_exe_path = os.path.join(DIST_DIR, "MotorBuster", "MotorBuster.exe")
+legacy_exe_path = os.path.join(DIST_DIR, "FFeditor", "FFeditor.exe")
 
 if os.path.exists(primary_exe_path):
     print(f"Build Complete: {primary_exe_path}")
