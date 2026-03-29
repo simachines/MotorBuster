@@ -8,6 +8,7 @@ base_path = os.path.dirname(os.path.abspath(__file__))
 server_path = os.path.join(base_path, "server")
 client_dist = os.path.join(base_path, "client", "dist")
 dep_path = os.path.join(base_path, ".dependencies")
+build_path = os.path.join(base_path, "build")
 
 print(f"Building MotorBuster 2.0 from {base_path}")
 print(f"Dependencies at {dep_path}")
@@ -26,6 +27,7 @@ args = [
     '--name=MotorBuster',
     '--onedir',
     '--clean',
+    f'--specpath={build_path}',
     f'--paths={dep_path}',  # Help PyInstaller find packages
     f'--add-data={client_dist}{sep}client/dist',
     '--hidden-import=uvicorn.loops.auto',

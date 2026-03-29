@@ -43,7 +43,7 @@ args = [
     '--hidden-import=server.ffb_engine', # Explicitly force import
     f'--distpath={DIST_DIR}',    # Force dist location
     f'--workpath={BUILD_DIR}',   # Force build temp location
-    f'--specpath={BASE_DIR}',    # Force spec file location
+    f'--specpath={BUILD_DIR}',   # Keep generated spec out of repo root
 ]
 
 # Bundle SDL3 DLLs from server package
