@@ -8,7 +8,7 @@ import threading
 import time
 import platform
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 # PyInstaller windowed builds can null out stdout/stderr; SDL's logger expects them.
 if sys.stdout is None:
@@ -22,11 +22,15 @@ os.environ.setdefault("SDL_DOWNLOAD_BINARIES", "0")
 from sdl3 import SDL_error as sdl_error
 from sdl3 import SDL_events as sdl_events
 from sdl3 import SDL_gamepad as sdl_gp
-from sdl3 import SDL_haptic as sdl_haptic
 from sdl3 import SDL_init as sdl_init
 from sdl3 import SDL_joystick as sdl_joy
 from sdl3 import SDL_stdinc as sdl_std
 from sdl3 import SDL_version as sdl_ver
+
+try:
+    from sdl3 import SDL_haptic as sdl_haptic
+except Exception:
+    sdl_haptic = None
 
 if platform.system() == "Windows":
     import ctypes.wintypes as wintypes
@@ -43,7 +47,18 @@ if platform.system() == "Windows":
     DISFFC_CONTINUE = 0x00000008
     DISFFC_SETACTUATORSON = 0x00000010
     DISFFC_SETACTUATORSOFF = 0x00000020
+    DI_FF_EFFECT_CONSTANT = 0
+    DI_FF_EFFECT_RAMP = 1
+    DI_FF_EFFECT_SQUARE = 2
     DI_FF_EFFECT_SINE = 3
+    DI_FF_EFFECT_TRIANGLE = 4
+    DI_FF_EFFECT_SAWTOOTHUP = 5
+    DI_FF_EFFECT_SAWTOOTHDOWN = 6
+    DI_FF_EFFECT_SPRING = 7
+    DI_FF_EFFECT_DAMPER = 8
+    DI_FF_EFFECT_INERTIA = 9
+    DI_FF_EFFECT_FRICTION = 10
+    DI_FF_EFFECT_CUSTOM = 11
 
     class DIFFDeviceInfo(Structure):
         _fields_ = [
@@ -120,6 +135,42 @@ if platform.system() == "Windows":
     DirectInput8Create.argtypes = [wintypes.HINSTANCE, wintypes.DWORD, POINTER(GUID), POINTER(c_void_p), c_void_p]
     DirectInput8Create.restype = c_int32
 
+    DI_EFFECT_TYPE_MAP = {
+        "constant": DI_FF_EFFECT_CONSTANT,
+        "ramp": DI_FF_EFFECT_RAMP,
+        "square": DI_FF_EFFECT_SQUARE,
+        "sine": DI_FF_EFFECT_SINE,
+        "periodic_sine": DI_FF_EFFECT_SINE,
+        "directinput_periodic_sine": DI_FF_EFFECT_SINE,
+        "triangle": DI_FF_EFFECT_TRIANGLE,
+        "sawtoothup": DI_FF_EFFECT_SAWTOOTHUP,
+        "sawtoothdown": DI_FF_EFFECT_SAWTOOTHDOWN,
+        "spring": DI_FF_EFFECT_SPRING,
+        "damper": DI_FF_EFFECT_DAMPER,
+        "inertia": DI_FF_EFFECT_INERTIA,
+        "friction": DI_FF_EFFECT_FRICTION,
+        "custom": DI_FF_EFFECT_CUSTOM,
+    }
+
+    DI_PERIODIC_EFFECTS = {
+        DI_FF_EFFECT_SINE,
+        DI_FF_EFFECT_SQUARE,
+        DI_FF_EFFECT_TRIANGLE,
+        DI_FF_EFFECT_SAWTOOTHUP,
+        DI_FF_EFFECT_SAWTOOTHDOWN,
+    }
+
+    DI_CONDITION_EFFECTS = {
+        DI_FF_EFFECT_SPRING,
+        DI_FF_EFFECT_DAMPER,
+        DI_FF_EFFECT_INERTIA,
+        DI_FF_EFFECT_FRICTION,
+    }
+else:
+    DI_EFFECT_TYPE_MAP = {}
+    DI_PERIODIC_EFFECTS = set()
+    DI_CONDITION_EFFECTS = set()
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FFB_Engine")
@@ -132,28 +183,33 @@ if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "")
     logger.addHandler(_fh)
 
 # Maps user-friendly effect keys to SDL enums for periodic/condition effects
-PERIODIC_TYPES: Dict[str, int] = {
-    "sine": sdl_haptic.SDL_HAPTIC_SINE,
-    "periodic_sine": sdl_haptic.SDL_HAPTIC_SINE,
-    "directinput_periodic_sine": sdl_haptic.SDL_HAPTIC_SINE,
-    "square": sdl_haptic.SDL_HAPTIC_SQUARE,
-    "triangle": sdl_haptic.SDL_HAPTIC_TRIANGLE,
-    "sawtoothup": sdl_haptic.SDL_HAPTIC_SAWTOOTHUP,
-    "sawtoothdown": sdl_haptic.SDL_HAPTIC_SAWTOOTHDOWN,
-}
+if sdl_haptic:
+    PERIODIC_TYPES: Dict[str, int] = {
+        "sine": sdl_haptic.SDL_HAPTIC_SINE,
+        "periodic_sine": sdl_haptic.SDL_HAPTIC_SINE,
+        "directinput_periodic_sine": sdl_haptic.SDL_HAPTIC_SINE,
+        "square": sdl_haptic.SDL_HAPTIC_SQUARE,
+        "triangle": sdl_haptic.SDL_HAPTIC_TRIANGLE,
+        "sawtoothup": sdl_haptic.SDL_HAPTIC_SAWTOOTHUP,
+        "sawtoothdown": sdl_haptic.SDL_HAPTIC_SAWTOOTHDOWN,
+    }
 
-CONDITION_TYPES: Dict[str, int] = {
-    "spring": sdl_haptic.SDL_HAPTIC_SPRING,
-    "damper": sdl_haptic.SDL_HAPTIC_DAMPER,
-    "inertia": sdl_haptic.SDL_HAPTIC_INERTIA,
-    "friction": sdl_haptic.SDL_HAPTIC_FRICTION,
-}
+    CONDITION_TYPES: Dict[str, int] = {
+        "spring": sdl_haptic.SDL_HAPTIC_SPRING,
+        "damper": sdl_haptic.SDL_HAPTIC_DAMPER,
+        "inertia": sdl_haptic.SDL_HAPTIC_INERTIA,
+        "friction": sdl_haptic.SDL_HAPTIC_FRICTION,
+    }
 
-DIRECTION_MODES: Dict[str, int] = {
-    "polar": sdl_haptic.SDL_HAPTIC_POLAR,
-    "cartesian": sdl_haptic.SDL_HAPTIC_CARTESIAN,
-    "spherical": sdl_haptic.SDL_HAPTIC_SPHERICAL,
-}
+    DIRECTION_MODES: Dict[str, int] = {
+        "polar": sdl_haptic.SDL_HAPTIC_POLAR,
+        "cartesian": sdl_haptic.SDL_HAPTIC_CARTESIAN,
+        "spherical": sdl_haptic.SDL_HAPTIC_SPHERICAL,
+    }
+else:
+    PERIODIC_TYPES = {}
+    CONDITION_TYPES = {}
+    DIRECTION_MODES = {}
 
 
 def _sdl_error() -> str:
@@ -189,6 +245,7 @@ class HapticController:
         self._di_selected_guid: Optional[str] = None
         self._di_enum_devices: list[tuple[str, str]] = []
         self._di_effect_deadline_s: Optional[float] = None
+        self._di_active_effects: set[int] = set()
         self._force_cartesian_periodic = False
         
         # Polling rate throttling
@@ -232,10 +289,11 @@ class HapticController:
         flags = (
             sdl_init.SDL_INIT_VIDEO
             | sdl_init.SDL_INIT_JOYSTICK
-            | sdl_init.SDL_INIT_HAPTIC
             | sdl_init.SDL_INIT_GAMEPAD
             | sdl_init.SDL_INIT_EVENTS
         )
+        if sdl_haptic:
+            flags |= sdl_init.SDL_INIT_HAPTIC
 
         if not sdl_init.SDL_Init(flags):
             logger.error(f"SDL_Init Error: {_sdl_error()}")
@@ -289,8 +347,30 @@ class HapticController:
             self._di.CreateFFBEffect.restype = ctypes.c_long
             self._di.DestroyFFBEffect.argtypes = [ctypes.c_char_p, ctypes.c_int]
             self._di.DestroyFFBEffect.restype = ctypes.c_long
+            self._di.UpdateConstantForce.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            self._di.UpdateConstantForce.restype = ctypes.c_long
             self._di.UpdatePeriodicForce.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint32, ctypes.c_int]
             self._di.UpdatePeriodicForce.restype = ctypes.c_long
+            self._di.UpdateRampForce.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+            self._di.UpdateRampForce.restype = ctypes.c_long
+            self._di.UpdateConditionForce.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_int,
+            ]
+            self._di.UpdateConditionForce.restype = ctypes.c_long
+            self._di.UpdateCustomForce.argtypes = [
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int,
+                ctypes.c_uint32,
+            ]
+            self._di.UpdateCustomForce.restype = ctypes.c_long
             self._di.StopAllFFBEffects.argtypes = [ctypes.c_char_p]
             self._di.StopAllFFBEffects.restype = ctypes.c_long
             self._di.GetDILastError.argtypes = [ctypes.c_char_p, ctypes.c_int]
@@ -392,10 +472,12 @@ class HapticController:
             if self._di_selected_guid:
                 guid_b = self._di_selected_guid.encode("utf-8")
                 self._di.StopAllFFBEffects(guid_b)
-                try:
-                    self._di.DestroyFFBEffect(guid_b, DI_FF_EFFECT_SINE)
-                except Exception:
-                    pass
+                for effect_type in list(self._di_active_effects):
+                    try:
+                        self._di.DestroyFFBEffect(guid_b, effect_type)
+                    except Exception:
+                        pass
+                self._di_active_effects.clear()
                 self._di.DestroyDevice(guid_b)
             self._di.StopDirectInput()
         except Exception as e:
@@ -404,6 +486,7 @@ class HapticController:
             self._di_active = False
             self._di_selected_guid = None
             self._di_effect_deadline_s = None
+            self._di_active_effects.clear()
 
     def _normalize_di_magnitude(self, magnitude: int, unit: str = "auto") -> int:
         mag_in = abs(int(magnitude))
@@ -426,47 +509,225 @@ class HapticController:
 
         return max(0, min(10000, int(safe_mag)))
 
-    def _di_start_sine(self, duration_us: int, magnitude: int, period_us: int, magnitude_unit: str = "auto") -> int:
-        if not self._di_active or not self._di:
-            self.last_effect_error = "DirectInput backend not initialized"
-            logger.error("DirectInput backend not initialized")
-            return -1
+    def _normalize_di_signed_magnitude(self, magnitude: int, unit: str = "auto") -> int:
+        sign = -1 if int(magnitude) < 0 else 1
+        safe_mag = self._normalize_di_magnitude(abs(int(magnitude)), unit)
+        return max(-10000, min(10000, int(sign * safe_mag)))
 
+    def _di_set_deadline(self, duration_us: int) -> None:
         safe_dur = max(0, int(duration_us))
         if safe_dur > 0:
             self._di_effect_deadline_s = time.monotonic() + (safe_dur / 1_000_000.0) + 0.05
         else:
             self._di_effect_deadline_s = None
 
+    def _di_ensure_effect(self, effect_type: int) -> bool:
+        if effect_type in self._di_active_effects:
+            return True
+        if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
+            logger.error(self.last_effect_error)
+            return False
+        if not self._di_selected_guid:
+            self.last_effect_error = "Unity DI device GUID not selected"
+            logger.error(self.last_effect_error)
+            return False
         try:
-            if not self._di_selected_guid:
-                self.last_effect_error = "Unity DI device GUID not selected"
-                logger.error(self.last_effect_error)
-                return -1
-
-            safe_mag = self._normalize_di_magnitude(magnitude, magnitude_unit)
-            safe_period = max(1, int(period_us))
             guid_b = self._di_selected_guid.encode("utf-8")
-
-            self._di.DestroyFFBEffect(guid_b, DI_FF_EFFECT_SINE)
-            self._di.CreateFFBEffect(guid_b, DI_FF_EFFECT_SINE)
-
-            res = int(self._di.UpdatePeriodicForce(guid_b, DI_FF_EFFECT_SINE, safe_mag, safe_period, 0))
+            res = int(self._di.CreateFFBEffect(guid_b, effect_type))
             if res < 0:
+                if (res & 0xFFFFFFFF) == 0x80004004:  # E_ABORT: effect already exists
+                    self._di_active_effects.add(effect_type)
+                    return True
                 detail = self._unity_di_last_error()
                 self.last_effect_error = (
-                    f"Unity DI UpdatePeriodicForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                    f"Unity DI CreateFFBEffect failed: {res} (0x{res & 0xFFFFFFFF:08X})"
                     + (f" | {detail}" if detail else "")
                 )
                 logger.error(self.last_effect_error)
-                return -1
-
-            self.last_effect_error = ""
-            return 1
+                return False
+            self._di_active_effects.add(effect_type)
+            return True
         except Exception as e:
-            self.last_effect_error = f"Unity DI periodic sine exception: {e}"
+            self.last_effect_error = f"Unity DI CreateFFBEffect exception: {e}"
             logger.error(self.last_effect_error)
+            return False
+
+    def _di_update_periodic(self, effect_type: int, magnitude: int, period_us: int, offset: int = 0, magnitude_unit: str = "auto") -> bool:
+        if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
+            logger.error(self.last_effect_error)
+            return False
+        if not self._di_selected_guid:
+            self.last_effect_error = "Unity DI device GUID not selected"
+            logger.error(self.last_effect_error)
+            return False
+
+        safe_mag = self._normalize_di_magnitude(magnitude, magnitude_unit)
+        safe_period = max(1, int(period_us))
+        safe_offset = max(-10000, min(10000, int(offset)))
+        guid_b = self._di_selected_guid.encode("utf-8")
+
+        res = int(self._di.UpdatePeriodicForce(guid_b, effect_type, safe_mag, safe_period, safe_offset))
+        if res < 0:
+            detail = self._unity_di_last_error()
+            self.last_effect_error = (
+                f"Unity DI UpdatePeriodicForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                + (f" | {detail}" if detail else "")
+            )
+            logger.error(self.last_effect_error)
+            return False
+        self.last_effect_error = ""
+        return True
+
+    def _di_update_constant(self, magnitude: int, magnitude_unit: str = "auto") -> bool:
+        if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
+            logger.error(self.last_effect_error)
+            return False
+        if not self._di_selected_guid:
+            self.last_effect_error = "Unity DI device GUID not selected"
+            logger.error(self.last_effect_error)
+            return False
+
+        safe_mag = self._normalize_di_signed_magnitude(magnitude, magnitude_unit)
+        guid_b = self._di_selected_guid.encode("utf-8")
+        res = int(self._di.UpdateConstantForce(guid_b, safe_mag))
+        if res < 0:
+            detail = self._unity_di_last_error()
+            self.last_effect_error = (
+                f"Unity DI UpdateConstantForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                + (f" | {detail}" if detail else "")
+            )
+            logger.error(self.last_effect_error)
+            return False
+        self.last_effect_error = ""
+        return True
+
+    def _di_update_ramp(self, start_mag: int, end_mag: int, magnitude_unit: str = "auto") -> bool:
+        if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
+            logger.error(self.last_effect_error)
+            return False
+        if not self._di_selected_guid:
+            self.last_effect_error = "Unity DI device GUID not selected"
+            logger.error(self.last_effect_error)
+            return False
+
+        safe_start = self._normalize_di_signed_magnitude(start_mag, magnitude_unit)
+        safe_end = self._normalize_di_signed_magnitude(end_mag, magnitude_unit)
+        guid_b = self._di_selected_guid.encode("utf-8")
+        res = int(self._di.UpdateRampForce(guid_b, safe_start, safe_end))
+        if res < 0:
+            detail = self._unity_di_last_error()
+            self.last_effect_error = (
+                f"Unity DI UpdateRampForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                + (f" | {detail}" if detail else "")
+            )
+            logger.error(self.last_effect_error)
+            return False
+        self.last_effect_error = ""
+        return True
+
+    def _di_update_condition(
+        self,
+        effect_type: int,
+        offset: int,
+        positive_coefficient: int,
+        negative_coefficient: int,
+        positive_saturation: int,
+        negative_saturation: int,
+        deadband: int,
+        magnitude_unit: str = "auto",
+    ) -> bool:
+        if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
+            logger.error(self.last_effect_error)
+            return False
+        if not self._di_selected_guid:
+            self.last_effect_error = "Unity DI device GUID not selected"
+            logger.error(self.last_effect_error)
+            return False
+
+        safe_offset = max(-10000, min(10000, int(offset)))
+        safe_pos_coef = self._normalize_di_signed_magnitude(positive_coefficient, magnitude_unit)
+        safe_neg_coef = self._normalize_di_signed_magnitude(negative_coefficient, magnitude_unit)
+        safe_pos_sat = max(0, min(10000, int(positive_saturation)))
+        safe_neg_sat = max(0, min(10000, int(negative_saturation)))
+        safe_deadband = max(0, min(10000, int(deadband)))
+        guid_b = self._di_selected_guid.encode("utf-8")
+
+        res = int(
+            self._di.UpdateConditionForce(
+                guid_b,
+                effect_type,
+                safe_offset,
+                safe_pos_coef,
+                safe_neg_coef,
+                safe_pos_sat,
+                safe_neg_sat,
+                safe_deadband,
+            )
+        )
+        if res < 0:
+            detail = self._unity_di_last_error()
+            self.last_effect_error = (
+                f"Unity DI UpdateConditionForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                + (f" | {detail}" if detail else "")
+            )
+            logger.error(self.last_effect_error)
+            return False
+        self.last_effect_error = ""
+        return True
+
+    def _di_update_custom(self, samples: list[int], sample_period_us: int, magnitude_unit: str = "auto") -> bool:
+        if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
+            logger.error(self.last_effect_error)
+            return False
+        if not self._di_selected_guid:
+            self.last_effect_error = "Unity DI device GUID not selected"
+            logger.error(self.last_effect_error)
+            return False
+
+        if not samples:
+            self.last_effect_error = "Unity DI custom force missing samples"
+            logger.error(self.last_effect_error)
+            return False
+
+        converted = [self._normalize_di_signed_magnitude(s, magnitude_unit) for s in samples]
+        count = len(converted)
+        array_type = ctypes.c_int * count
+        data = array_type(*converted)
+        safe_period = max(1, int(sample_period_us))
+        guid_b = self._di_selected_guid.encode("utf-8")
+
+        res = int(self._di.UpdateCustomForce(guid_b, data, count, safe_period))
+        if res < 0:
+            detail = self._unity_di_last_error()
+            self.last_effect_error = (
+                f"Unity DI UpdateCustomForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                + (f" | {detail}" if detail else "")
+            )
+            logger.error(self.last_effect_error)
+            return False
+        self.last_effect_error = ""
+        return True
+
+    def _di_start_sine(self, duration_us: int, magnitude: int, period_us: int, magnitude_unit: str = "auto") -> int:
+        if not self._di_ensure_effect(DI_FF_EFFECT_SINE):
             return -1
+
+        self._di_set_deadline(duration_us)
+
+        ok = self._di_update_periodic(
+            DI_FF_EFFECT_SINE,
+            magnitude,
+            period_us,
+            0,
+            magnitude_unit=magnitude_unit,
+        )
+        return 1 if ok else -1
         
     def _register_custom_events(self):
         """Register SDL3 custom user events for asynchronous API calls."""
@@ -563,7 +824,8 @@ class HapticController:
 
             tmp_joy = sdl_joy.SDL_OpenJoystick(joy_id)
             if tmp_joy:
-                is_haptic = bool(sdl_haptic.SDL_IsJoystickHaptic(tmp_joy))
+                if sdl_haptic:
+                    is_haptic = bool(sdl_haptic.SDL_IsJoystickHaptic(tmp_joy))
                 sdl_joy.SDL_CloseJoystick(tmp_joy)
 
             logger.info(
@@ -619,6 +881,10 @@ class HapticController:
 
         if not self._device_ids:
             self.list_devices()
+
+        if not sdl_haptic:
+            logger.error("SDL haptic backend removed; DirectInput only.")
+            return False
 
         if index < 0 or index >= len(self._device_ids):
             logger.error(f"Invalid device index {index}")
@@ -1013,7 +1279,7 @@ class HapticController:
             direction.dir[i] = int(comp)
         return direction
 
-    def _log_haptic_failure_details(self, kind: str, effect: sdl_haptic.SDL_HapticEffect, err_str: str):
+    def _log_haptic_failure_details(self, kind: str, effect: Any, err_str: str):
         """Logs DirectInput-style details for haptic creation failures."""
         import re
         m = re.search(r"0x([0-9A-Fa-f]{8})", err_str)
@@ -1134,7 +1400,7 @@ class HapticController:
         effect.leftright.large_magnitude = self._clamp_short(desc.get("large_magnitude", desc.get("magnitude", 20000)))
         effect.leftright.small_magnitude = self._clamp_short(desc.get("small_magnitude", desc.get("magnitude", 12000)))
 
-    def build_effect_from_descriptor(self, desc: Dict) -> Optional[sdl_haptic.SDL_HapticEffect]:
+    def build_effect_from_descriptor(self, desc: Dict) -> Optional[Any]:
         if not self.haptic:
             return None
 
@@ -1163,33 +1429,108 @@ class HapticController:
 
     def _play_directinput_descriptor(self, desc: Dict) -> int:
         kind = (desc.get("type") or desc.get("effect") or "sine").lower()
-        if kind not in {"sine", "periodic_sine", "directinput_periodic_sine"}:
-            self.last_effect_error = f"DirectInput backend only supports periodic sine (got '{kind}')"
-            logger.error(f"DirectInput backend only supports periodic sine (got '{kind}')")
+        effect_type = DI_EFFECT_TYPE_MAP.get(kind)
+        if effect_type is None:
+            self.last_effect_error = f"DirectInput backend does not support effect '{kind}'"
+            logger.error(self.last_effect_error)
             return -1
 
-        mag_raw = int(desc.get("magnitude", 10000))
+        if "length_us" not in desc:
+            self.last_effect_error = "DirectInput requires length_us"
+            logger.error("DirectInput descriptor missing length_us")
+            return -1
+        length_us = int(desc["length_us"])
+        self._di_set_deadline(length_us)
+
+        self._current_descriptor = desc
         mag_unit = str(desc.get("magnitude_unit", "auto"))
-        mag_di = self._normalize_di_magnitude(mag_raw, mag_unit)
-        
-        if "length_us" in desc:
-            length_us = int(desc["length_us"])
-        else:
-            length_us = int(desc.get("length_ms", 5000)) * 1000
-            
-        if "period_us" in desc:
-            period_us = int(desc["period_us"])
-        else:
-            freq = float(desc.get("frequency_hz", 10.0))
-            period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
 
-        logger.info(
-            "DI-DESC: resolved payload "
-            f"type={kind} mag_in={mag_raw} unit={mag_unit} mag_di={mag_di} "
-            f"length_us={length_us} period_us={period_us}"
-        )
+        if effect_type in DI_PERIODIC_EFFECTS:
+            mag_raw = int(desc.get("magnitude", 10000))
+            period_us = int(desc.get("period_us", 0))
+            if period_us <= 0:
+                freq = float(desc.get("frequency_hz", 10.0))
+                period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
+            offset = int(desc.get("offset", 0))
 
-        return self._di_start_sine(length_us, mag_di, period_us, magnitude_unit="di")
+            logger.info(
+                "DI-DESC: resolved payload "
+                f"type={kind} mag_in={mag_raw} unit={mag_unit} "
+                f"length_us={length_us} period_us={period_us} offset={offset}"
+            )
+
+            if not self._di_ensure_effect(effect_type):
+                return -1
+            ok = self._di_update_periodic(effect_type, mag_raw, period_us, offset, magnitude_unit=mag_unit)
+            return 1 if ok else -1
+
+        if effect_type == DI_FF_EFFECT_CONSTANT:
+            mag_raw = int(desc.get("magnitude", 0))
+            logger.info(
+                "DI-DESC: resolved payload "
+                f"type={kind} mag_in={mag_raw} unit={mag_unit} length_us={length_us}"
+            )
+            if not self._di_ensure_effect(effect_type):
+                return -1
+            ok = self._di_update_constant(mag_raw, magnitude_unit=mag_unit)
+            return 1 if ok else -1
+
+        if effect_type == DI_FF_EFFECT_RAMP:
+            start_mag = int(desc.get("start_mag", 0))
+            end_mag = int(desc.get("end_mag", 0))
+            logger.info(
+                "DI-DESC: resolved payload "
+                f"type={kind} start={start_mag} end={end_mag} unit={mag_unit} length_us={length_us}"
+            )
+            if not self._di_ensure_effect(effect_type):
+                return -1
+            ok = self._di_update_ramp(start_mag, end_mag, magnitude_unit=mag_unit)
+            return 1 if ok else -1
+
+        if effect_type in DI_CONDITION_EFFECTS:
+            base_mag = int(desc.get("magnitude", 0))
+            offset = int(desc.get("offset", 0))
+            pos_coef = int(desc.get("positive_coefficient", base_mag))
+            neg_coef = int(desc.get("negative_coefficient", base_mag))
+            pos_sat = int(desc.get("positive_saturation", 10000))
+            neg_sat = int(desc.get("negative_saturation", 10000))
+            deadband = int(desc.get("deadband", 0))
+
+            logger.info(
+                "DI-DESC: resolved payload "
+                f"type={kind} offset={offset} pos_coef={pos_coef} neg_coef={neg_coef} "
+                f"pos_sat={pos_sat} neg_sat={neg_sat} deadband={deadband} unit={mag_unit} length_us={length_us}"
+            )
+
+            if not self._di_ensure_effect(effect_type):
+                return -1
+            ok = self._di_update_condition(
+                effect_type,
+                offset,
+                pos_coef,
+                neg_coef,
+                pos_sat,
+                neg_sat,
+                deadband,
+                magnitude_unit=mag_unit,
+            )
+            return 1 if ok else -1
+
+        if effect_type == DI_FF_EFFECT_CUSTOM:
+            samples = desc.get("samples", [])
+            sample_period_us = int(desc.get("sample_period_us", 1000))
+            logger.info(
+                "DI-DESC: resolved payload "
+                f"type={kind} samples={len(samples)} sample_period_us={sample_period_us} length_us={length_us}"
+            )
+            if not self._di_ensure_effect(effect_type):
+                return -1
+            ok = self._di_update_custom(samples, sample_period_us, magnitude_unit=mag_unit)
+            return 1 if ok else -1
+
+        self.last_effect_error = f"DirectInput backend has no handler for effect '{kind}'"
+        logger.error(self.last_effect_error)
+        return -1
 
     def get_last_effect_error(self) -> str:
         return self.last_effect_error
@@ -1275,18 +1616,41 @@ class HapticController:
         logger.error(f"DIAG: Start(iterations=1, flags=0) FAILED -> HRESULT={err}")
         return -1
     # --- Sequencer Methods ---
-    def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = 0, magnitude_unit: str = "s16"):
+    def update_effect_sine(
+        self,
+        effect_id: int,
+        freq: float,
+        magnitude: int,
+        duration_ms: int,
+        phase: int = 0,
+        magnitude_unit: str = "s16",
+        duration_us: Optional[int] = None,
+    ):
         """Updates sine effect parameters during playback (sweep updates)."""
         if self.backend_mode == "directinput":
+            desc = getattr(self, "_current_descriptor", {}) or {}
+            kind = (desc.get("type") or desc.get("effect") or "sine").lower()
+            effect_type = DI_EFFECT_TYPE_MAP.get(kind, DI_FF_EFFECT_SINE)
+            if effect_type not in DI_PERIODIC_EFFECTS:
+                self.last_effect_error = f"DirectInput update only supports periodic effects (got '{kind}')"
+                logger.error(self.last_effect_error)
+                return -1
+
             period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
-            duration_us = int(duration_ms) * 1000
-            mag_di = self._normalize_di_magnitude(magnitude, magnitude_unit)
+            if duration_us is None:
+                duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+
             logger.info(
                 "DI-UPDATE: resolved payload "
-                f"freq={freq} mag_in={magnitude} unit={magnitude_unit} mag_di={mag_di} "
+                f"type={kind} freq={freq} mag_in={magnitude} unit={magnitude_unit} "
                 f"duration_us={duration_us} period_us={period_us} phase={phase}"
             )
-            return self._di_start_sine(duration_us, mag_di, period_us, magnitude_unit="di")
+
+            if not self._di_ensure_effect(effect_type):
+                return -1
+            ok = self._di_update_periodic(effect_type, magnitude, period_us, 0, magnitude_unit=magnitude_unit)
+            return 1 if ok else -1
 
         if not self.haptic or effect_id == -1:
             return -1
@@ -1339,12 +1703,17 @@ class HapticController:
 
     def update_effect_constant(self, effect_id: int, magnitude: int, duration_ms: int):
         if self.backend_mode == "directinput":
-            logger.error("DirectInput backend does not support constant effect updates")
-            return
+            duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+            if not self._di_ensure_effect(DI_FF_EFFECT_CONSTANT):
+                return -1
+            ok = self._di_update_constant(magnitude, magnitude_unit="auto")
+            return effect_id if ok else -1
         if self.hw_sine_active:
             logger.warning(f"WARN: HW mode active but streaming updates are still being sent (update_effect_constant blocked)")
-            return
-        if not self.haptic or effect_id == -1: return
+            return -1
+        if not self.haptic or effect_id == -1:
+            return -1
         
         effect = sdl_haptic.SDL_HapticEffect()
         effect.type = sdl_haptic.SDL_HAPTIC_CONSTANT
@@ -1353,15 +1722,21 @@ class HapticController:
         effect.constant.level = magnitude
         
         sdl_haptic.SDL_UpdateHapticEffect(self.haptic, effect_id, ctypes.byref(effect))
+        return effect_id
 
     def update_effect_ramp(self, effect_id: int, start_mag: int, end_mag: int, duration_ms: int):
         if self.backend_mode == "directinput":
-            logger.error("DirectInput backend does not support ramp effect updates")
-            return
+            duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+            if not self._di_ensure_effect(DI_FF_EFFECT_RAMP):
+                return -1
+            ok = self._di_update_ramp(start_mag, end_mag, magnitude_unit="auto")
+            return effect_id if ok else -1
         if self.hw_sine_active:
             logger.warning(f"WARN: HW mode active but streaming updates are still being sent (update_effect_ramp blocked)")
-            return
-        if not self.haptic or effect_id == -1: return
+            return -1
+        if not self.haptic or effect_id == -1:
+            return -1
 
         effect = sdl_haptic.SDL_HapticEffect()
         effect.type = sdl_haptic.SDL_HAPTIC_RAMP
@@ -1371,15 +1746,27 @@ class HapticController:
         effect.ramp.end = end_mag
         
         sdl_haptic.SDL_UpdateHapticEffect(self.haptic, effect_id, ctypes.byref(effect))
+        return effect_id
 
     def update_effect_sawtooth(self, effect_id: int, magnitude: int, period: int, duration_ms: int):
         if self.backend_mode == "directinput":
-            logger.error("DirectInput backend does not support sawtooth effect updates")
-            return
+            duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+            if not self._di_ensure_effect(DI_FF_EFFECT_SAWTOOTHUP):
+                return -1
+            ok = self._di_update_periodic(
+                DI_FF_EFFECT_SAWTOOTHUP,
+                magnitude,
+                int(period),
+                0,
+                magnitude_unit="auto",
+            )
+            return effect_id if ok else -1
         if self.hw_sine_active:
             logger.warning(f"WARN: HW mode active but streaming updates are still being sent (update_effect_sawtooth blocked)")
-            return
-        if not self.haptic or effect_id == -1: return
+            return -1
+        if not self.haptic or effect_id == -1:
+            return -1
 
         effect = sdl_haptic.SDL_HapticEffect()
         effect.type = sdl_haptic.SDL_HAPTIC_SAWTOOTHUP
@@ -1392,11 +1779,16 @@ class HapticController:
         effect.periodic.fade_length = 50
         
         sdl_haptic.SDL_UpdateHapticEffect(self.haptic, effect_id, ctypes.byref(effect))
+        return effect_id
 
     def start_effect_constant(self, magnitude: int, duration_ms: int):
         if self.backend_mode == "directinput":
-            logger.error("DirectInput backend does not support constant effects")
-            return -1
+            duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+            if not self._di_ensure_effect(DI_FF_EFFECT_CONSTANT):
+                return -1
+            ok = self._di_update_constant(magnitude, magnitude_unit="auto")
+            return 1 if ok else -1
         if self.hw_sine_active:
             logger.warning(f"WARN: HW mode active but streaming updates are still being sent (start_effect_constant blocked)")
             return -1
@@ -1415,8 +1807,12 @@ class HapticController:
         
     def start_effect_ramp(self, start_mag: int, end_mag: int, duration_ms: int):
         if self.backend_mode == "directinput":
-            logger.error("DirectInput backend does not support ramp effects")
-            return -1
+            duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+            if not self._di_ensure_effect(DI_FF_EFFECT_RAMP):
+                return -1
+            ok = self._di_update_ramp(start_mag, end_mag, magnitude_unit="auto")
+            return 1 if ok else -1
         if self.hw_sine_active:
             logger.warning(f"WARN: HW mode active but streaming updates are still being sent (start_effect_ramp blocked)")
             return -1
@@ -1436,8 +1832,18 @@ class HapticController:
 
     def start_effect_sawtooth(self, magnitude: int, period: int, duration_ms: int):
         if self.backend_mode == "directinput":
-            logger.error("DirectInput backend does not support sawtooth effects")
-            return -1
+            duration_us = int(duration_ms) * 1000
+            self._di_set_deadline(duration_us)
+            if not self._di_ensure_effect(DI_FF_EFFECT_SAWTOOTHUP):
+                return -1
+            ok = self._di_update_periodic(
+                DI_FF_EFFECT_SAWTOOTHUP,
+                magnitude,
+                int(period),
+                0,
+                magnitude_unit="auto",
+            )
+            return 1 if ok else -1
         if self.hw_sine_active:
             logger.warning(f"WARN: HW mode active but streaming updates are still being sent (start_effect_sawtooth blocked)")
             return -1
@@ -1466,12 +1872,15 @@ class HapticController:
                     if self._di_selected_guid:
                         guid_b = self._di_selected_guid.encode("utf-8")
                         self._di.StopAllFFBEffects(guid_b)
-                        try:
-                            self._di.DestroyFFBEffect(guid_b, DI_FF_EFFECT_SINE)
-                        except Exception:
-                            pass
+                        for effect_type in list(self._di_active_effects):
+                            try:
+                                self._di.DestroyFFBEffect(guid_b, effect_type)
+                            except Exception:
+                                pass
+                        self._di_active_effects.clear()
                 except Exception as e:
                     logger.error(f"DirectInput stop failed: {e}")
+            self._di_active_effects.clear()
             self._di_effect_deadline_s = None
             self.effect_id = -1
             return
@@ -1731,6 +2140,18 @@ class HapticController:
 
         hwp_log("--- STARTING HARDWARE EFFECTS PROBE ---")
         hwp_log(f"Streamed updates: {'on' if stream_updates else 'off'}")
+
+        if not sdl_haptic:
+            hwp_log("FAIL stage=Backend rc=-1 err=\"SDL haptics not available (DirectInput-only build)\"")
+            self.last_probe_result = {
+                "conclusion_sine": "BACKEND_NOT_SUPPORTED",
+                "recommendation": "SDL haptics not available in this build",
+            }
+            return {
+                "status": "FAIL",
+                "reason": "SDL haptics not available",
+                "tests": {},
+            }
 
         if self.backend_mode != "sdl3":
             hwp_log("FAIL stage=Backend rc=-1 err=\"Hardware Effects Probe requires SDL3 backend\"")
@@ -2048,6 +2469,15 @@ class HapticController:
                 "reason": "DirectInput sine started and ran without software streaming",
             }
 
+        if not sdl_haptic:
+            self.last_diag_result = {
+                "mode": "HW periodic",
+                "actual": "FAIL",
+                "fallback": "no",
+                "reason": "SDL haptics not available",
+            }
+            return {"status": "FAIL", "reason": "SDL haptics not available"}
+
         if not self.haptic:
             return {"status": "FAIL", "reason": "No haptic device connected"}
         
@@ -2165,9 +2595,11 @@ class HapticController:
                         f.write(f"{k}: {v}\n")
                 else:
                     name = "None"
-                    if self.haptic:
+                    if self.haptic and sdl_haptic:
                         name_ptr = sdl_haptic.SDL_GetHapticName(self.haptic)
                         name = name_ptr.decode('utf-8') if name_ptr else "Unknown"
+                    elif self.haptic:
+                        name = "Unknown (SDL haptics unavailable)"
                     f.write(f"Name: {name}\n")
                 
                 f.write("\n--- Hardware Effects Probe (HWP Logs) ---\n")

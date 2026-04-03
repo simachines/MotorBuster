@@ -255,7 +255,7 @@ class InspectorPanel:
              dpg.add_separator()
              
              # Fields
-             dpg.add_combo(label="Effect Type", items=["Sine","Square","Triangle","SawtoothUp","SawtoothDown","Constant","Ramp","Spring","Damper","Inertia","Friction","LeftRight"], tag=self.tag_type, callback=self.on_change, user_data="type")
+             dpg.add_combo(label="Effect Type", items=["Sine","Square","Triangle","SawtoothUp","SawtoothDown","Constant","Spring","Damper","Inertia","Friction"], tag=self.tag_type, callback=self.on_change, user_data="type")
              dpg.add_input_float(label="Start (s)", tag=self.tag_start, callback=self.on_change, user_data="start")
              dpg.add_input_float(label="Duration (s)", tag=self.tag_dur, callback=self.on_change, user_data="dur")
              dpg.add_slider_int(label="Magnitude %", tag=self.tag_mag, max_value=100, callback=self.on_change, user_data="mag")
@@ -646,7 +646,7 @@ class MotorBusterNativeApp:
         mag = clip.magnitude
         
         # Non-periodic / Constant-like types for visualization
-        if clip.type in ("Constant", "Spring", "Damper", "Inertia", "Friction", "LeftRight"):
+        if clip.type in ("Constant", "Spring", "Damper", "Inertia", "Friction"):
             return mag
         
         # Periodic types
@@ -683,7 +683,7 @@ class MotorBusterNativeApp:
             else:
                 return mag * (4.0 * norm_phase - 4.0)
                 
-        elif clip.type in ("Sawtooth", "SawtoothUp", "Ramp"):
+        elif clip.type in ("Sawtooth", "SawtoothUp"):
              # Shifted to match Sine: Start at 0, go up
              # Original was -1 + 2*norm (Starts at -1)
              # New: Starts at 0, wraps at 0.5 (180 deg) ? 
@@ -769,10 +769,14 @@ class MotorBusterNativeApp:
     def log_api(self, action, payload):
         """Record haptic API interactions; mirror only to API console/buffer (not main UI log)."""
         preview = payload
+        if isinstance(payload, dict):
+            preview = dict(payload)
+            if "length_us" in preview:
+                preview.pop("length_ms", None)
         try:
-            preview = json.dumps(payload) if not isinstance(payload, str) else payload
+            preview = json.dumps(preview) if not isinstance(preview, str) else preview
         except Exception:
-            preview = str(payload)
+            preview = str(preview)
         entry = f"API {action}: {preview}"
         print(entry)
 
@@ -2234,12 +2238,10 @@ class MotorBusterNativeApp:
                     "SawtoothDown": "sawtoothdown",
                     "Sawtooth": "sawtoothup",
                     "Constant": "constant",
-                    "Ramp": "ramp",
                     "Spring": "spring",
                     "Damper": "damper",
                     "Inertia": "inertia",
                     "Friction": "friction",
-                    "LeftRight": "leftright",
                 }
                 tkey = type_map.get(current_clip.type, "periodic_sine")
 
@@ -2264,7 +2266,6 @@ class MotorBusterNativeApp:
                     "type": tkey,
                     "frequency_hz": float(current_clip.frequency),
                     "magnitude": eff_mag,
-                    "length_ms": dur_ms,
                     "phase": phase_payload,
                     "direction_mode": direction_mode,
                     "direction": direction,
@@ -2278,15 +2279,24 @@ class MotorBusterNativeApp:
                     },
                 }
 
-                if self.backend_mode == "directinput" and tkey == "periodic_sine":
-                    # Unity DirectInput expects magnitude in DI range 0..10000.
-                    safe_freq = max(0.1, float(current_clip.frequency))
-                    eff_mag_di = self._s16_to_di(eff_mag)
-                    desc["magnitude"] = eff_mag_di
-                    desc["period_us"] = int(1_000_000.0 / safe_freq)
+                if self.backend_mode == "directinput":
                     desc["length_us"] = int(max(0, dur_ms)) * 1000
-                    desc["magnitude_unit"] = "di"
+                    desc["magnitude_unit"] = "s16"
                     desc["magnitude_src_s16"] = eff_mag
+                    if tkey in ("periodic_sine", "square", "triangle", "sawtoothup", "sawtoothdown"):
+                        safe_freq = max(0.1, float(current_clip.frequency))
+                        desc["period_us"] = int(1_000_000.0 / safe_freq)
+                    if tkey in ("spring", "damper", "inertia", "friction"):
+                        coeff = abs(int(eff_mag))
+                        coeff_di = self._s16_to_di(coeff)
+                        desc["offset"] = 0
+                        desc["positive_coefficient"] = -coeff
+                        desc["negative_coefficient"] = coeff
+                        desc["positive_saturation"] = coeff_di
+                        desc["negative_saturation"] = coeff_di
+                        desc["deadband"] = 0
+                else:
+                    desc["length_ms"] = dur_ms
 
                 # Log actual effect type: use explicit diagnostic naming
                 actual_type = tkey
@@ -2311,6 +2321,8 @@ class MotorBusterNativeApp:
                 state['last_mag'] = current_clip.magnitude
                 state['last_freq'] = current_clip.frequency
                 state['last_sent_freq'] = current_clip.frequency
+                state['last_start_mag'] = current_clip.start_mag
+                state['last_end_mag'] = current_clip.end_mag
                 state['creation_pending'] = True
                 return new_id
 
@@ -2345,7 +2357,7 @@ class MotorBusterNativeApp:
                     remaining_ms = int((current_clip.duration - (cur_t - current_clip.start_time)) * 1000)
                     if remaining_ms < 0: remaining_ms = 0 # Safety
                     
-                    if current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp"):
+                    if current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown"):
                         # --- REAL-TIME UPDATE LOGIC ---
                         # Verify change against stored state or just update if sweep
                         is_sweep = current_clip.frequency != current_clip.frequency_end and current_clip.sweep_enabled
@@ -2412,14 +2424,18 @@ class MotorBusterNativeApp:
                              eff_mag = int(current_clip.magnitude * global_gain)
                              # Log all params being sent to engine
                              update_type = "update_effect_sine"
-                             log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": phase_payload}
+                             log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "phase": phase_payload}
+                             length_us = None
                              if self.backend_mode == "directinput":
                                  eff_mag_di = self._s16_to_di(eff_mag)
                                  log_payload["mag"] = eff_mag_di
                                  log_payload["period_us"] = int(1_000_000.0 / max(0.1, float(current_freq)))
-                                 log_payload["length_us"] = int(max(0, effect_len_ms)) * 1000
+                                 length_us = int(max(0, effect_len_ms)) * 1000
+                                 log_payload["length_us"] = length_us
                                  log_payload["magnitude_unit"] = "di"
                                  log_payload["magnitude_src_s16"] = eff_mag
+                             else:
+                                 log_payload["length_ms"] = effect_len_ms
                              self.log_api(update_type, log_payload)
 
                              new_eff_id = engine.update_effect_sine(
@@ -2429,6 +2445,7 @@ class MotorBusterNativeApp:
                                  effect_len_ms,
                                  phase=phase_payload,
                                  magnitude_unit=("di" if self.backend_mode == "directinput" else "s16"),
+                                 duration_us=length_us,
                              )
 
                              if new_eff_id != -1:
@@ -2442,8 +2459,56 @@ class MotorBusterNativeApp:
                         state['last_mag'] = current_clip.magnitude
                         state['last_freq'] = current_clip.frequency
 
+                    elif current_clip.type == "Ramp":
+                        # --- RAMP UPDATE LOGIC ---
+                        current_chain_end = self._get_contiguous_chain_end(track, current_clip)
+                        stored_chain_end = state.get('chain_end_time')
+                        chain_changed = (stored_chain_end is None) or (abs(current_chain_end - stored_chain_end) > 0.01)
+
+                        if chain_changed:
+                            state['chain_end_time'] = current_chain_end
+
+                        start_mag_raw = current_clip.start_mag
+                        end_mag_raw = current_clip.end_mag
+                        last_start = state.get('last_start_mag', None)
+                        last_end = state.get('last_end_mag', None)
+
+                        has_changed = (start_mag_raw != last_start) or (end_mag_raw != last_end) or chain_changed
+
+                        if has_changed:
+                            chain_end = state.get('chain_end_time', current_clip.start_time + current_clip.duration)
+                            hw_start = state.get('hw_start_time', current_clip.start_time)
+                            remaining_ms = int(max(0.0, chain_end - hw_start) * 1000)
+                            effect_len_ms = remaining_ms + self.UPDATE_LENGTH_BUFFER_MS
+
+                            start_mag = int(start_mag_raw * global_gain)
+                            end_mag = int(end_mag_raw * global_gain)
+
+                            log_payload = {"effect_id": eff_id, "start_mag": start_mag, "end_mag": end_mag}
+                            length_us = None
+                            if self.backend_mode == "directinput":
+                                length_us = int(max(0, effect_len_ms)) * 1000
+                                log_payload["length_us"] = length_us
+                                log_payload["magnitude_unit"] = "s16"
+                            else:
+                                log_payload["length_ms"] = effect_len_ms
+
+                            self.log_api("update_effect_ramp", log_payload)
+                            new_eff_id = engine.update_effect_ramp(
+                                eff_id,
+                                start_mag,
+                                end_mag,
+                                effect_len_ms,
+                            )
+                            if new_eff_id != -1:
+                                eff_id = new_eff_id
+                                state['effect_id'] = eff_id
+
+                        state['last_start_mag'] = start_mag_raw
+                        state['last_end_mag'] = end_mag_raw
+
                 # Update Phase Tracking for next frame's potential transition
-                if current_clip and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp"):
+                if current_clip and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown"):
                      t_local = max(0.0, cur_t - (state.get('effect_start_time') if state.get('effect_start_time') is not None else current_clip.start_time))
                      start_f = current_clip.frequency
                      end_f = current_clip.frequency_end if current_clip.sweep_enabled else start_f
@@ -2461,7 +2526,7 @@ class MotorBusterNativeApp:
                 
                 # Determine Start Phase for Gapless Continuity
                 start_phase_override = -1
-                if prev_cid is not None and current_clip and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp") and prev_ctype == current_clip.type:
+                if prev_cid is not None and current_clip and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown") and prev_ctype == current_clip.type:
                      # Robust calculation: Find previous clip object and calculate its end phase
                      prev_clip = self.sequencer.get_clip_by_id(prev_cid)
                      if prev_clip:
@@ -2478,7 +2543,7 @@ class MotorBusterNativeApp:
                 # Try Transfer (Reuse Effect)
                 transferred = False
                 should_stop_old = state.get('clip_was_infinite', False)
-                if eff_id != -1 and current_clip and prev_ctype == current_clip.type and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown", "Ramp"):
+                if eff_id != -1 and current_clip and prev_ctype == current_clip.type and current_clip.type in ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown"):
                     # Reuse the sine effect via update
                     
                     # Update Chain End if we switched clips (which we did, since curr != prev)
@@ -2516,14 +2581,18 @@ class MotorBusterNativeApp:
                     # Clamp to valid API range (0..35900); 36000 wraps to 0
                     phase_to_use = max(0, min(35900, int(phase_to_use)))
                     
-                    update_payload = {"effect_id": eff_id, "freq": current_clip.frequency, "mag": eff_mag, "length_ms": dur_ms, "phase": phase_to_use}
+                    update_payload = {"effect_id": eff_id, "freq": current_clip.frequency, "mag": eff_mag, "phase": phase_to_use}
+                    length_us = None
                     if self.backend_mode == "directinput":
                         eff_mag_di = self._s16_to_di(eff_mag)
                         update_payload["mag"] = eff_mag_di
                         update_payload["period_us"] = int(1_000_000.0 / max(0.1, float(current_clip.frequency)))
-                        update_payload["length_us"] = int(max(0, dur_ms)) * 1000
+                        length_us = int(max(0, dur_ms)) * 1000
+                        update_payload["length_us"] = length_us
                         update_payload["magnitude_unit"] = "di"
                         update_payload["magnitude_src_s16"] = eff_mag
+                    else:
+                        update_payload["length_ms"] = dur_ms
                     self.log_api("update_effect_sine", update_payload)
                     new_id = engine.update_effect_sine(
                         eff_id,
@@ -2532,6 +2601,40 @@ class MotorBusterNativeApp:
                         dur_ms,
                         phase=phase_to_use,
                         magnitude_unit=("di" if self.backend_mode == "directinput" else "s16"),
+                        duration_us=length_us,
+                    )
+                    if new_id != -1:
+                        transferred = True
+                        eff_id = new_id
+                        state['effect_start_time'] = current_clip.start_time
+                        state['creation_pending'] = False
+
+                elif eff_id != -1 and current_clip and prev_ctype == current_clip.type and current_clip.type == "Ramp":
+                    # Reuse the ramp effect via update
+                    chain_end = self._get_contiguous_chain_end(track, current_clip)
+                    state['chain_end_time'] = chain_end
+
+                    hw_start = state.get('hw_start_time', state.get('effect_start_time', 0))
+                    dur_ms = int(max(0.0, chain_end - hw_start) * 1000) + self.UPDATE_LENGTH_BUFFER_MS
+
+                    start_mag_raw = current_clip.start_mag
+                    end_mag_raw = current_clip.end_mag
+                    start_mag = int(start_mag_raw * global_gain)
+                    end_mag = int(end_mag_raw * global_gain)
+
+                    update_payload = {"effect_id": eff_id, "start_mag": start_mag, "end_mag": end_mag}
+                    if self.backend_mode == "directinput":
+                        update_payload["length_us"] = int(max(0, dur_ms)) * 1000
+                        update_payload["magnitude_unit"] = "s16"
+                    else:
+                        update_payload["length_ms"] = dur_ms
+
+                    self.log_api("update_effect_ramp", update_payload)
+                    new_id = engine.update_effect_ramp(
+                        eff_id,
+                        start_mag,
+                        end_mag,
+                        dur_ms,
                     )
                     if new_id != -1:
                         transferred = True
@@ -2564,11 +2667,15 @@ class MotorBusterNativeApp:
                     state['last_mag'] = current_clip.magnitude
                     state['last_freq'] = current_clip.frequency
                     state['last_phase'] = start_phase_override if start_phase_override != -1 else 0
+                    state['last_start_mag'] = current_clip.start_mag
+                    state['last_end_mag'] = current_clip.end_mag
                     state['clip_was_infinite'] = self._clip_is_infinite(current_clip)
                 else:
                     state['last_sent_freq'] = None
                     state['last_mag'] = None
                     state['last_freq'] = None
+                    state['last_start_mag'] = None
+                    state['last_end_mag'] = None
                     state['clip_was_infinite'] = False
 
 
@@ -3686,14 +3793,12 @@ class MotorBusterNativeApp:
                     self.make_drag_source("Square", "Square")
                     self.make_drag_source("Triangle", "Triangle")
                     self.make_drag_source("Constant", "Constant")
-                    self.make_drag_source("Ramp", "Ramp")
                     self.make_drag_source("Saw Up", "SawtoothUp")
                     self.make_drag_source("Saw Down", "SawtoothDown")
                     self.make_drag_source("Spring", "Spring")
                     self.make_drag_source("Damper", "Damper")
                     self.make_drag_source("Inertia", "Inertia")
                     self.make_drag_source("Friction", "Friction")
-                    self.make_drag_source("Left/Right", "LeftRight")
                     dpg.add_spacer(height=20)
                     dpg.add_button(label="+ Add Track", width=100, callback=lambda: self.sequencer.tracks.append(Track(name="New Track")))
 
