@@ -43,6 +43,17 @@ if platform.system() == "Windows":
     DISFFC_CONTINUE = 0x00000008
     DISFFC_SETACTUATORSON = 0x00000010
     DISFFC_SETACTUATORSOFF = 0x00000020
+    DI_FF_EFFECT_SINE = 3
+
+    class DIFFDeviceInfo(Structure):
+        _fields_ = [
+            ("deviceType", wintypes.DWORD),
+            ("guidInstance", c_char_p),
+            ("guidProduct", c_char_p),
+            ("instanceName", c_char_p),
+            ("productName", c_char_p),
+            ("FFBCapable", ctypes.c_bool),
+        ]
     
     class GUID(Structure):
         _fields_ = [
@@ -113,6 +124,13 @@ if platform.system() == "Windows":
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FFB_Engine")
 
+_engine_log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "motorbuster_engine.log"))
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == _engine_log_path for h in logger.handlers):
+    _fh = logging.FileHandler(_engine_log_path, mode="a", encoding="utf-8")
+    _fh.setLevel(logging.INFO)
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s"))
+    logger.addHandler(_fh)
+
 # Maps user-friendly effect keys to SDL enums for periodic/condition effects
 PERIODIC_TYPES: Dict[str, int] = {
     "sine": sdl_haptic.SDL_HAPTIC_SINE,
@@ -162,11 +180,15 @@ class HapticController:
         self.preferred_axis_key: Optional[str] = None
 
         # Backend selection
-        self.backend_mode: str = "sdl3"  # "sdl3" or "directinput"
+        self.backend_mode: str = "directinput"  # "sdl3" or "directinput"
         self._di = None
         self._di_loaded = False
         self._di_active = False
         self._di_hwnd = None
+        self._di_provider = "unity_di"
+        self._di_selected_guid: Optional[str] = None
+        self._di_enum_devices: list[tuple[str, str]] = []
+        self._di_effect_deadline_s: Optional[float] = None
         self._force_cartesian_periodic = False
         
         # Polling rate throttling
@@ -204,6 +226,7 @@ class HapticController:
         self.hw_sine_active = False
         self.device_caps_log = []
         self.device_identity = {}
+        self.last_effect_error: str = ""
 
     def init_sdl(self):
         flags = (
@@ -225,7 +248,7 @@ class HapticController:
 
     def set_backend_mode(self, mode: str) -> None:
         mode = (mode or "").strip().lower()
-        if mode not in {"sdl3", "directinput"}:
+        if mode != "directinput":
             logger.error(f"Invalid backend mode '{mode}'")
             return
         if self.backend_mode == mode:
@@ -240,69 +263,209 @@ class HapticController:
     def _load_directinput_dll(self) -> bool:
         if self._di_loaded:
             return True
-        dll_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "di_ffb.dll"))
-        if not os.path.exists(dll_path):
-            logger.error(f"DirectInput DLL not found: {dll_path}")
+
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        unity_di_path = os.path.join(base_dir, "DirectInputForceFeedback.dll")
+        if not os.path.exists(unity_di_path):
+            logger.error(f"DirectInput DLL not found: {unity_di_path}")
             return False
+
         try:
-            self._di = ctypes.CDLL(dll_path)
-            self._di.di_init.argtypes = [ctypes.c_void_p]
-            self._di.di_init.restype = ctypes.c_int
-            self._di.di_start_sine.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
-            self._di.di_start_sine.restype = ctypes.c_int
-            self._di.di_stop.argtypes = []
-            self._di.di_stop.restype = None
-            self._di.di_shutdown.argtypes = []
-            self._di.di_shutdown.restype = None
+            self._di = ctypes.CDLL(unity_di_path)
+            self._di.StartDirectInput.argtypes = []
+            self._di.StartDirectInput.restype = ctypes.c_long
+            if hasattr(self._di, "InitializeForStandalone"):
+                self._di.InitializeForStandalone.argtypes = []
+                self._di.InitializeForStandalone.restype = None
+            self._di.StopDirectInput.argtypes = []
+            self._di.StopDirectInput.restype = ctypes.c_long
+            self._di.EnumerateDevices.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            self._di.EnumerateDevices.restype = ctypes.POINTER(DIFFDeviceInfo)
+            self._di.CreateDevice.argtypes = [ctypes.c_char_p]
+            self._di.CreateDevice.restype = ctypes.c_long
+            self._di.DestroyDevice.argtypes = [ctypes.c_char_p]
+            self._di.DestroyDevice.restype = ctypes.c_long
+            self._di.CreateFFBEffect.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            self._di.CreateFFBEffect.restype = ctypes.c_long
+            self._di.DestroyFFBEffect.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            self._di.DestroyFFBEffect.restype = ctypes.c_long
+            self._di.UpdatePeriodicForce.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint32, ctypes.c_int]
+            self._di.UpdatePeriodicForce.restype = ctypes.c_long
+            self._di.StopAllFFBEffects.argtypes = [ctypes.c_char_p]
+            self._di.StopAllFFBEffects.restype = ctypes.c_long
+            self._di.GetDILastError.argtypes = [ctypes.c_char_p, ctypes.c_int]
+            self._di.GetDILastError.restype = ctypes.c_long
+            self._di.IsDirectInputInitialized.argtypes = []
+            self._di.IsDirectInputInitialized.restype = ctypes.c_bool
+            self._di_provider = "unity_di"
             self._di_loaded = True
+            logger.info(f"Loaded DirectInput provider: unity_di ({unity_di_path})")
             return True
         except Exception as e:
-            logger.error(f"Failed to load DirectInput DLL: {e}")
+            logger.error(f"Failed to load Unity DirectInput DLL '{unity_di_path}': {e}")
             return False
+
+    def _unity_di_last_error(self) -> str:
+        if not self._di or self._di_provider != "unity_di":
+            return ""
+        try:
+            buf = ctypes.create_string_buffer(1024)
+            self._di.GetDILastError(buf, len(buf))
+            return buf.value.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
 
     def _init_directinput_backend(self) -> bool:
         if not self._load_directinput_dll():
             return False
+
         try:
-            if not self._di_hwnd:
-                logger.warning("DirectInput init without HWND; attempting fallback (may fail in windowed mode)")
-            res = int(self._di.di_init(self._di_hwnd if self._di_hwnd else None))
-            if res != 0:
-                logger.error(f"DirectInput init failed: {res}")
+            if hasattr(self._di, "InitializeForStandalone"):
+                self._di.InitializeForStandalone()
+            res_start = int(self._di.StartDirectInput())
+            if res_start < 0:
+                last = self._unity_di_last_error()
+                logger.error(
+                    f"Unity DI StartDirectInput failed: {res_start} (0x{res_start & 0xFFFFFFFF:08X})"
+                    + (f" | {last}" if last else "")
+                )
                 return False
+
+            count = ctypes.c_int(0)
+            ptr = self._di.EnumerateDevices(ctypes.byref(count))
+            if count.value <= 0 or not ptr:
+                logger.error("Unity DI enumerate found no FFB devices")
+                return False
+
+            devices: list[tuple[str, str]] = []
+            for i in range(count.value):
+                dev = ptr[i]
+                if not bool(dev.FFBCapable):
+                    continue
+                guid = dev.guidInstance.decode("utf-8", errors="replace") if dev.guidInstance else ""
+                name_raw = dev.productName or dev.instanceName
+                name = name_raw.decode("utf-8", errors="replace") if name_raw else f"DirectInput Device {i}"
+                if guid:
+                    devices.append((guid, name))
+
+            if not devices:
+                logger.error("Unity DI enumerate found devices, but none were FFB-capable")
+                return False
+
+            self._di_enum_devices = devices
+            guid = self._di_selected_guid or devices[0][0]
+            if not any(g == guid for g, _ in devices):
+                guid = devices[0][0]
+
+            guid_b = guid.encode("utf-8")
+            res_create = int(self._di.CreateDevice(guid_b))
+            if res_create < 0:
+                last = self._unity_di_last_error()
+                logger.error(
+                    f"Unity DI CreateDevice failed: {res_create} (0x{res_create & 0xFFFFFFFF:08X})"
+                    + (f" | {last}" if last else "")
+                )
+                return False
+
+            res_eff = int(self._di.CreateFFBEffect(guid_b, DI_FF_EFFECT_SINE))
+            if res_eff < 0:
+                last = self._unity_di_last_error()
+                logger.error(
+                    f"Unity DI CreateFFBEffect(Sine) failed: {res_eff} (0x{res_eff & 0xFFFFFFFF:08X})"
+                    + (f" | {last}" if last else "")
+                )
+                return False
+
+            self._di_selected_guid = guid
             self._di_active = True
-            logger.info("DirectInput backend initialized")
+            logger.info(f"DirectInput backend initialized via Unity DI for guid={guid}")
             return True
         except Exception as e:
-            logger.error(f"DirectInput init exception: {e}")
+            logger.error(f"Unity DI init exception: {e}")
             return False
 
     def _shutdown_directinput_backend(self) -> None:
         if not self._di_active or not self._di:
             return
+
         try:
-            self._di.di_stop()
-            self._di.di_shutdown()
+            if self._di_selected_guid:
+                guid_b = self._di_selected_guid.encode("utf-8")
+                self._di.StopAllFFBEffects(guid_b)
+                try:
+                    self._di.DestroyFFBEffect(guid_b, DI_FF_EFFECT_SINE)
+                except Exception:
+                    pass
+                self._di.DestroyDevice(guid_b)
+            self._di.StopDirectInput()
         except Exception as e:
-            logger.debug(f"DirectInput shutdown failed: {e}")
+            logger.debug(f"Unity DI shutdown failed: {e}")
         finally:
             self._di_active = False
+            self._di_selected_guid = None
+            self._di_effect_deadline_s = None
 
-    def _di_start_sine(self, duration_ms: int, magnitude: int, freq_hz: float) -> int:
+    def _normalize_di_magnitude(self, magnitude: int, unit: str = "auto") -> int:
+        mag_in = abs(int(magnitude))
+        mode = (unit or "auto").lower()
+
+        if mode in {"di", "di_0_10000", "raw_di"}:
+            safe_mag = mag_in
+        elif mode in {"percent", "pct"}:
+            safe_mag = int(round(max(0, min(100, mag_in)) * 100))
+        elif mode in {"s16", "short", "raw32767", "clip"}:
+            safe_mag = int(round(max(0, min(32767, mag_in)) * 10000 / 32767.0))
+        else:
+            # Auto mode prefers legacy clip scale (0..32767), since that's what native_app emits.
+            if mag_in <= 100:
+                safe_mag = mag_in * 100
+            elif mag_in <= 32767:
+                safe_mag = int(round(mag_in * 10000 / 32767.0))
+            else:
+                safe_mag = 10000
+
+        return max(0, min(10000, int(safe_mag)))
+
+    def _di_start_sine(self, duration_us: int, magnitude: int, period_us: int, magnitude_unit: str = "auto") -> int:
         if not self._di_active or not self._di:
+            self.last_effect_error = "DirectInput backend not initialized"
             logger.error("DirectInput backend not initialized")
             return -1
+
+        safe_dur = max(0, int(duration_us))
+        if safe_dur > 0:
+            self._di_effect_deadline_s = time.monotonic() + (safe_dur / 1_000_000.0) + 0.05
+        else:
+            self._di_effect_deadline_s = None
+
         try:
-            safe_dur = max(1, int(duration_ms))
-            safe_mag = int(max(0, min(10000, abs(magnitude) / 32767.0 * 10000)))
-            safe_freq = max(1, int(round(freq_hz)))
-            res = int(self._di.di_start_sine(safe_dur, safe_mag, safe_freq))
-            if res != 0:
-                logger.error(f"DirectInput start sine failed: {res}")
+            if not self._di_selected_guid:
+                self.last_effect_error = "Unity DI device GUID not selected"
+                logger.error(self.last_effect_error)
                 return -1
+
+            safe_mag = self._normalize_di_magnitude(magnitude, magnitude_unit)
+            safe_period = max(1, int(period_us))
+            guid_b = self._di_selected_guid.encode("utf-8")
+
+            self._di.DestroyFFBEffect(guid_b, DI_FF_EFFECT_SINE)
+            self._di.CreateFFBEffect(guid_b, DI_FF_EFFECT_SINE)
+
+            res = int(self._di.UpdatePeriodicForce(guid_b, DI_FF_EFFECT_SINE, safe_mag, safe_period, 0))
+            if res < 0:
+                detail = self._unity_di_last_error()
+                self.last_effect_error = (
+                    f"Unity DI UpdatePeriodicForce failed: {res} (0x{res & 0xFFFFFFFF:08X})"
+                    + (f" | {detail}" if detail else "")
+                )
+                logger.error(self.last_effect_error)
+                return -1
+
+            self.last_effect_error = ""
             return 1
         except Exception as e:
-            logger.error(f"DirectInput start sine exception: {e}")
+            self.last_effect_error = f"Unity DI periodic sine exception: {e}"
+            logger.error(self.last_effect_error)
             return -1
         
     def _register_custom_events(self):
@@ -329,6 +492,53 @@ class HapticController:
             self._event_queue_enabled = False
         
     def list_devices(self):
+        if self.backend_mode == "directinput":
+            devices: list[DeviceInfo] = []
+            self._device_ids = []
+            self._di_enum_devices = []
+
+            if not self._load_directinput_dll():
+                logger.error("DirectInput mode selected but DI DLL failed to load")
+                return devices
+
+            try:
+                res_start = int(self._di.StartDirectInput())
+                if res_start < 0:
+                    detail = self._unity_di_last_error()
+                    logger.error(
+                        f"Unity DI StartDirectInput failed during scan: {res_start} (0x{res_start & 0xFFFFFFFF:08X})"
+                        + (f" | {detail}" if detail else "")
+                    )
+                    return devices
+
+                count = ctypes.c_int(0)
+                ptr = self._di.EnumerateDevices(ctypes.byref(count))
+                if count.value <= 0 or not ptr:
+                    logger.info("DirectInput scan found no DI devices")
+                    return devices
+
+                for i in range(count.value):
+                    dev = ptr[i]
+                    if not bool(dev.FFBCapable):
+                        continue
+
+                    guid = dev.guidInstance.decode("utf-8", errors="replace") if dev.guidInstance else ""
+                    name_raw = dev.productName or dev.instanceName
+                    name = name_raw.decode("utf-8", errors="replace") if name_raw else f"DirectInput Device {i}"
+                    if not guid:
+                        continue
+
+                    idx = len(self._di_enum_devices)
+                    self._di_enum_devices.append((guid, name))
+                    self._device_ids.append(idx)
+                    devices.append(DeviceInfo(index=idx, name=name))
+
+                logger.info(f"DirectInput scan found {len(devices)} FFB-capable device(s) via Unity DI")
+                return devices
+            except Exception as e:
+                logger.error(f"Unity DI scan exception: {e}")
+                return devices
+
         sdl_events.SDL_PumpEvents()
         
         devices: list[DeviceInfo] = []
@@ -365,6 +575,47 @@ class HapticController:
         return devices
     def connect_device(self, index: int):
         self.close_device()
+
+        if self.backend_mode == "directinput":
+            self.effect_id = -1
+            self._device_version += 1
+            self.hw_sine_active = False
+
+            if not self._load_directinput_dll():
+                logger.error("DirectInput backend unavailable: could not load any DI provider DLL")
+                return False
+
+            if not self._di_enum_devices:
+                self.list_devices()
+            if index < 0 or index >= len(self._di_enum_devices):
+                logger.error(f"Invalid DirectInput device index {index}")
+                return False
+            self._di_selected_guid = self._di_enum_devices[index][0]
+
+            name = "DirectInput Device"
+            if 0 <= index < len(self._di_enum_devices):
+                name = self._di_enum_devices[index][1]
+            self.device_identity = {
+                "name": name,
+                "vid": "0000",
+                "pid": "0000",
+                "serial": "Unknown",
+            }
+            logger.info(f"Connecting to (DI mode): {name} [VID:0000 PID:0000]")
+
+            self._force_cartesian_periodic = "simagic" in name.lower()
+            self.joystick = None
+            self.gamepad = None
+            self.preferred_axis_key = None
+
+            logger.info("DirectInput backend ignores SDL device index; using first available DI device")
+            if not self._init_directinput_backend():
+                logger.error("DirectInput backend init failed; device not connected.")
+                self.close_device()
+                return False
+
+            logger.info("DirectInput backend active; SDL haptics disabled.")
+            return True
 
         if not self._device_ids:
             self.list_devices()
@@ -415,15 +666,6 @@ class HapticController:
             self.preferred_axis_key = "gp_0"  # LEFTX
         else:
             self.preferred_axis_key = "joy_0"
-
-        if self.backend_mode == "directinput":
-            logger.info("DirectInput backend ignores SDL device index; using first available DI device")
-            if not self._init_directinput_backend():
-                logger.error("DirectInput backend init failed; device not connected.")
-                self.close_device()
-                return False
-            logger.info("DirectInput backend active; SDL haptics disabled.")
-            return True
 
         self.haptic = sdl_haptic.SDL_OpenHapticFromJoystick(self.joystick)
         if not self.haptic:
@@ -922,13 +1164,35 @@ class HapticController:
     def _play_directinput_descriptor(self, desc: Dict) -> int:
         kind = (desc.get("type") or desc.get("effect") or "sine").lower()
         if kind not in {"sine", "periodic_sine", "directinput_periodic_sine"}:
+            self.last_effect_error = f"DirectInput backend only supports periodic sine (got '{kind}')"
             logger.error(f"DirectInput backend only supports periodic sine (got '{kind}')")
             return -1
 
-        freq = float(desc.get("frequency_hz", 10.0))
-        mag = int(desc.get("magnitude", 10000))
-        length_ms = int(desc.get("length_ms", 5000))
-        return self._di_start_sine(length_ms, mag, freq)
+        mag_raw = int(desc.get("magnitude", 10000))
+        mag_unit = str(desc.get("magnitude_unit", "auto"))
+        mag_di = self._normalize_di_magnitude(mag_raw, mag_unit)
+        
+        if "length_us" in desc:
+            length_us = int(desc["length_us"])
+        else:
+            length_us = int(desc.get("length_ms", 5000)) * 1000
+            
+        if "period_us" in desc:
+            period_us = int(desc["period_us"])
+        else:
+            freq = float(desc.get("frequency_hz", 10.0))
+            period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
+
+        logger.info(
+            "DI-DESC: resolved payload "
+            f"type={kind} mag_in={mag_raw} unit={mag_unit} mag_di={mag_di} "
+            f"length_us={length_us} period_us={period_us}"
+        )
+
+        return self._di_start_sine(length_us, mag_di, period_us, magnitude_unit="di")
+
+    def get_last_effect_error(self) -> str:
+        return self.last_effect_error
 
     def play_descriptor(self, desc: Dict) -> int:
         if self.backend_mode == "directinput":
@@ -1011,10 +1275,18 @@ class HapticController:
         logger.error(f"DIAG: Start(iterations=1, flags=0) FAILED -> HRESULT={err}")
         return -1
     # --- Sequencer Methods ---
-    def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = 0):
+    def update_effect_sine(self, effect_id: int, freq: float, magnitude: int, duration_ms: int, phase: int = 0, magnitude_unit: str = "s16"):
         """Updates sine effect parameters during playback (sweep updates)."""
         if self.backend_mode == "directinput":
-            return self._di_start_sine(duration_ms, magnitude, freq)
+            period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
+            duration_us = int(duration_ms) * 1000
+            mag_di = self._normalize_di_magnitude(magnitude, magnitude_unit)
+            logger.info(
+                "DI-UPDATE: resolved payload "
+                f"freq={freq} mag_in={magnitude} unit={magnitude_unit} mag_di={mag_di} "
+                f"duration_us={duration_us} period_us={period_us} phase={phase}"
+            )
+            return self._di_start_sine(duration_us, mag_di, period_us, magnitude_unit="di")
 
         if not self.haptic or effect_id == -1:
             return -1
@@ -1191,9 +1463,16 @@ class HapticController:
         if self.backend_mode == "directinput":
             if self._di_active and self._di:
                 try:
-                    self._di.di_stop()
+                    if self._di_selected_guid:
+                        guid_b = self._di_selected_guid.encode("utf-8")
+                        self._di.StopAllFFBEffects(guid_b)
+                        try:
+                            self._di.DestroyFFBEffect(guid_b, DI_FF_EFFECT_SINE)
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.error(f"DirectInput stop failed: {e}")
+            self._di_effect_deadline_s = None
             self.effect_id = -1
             return
         if not self.haptic: return
@@ -1307,6 +1586,11 @@ class HapticController:
             
     def process_event_queue(self, max_events: int = 32):
         """Process pending SDL events from the queue. Call this regularly from logic thread."""
+        if self.backend_mode == "directinput" and self._di_active and self._di_effect_deadline_s is not None:
+            if time.monotonic() >= self._di_effect_deadline_s:
+                logger.info("DirectInput auto-stop: effect duration elapsed")
+                self.stop_effect()
+
         if not self._event_queue_enabled or not self._event_types_registered:
             return
         
@@ -1665,85 +1949,15 @@ class HapticController:
         return report
 
     def _enable_actuators_directinput(self):
-        """Windows-only DirectInput hack to explicitly send SETACTUATORSON.
-        This bridges the gap where some bases (Simagic) stay in standby after SDL initialization.
-        """
-        if platform.system() != "Windows":
+        """Windows-only DirectInput hack to explicitly send SETACTUATORSON."""
+        if platform.system() != "Windows" or not self._di:
+            return
+        if not hasattr(self._di, "di_enable_actuators"):
             return
         
         try:
-            # 1. Create DirectInput8
-            di8 = c_void_p()
-            hr = DirectInput8Create(ctypes.windll.kernel32.GetModuleHandleW(None), 0x0800, ctypes.byref(IID_IDirectInput8W), ctypes.byref(di8), None)
-            if hr != DI_OK: return
-
-            vtable_di8 = ctypes.cast(ctypes.cast(di8, POINTER(c_void_p)).contents, POINTER(c_void_p))
-            
-            # 2. Enum first SIMAGIC device (VID 0483) or first attached joystick
-            device_guid = GUID("{00000000-0000-0000-0000-000000000000}")
-            found_device = [False]
-            def enum_cb(lpddi, pvRef):
-                dev_inst = ctypes.cast(lpddi, POINTER(DIDEVICEINSTANCEW)).contents
-                vid = (dev_inst.guidProduct.Data1 & 0xFFFF)
-                
-                # If we find Simagic (0483) or Moza (1E1A) or any likely DD base, grab it
-                is_simagic = (vid == 0x0483)
-                
-                if is_simagic or not found_device[0]:
-                    device_guid.Data1 = dev_inst.guidInstance.Data1
-                    device_guid.Data2 = dev_inst.guidInstance.Data2
-                    device_guid.Data3 = dev_inst.guidInstance.Data3
-                    for i in range(8): device_guid.Data4[i] = dev_inst.guidInstance.Data4[i]
-                    found_device[0] = True
-                    if is_simagic: return 0 # DIENUM_STOP
-                return 1 # DIENUM_CONTINUE
-
-            ENUM_CB = ctypes.WINFUNCTYPE(c_int32, c_void_p, c_void_p)
-            enum_cb_ptr = ENUM_CB(enum_cb)
-            
-            ENUM_DEVICES = WINFUNCTYPE(c_int32, c_void_p, wintypes.DWORD, ENUM_CB, c_void_p, wintypes.DWORD)(vtable_di8[4])
-            ENUM_DEVICES(di8, 4, enum_cb_ptr, None, 0x00000001) # DI8DEVCLASS_GAMECTRL | DIEDFL_ATTACHEDONLY
-            
-            if not found_device[0]: return
-
-            # 3. Create Device
-            device = c_void_p()
-            CREATE_DEVICE = WINFUNCTYPE(c_int32, c_void_p, POINTER(GUID), POINTER(c_void_p), c_void_p)(vtable_di8[3])
-            hr = CREATE_DEVICE(di8, ctypes.byref(device_guid), ctypes.byref(device), None)
-            if hr != DI_OK: return
-
-            vtable_dev = ctypes.cast(ctypes.cast(device, POINTER(c_void_p)).contents, POINTER(c_void_p))
-
-            # 4. SetCooperativeLevel (Non-exclusive background to avoid conflict with SDL)
-            WTL = ctypes.windll.user32.GetForegroundWindow()
-            SET_COOP = WINFUNCTYPE(c_int32, c_void_p, wintypes.HWND, wintypes.DWORD)(vtable_dev[13])
-            SET_COOP(device, WTL, 0x00000008 | 0x00000002) # DISCL_NONEXCLUSIVE | DISCL_BACKGROUND
-
-            # MUST call Acquire() before sending commands
-            ACQUIRE_DEV = WINFUNCTYPE(c_int32, c_void_p)(vtable_dev[7])
-            ACQUIRE_DEV(device)
-
-            # 5. Send Actuators On Sequence
-            SEND_CMD = WINFUNCTYPE(c_int32, c_void_p, wintypes.DWORD)(vtable_dev[22])
-            
-            # Send Reset, Continue, and then Actuators On
-            SEND_CMD(device, DISFFC_RESET)
-            time.sleep(0.05)
-            SEND_CMD(device, DISFFC_CONTINUE)
-            time.sleep(0.05)
-            hr = SEND_CMD(device, DISFFC_SETACTUATORSON)
-            
-            if hr == 0: # DI_OK
-                logger.info("DI-HACK: Full Actuator Wake-up sequence sent via DirectInput (Reset, Continue, On)")
-            
-            # Final 10000 vector prime
-            UNACQUIRE_DEV = WINFUNCTYPE(c_int32, c_void_p)(vtable_dev[8])
-            UNACQUIRE_DEV(device)
-            RELEASE_DEV = WINFUNCTYPE(c_uint32, c_void_p)(vtable_dev[2])
-            RELEASE_DEV(device)
-            RELEASE_DI8 = WINFUNCTYPE(c_uint32, c_void_p)(vtable_di8[2])
-            RELEASE_DI8(di8)
-
+            self._di.di_enable_actuators()
+            logger.info("DI-HACK: Full Actuator Wake-up sequence sent via DirectInput (Reset, Continue, On)")
         except Exception as e:
             logger.debug(f"DirectInput wake-up hack failed (ignoring): {e}")
 
@@ -1773,144 +1987,24 @@ class HapticController:
 
     def _run_directinput_hw_probe(self):
         """Windows-only DirectInput probe for detailed HRESULT logging on HW Sine failure."""
-        if platform.system() != "Windows":
+        if platform.system() != "Windows" or not self._di:
+            return
+        if not hasattr(self._di, "di_run_hw_probe"):
             return
 
-        def di_log(msg):
-            logger.info(f"DI-HWPROBE: {msg}")
-            self.last_hwp_logs.append(f"DI-HWPROBE: {msg}")
-            if self._probe_log_callback:
-                self._probe_log_callback(f"DI-HWPROBE: {msg}")
-
-        def decode_hr(hr):
-            if hr == 0x80070057: return "E_INVALIDARG"
-            if hr == 0x80004001: return "E_NOTIMPL"
-            if hr == 0x88780078: return "unsupported"
-            return "UNKNOWN"
-
         try:
-            di_log("Starting DI fallback probe...")
-            
-            # 1. Create DirectInput8
-            di8 = c_void_p()
-            hr = DirectInput8Create(ctypes.windll.kernel32.GetModuleHandleW(None), 0x0800, ctypes.byref(IID_IDirectInput8W), ctypes.byref(di8), None)
-            if hr != DI_OK:
-                di_log(f"DirectInput8Create hr=0x{hr & 0xFFFFFFFF:08X}")
-                return
-
-            vtable_di8 = ctypes.cast(ctypes.cast(di8, POINTER(c_void_p)).contents, POINTER(c_void_p))
-            
-            # 2. Enum first device
-            device_guid = GUID("{00000000-0000-0000-0000-000000000000}")
-            found_device =  [False]
-            def enum_cb(lpddi, pvRef):
-                dev_inst = ctypes.cast(lpddi, POINTER(DIDEVICEINSTANCEW)).contents
-                device_guid.Data1 = dev_inst.guidInstance.Data1
-                device_guid.Data2 = dev_inst.guidInstance.Data2
-                device_guid.Data3 = dev_inst.guidInstance.Data3
-                for i in range(8): device_guid.Data4[i] = dev_inst.guidInstance.Data4[i]
-                found_device[0] = True
-                return 0 # DIENUM_STOP
-
-            ENUM_CB = ctypes.WINFUNCTYPE(c_int32, c_void_p, c_void_p)
-            enum_cb_ptr = ENUM_CB(enum_cb)
-            
-            # IDirectInput8::EnumDevices index 4
-            ENUM_DEVICES = WINFUNCTYPE(c_int32, c_void_p, wintypes.DWORD, ENUM_CB, c_void_p, wintypes.DWORD)(vtable_di8[4])
-            hr = ENUM_DEVICES(di8, 4, enum_cb_ptr, None, 0x00000001) # DI8DEVCLASS_GAMECTRL | DIEDFL_ATTACHEDONLY
-            
-            if not found_device[0]:
-                di_log("No device found via DI enumeration")
-                return
-
-            # 3. Create Device
-            device = c_void_p()
-            # IDirectInput8::CreateDevice index 3
-            CREATE_DEVICE = WINFUNCTYPE(c_int32, c_void_p, POINTER(GUID), POINTER(c_void_p), c_void_p)(vtable_di8[3])
-            hr = CREATE_DEVICE(di8, ctypes.byref(device_guid), ctypes.byref(device), None)
-            if hr != DI_OK:
-                di_log(f"CreateDevice hr=0x{hr & 0xFFFFFFFF:08X}")
-                return
-
-            vtable_dev = ctypes.cast(ctypes.cast(device, POINTER(c_void_p)).contents, POINTER(c_void_p))
-
-            # Minimal Setup
-            WTL = ctypes.windll.user32.GetForegroundWindow()
-            # SetCooperativeLevel index 13
-            SET_COOP = WINFUNCTYPE(c_int32, c_void_p, wintypes.HWND, wintypes.DWORD)(vtable_dev[13])
-            SET_COOP(device, WTL, 0x00000002 | 0x00000008) # DISCL_EXCLUSIVE | DISCL_FOREGROUND
-
-            # 4. EnumEffects GUID_Sine check
-            has_sine = [False]
-            def effect_cb(lpdei, pvRef):
-                has_sine[0] = True
-                return 0
-            EFFECT_CB = WINFUNCTYPE(c_int32, c_void_p, c_void_p)
-            effect_cb_ptr = EFFECT_CB(effect_cb)
-            # EnumEffects index 16
-            ENUM_EFFECTS = WINFUNCTYPE(c_int32, c_void_p, EFFECT_CB, c_void_p, wintypes.DWORD)(vtable_dev[16])
-            ENUM_EFFECTS(device, effect_cb_ptr, None, 0x01) # DIEFT_PERIODIC
-            di_log(f"EnumEffects GUID_Sine={'yes' if has_sine[0] else 'no'}")
-
-            # 5. Send Actuators On
-            # SendForceFeedbackCommand index 22
-            SEND_CMD = WINFUNCTYPE(c_int32, c_void_p, wintypes.DWORD)(vtable_dev[22])
-            SEND_CMD(device, DISFFC_SETACTUATORSON)
-
-            # 6. Create Sine Effect
-            periodic = DIPERIODIC(dwMagnitude=3000, lOffset=0, dwPhase=0, dwPeriod=100000)
-            axes = (wintypes.DWORD * 1)(DIJOFS_X)
-            dirs = (wintypes.LONG * 1)(0)
-            
-            eff = DIEFFECT()
-            ctypes.memset(ctypes.addressof(eff), 0, ctypes.sizeof(eff))
-            eff.dwSize = ctypes.sizeof(DIEFFECT)
-            eff.dwFlags = DIEFF_POLAR
-            eff.dwDuration = 2000000 # 2s in microseconds
-            eff.dwGain = DI_FFNOMINALMAX
-            eff.cAxes = 1
-            eff.rgdwAxes = ctypes.cast(axes, POINTER(wintypes.DWORD))
-            eff.rglDirection = ctypes.cast(dirs, POINTER(wintypes.LONG))
-            eff.cbTypeSpecificParams = ctypes.sizeof(DIPERIODIC)
-            eff.lpvTypeSpecificParams = ctypes.cast(ctypes.byref(periodic), c_void_p)
-
-            effect_iface = c_void_p()
-            # CreateEffect index 20
-            CREATE_EFFECT = WINFUNCTYPE(c_int32, c_void_p, POINTER(GUID), POINTER(DIEFFECT), POINTER(c_void_p), c_void_p)(vtable_dev[20])
-            hr = CREATE_EFFECT(device, ctypes.byref(GUID_Sine), ctypes.byref(eff), ctypes.byref(effect_iface), None)
-            di_log(f"CreateEffect hr=0x{hr & 0xFFFFFFFF:08X} ({decode_hr(hr)})")
-
-            if hr == DI_OK:
-                vtable_eff = ctypes.cast(ctypes.cast(effect_iface, POINTER(c_void_p)).contents, POINTER(c_void_p))
-                
-                # SetParameters index 7
-                SET_PARAMS = WINFUNCTYPE(c_int32, c_void_p, POINTER(DIEFFECT), wintypes.DWORD)(vtable_eff[7])
-                hr_sp = SET_PARAMS(effect_iface, ctypes.byref(eff), 0x000001FF) # DIEP_ALLPARAMS
-                di_log(f"SetParameters hr=0x{hr_sp & 0xFFFFFFFF:08X} ({decode_hr(hr_sp)})")
-                
-                # Start index 8
-                START_EFF = WINFUNCTYPE(c_int32, c_void_p, wintypes.DWORD, wintypes.DWORD)(vtable_eff[8])
-                hr_st = START_EFF(effect_iface, 1, 0)
-                di_log(f"Start hr=0x{hr_st & 0xFFFFFFFF:08X} ({decode_hr(hr_st)})")
-                
-                # Cleanup effect
-                # IUnknown::Release index 2
-                RELEASE = WINFUNCTYPE(wintypes.ULONG, c_void_p)(vtable_eff[2])
-                RELEASE(effect_iface)
-
-            # Cleanup
-            # IDirectInputDevice8::Release index 2
-            vtable_dev = ctypes.cast(ctypes.cast(device, POINTER(c_void_p)).contents, POINTER(c_void_p))
-            RELEASE_DEV = WINFUNCTYPE(wintypes.ULONG, c_void_p)(vtable_dev[2])
-            RELEASE_DEV(device)
-            
-            # IDirectInput8::Release index 2
-            vtable_di8 = ctypes.cast(ctypes.cast(di8, POINTER(c_void_p)).contents, POINTER(c_void_p))
-            RELEASE_DI8 = WINFUNCTYPE(wintypes.ULONG, c_void_p)(vtable_di8[2])
-            RELEASE_DI8(di8)
-
+            raw_log = self._di.di_run_hw_probe()
+            if raw_log:
+                log_lines = raw_log.decode('utf-8').strip().split('\n')
+                for line in log_lines:
+                    if line.strip():
+                        log_msg = f"{line.strip()}"
+                        logger.info(log_msg)
+                        self.last_hwp_logs.append(log_msg)
+                        if self._probe_log_callback:
+                            self._probe_log_callback(log_msg)
         except Exception as e:
-            di_log(f"Probe Exception: {e}")
+            logger.info(f"DI-HWPROBE: Probe Exception: {e}")
 
     def diag_test_hw_sine(self) -> Dict:
         """Runs an automated HW Sine self-test with detailed logging."""
@@ -1928,8 +2022,8 @@ class HapticController:
             self.last_diag_result = {"mode": "HW periodic (DI)", "actual": "Starting", "fallback": "no", "reason": ""}
 
             test_mag = 20000
-            logger.info(f"DIAG: DirectInput Start params: freq=2.0Hz mag={test_mag} dur=3000ms")
-            res = self._di_start_sine(duration_ms=3000, magnitude=test_mag, freq_hz=2.0)
+            logger.info(f"DIAG: DirectInput Start params: period_us=500000 mag={test_mag} dur=3000000us")
+            res = self._di_start_sine(duration_us=3000000, magnitude=test_mag, period_us=500000)
             if res < 0:
                 self.last_diag_result.update({"actual": "FAIL", "reason": "DirectInput start sine failed"})
                 return {"status": "FAIL", "reason": "DirectInput start sine failed"}

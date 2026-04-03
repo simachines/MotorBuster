@@ -82,6 +82,13 @@ for fname in os.listdir(os.path.join(BASE_DIR, "server")):
         print(f"Bundling {fname}...")
         args.append(f'--add-binary={fpath};.')
 
+# Bundle DirectInput provider DLL from project root if present
+for di_name in ("DirectInputForceFeedback.dll",):
+    di_path = os.path.join(BASE_DIR, di_name)
+    if os.path.exists(di_path):
+        print(f"Bundling {di_name} from: {di_path}")
+        args.append(f'--add-binary={di_path};.')
+
 # Force include the 'server' package dir
 server_dir = os.path.join(BASE_DIR, "server")
 if os.path.exists(server_dir):

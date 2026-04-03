@@ -781,6 +781,13 @@ class MotorBusterNativeApp:
         if len(self.api_log_items) > 200:
             self.api_log_items.pop(0)
 
+    @staticmethod
+    def _s16_to_di(magnitude_s16: int) -> int:
+        """Map signed-16 clip magnitude domain into DirectInput 0..10000."""
+        mag = abs(int(magnitude_s16))
+        mag = max(0, min(32767, mag))
+        return int(round(mag * 10000.0 / 32767.0))
+
     def _ensure_api_console(self):
         """Open a dedicated console for API logs (Windows only)."""
         if self._console_opened:
@@ -888,7 +895,15 @@ class MotorBusterNativeApp:
     def connect_device_by_name(self, name):
          try:
              idx = int(name.split("#")[-1].replace(")", ""))
-             engine.set_directinput_hwnd(self._get_viewport_hwnd())
+             hwnd = self._get_viewport_hwnd()
+             if not hwnd:
+                 import time
+                 for _ in range(10):
+                     time.sleep(0.05)
+                     hwnd = self._get_viewport_hwnd()
+                     if hwnd:
+                         break
+             engine.set_directinput_hwnd(hwnd)
              if engine.connect_device(idx):
                  dpg.set_value("status_text", "Status: Connected")
                  dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
@@ -1340,7 +1355,8 @@ class MotorBusterNativeApp:
 
     def _set_backend_mode(self, mode: str):
         mode = (mode or "").strip().lower()
-        if mode not in {"sdl3", "directinput"}:
+        if mode != "directinput":
+            self.log("Only DirectInput backend is enabled in this build")
             return
         if self.backend_mode == mode:
             return
@@ -1348,8 +1364,6 @@ class MotorBusterNativeApp:
         engine.set_directinput_hwnd(self._get_viewport_hwnd())
         engine.set_backend_mode(mode)
 
-        if dpg.does_item_exist("menu_backend_sdl"):
-            dpg.set_value("menu_backend_sdl", mode == "sdl3")
         if dpg.does_item_exist("menu_backend_di"):
             dpg.set_value("menu_backend_di", mode == "directinput")
 
@@ -1363,7 +1377,15 @@ class MotorBusterNativeApp:
 
     def _get_viewport_hwnd(self):
         try:
-            return dpg.get_viewport_platform_handle()
+            if hasattr(dpg, "get_viewport_platform_handle"):
+                hwnd = dpg.get_viewport_platform_handle()
+                if hwnd:
+                    return int(hwnd)
+        except Exception:
+            pass
+        try:
+            import win32gui
+            return win32gui.FindWindow(None, "MotorBuster")
         except Exception:
             return None
 
@@ -2256,6 +2278,16 @@ class MotorBusterNativeApp:
                     },
                 }
 
+                if self.backend_mode == "directinput" and tkey == "periodic_sine":
+                    # Unity DirectInput expects magnitude in DI range 0..10000.
+                    safe_freq = max(0.1, float(current_clip.frequency))
+                    eff_mag_di = self._s16_to_di(eff_mag)
+                    desc["magnitude"] = eff_mag_di
+                    desc["period_us"] = int(1_000_000.0 / safe_freq)
+                    desc["length_us"] = int(max(0, dur_ms)) * 1000
+                    desc["magnitude_unit"] = "di"
+                    desc["magnitude_src_s16"] = eff_mag
+
                 # Log actual effect type: use explicit diagnostic naming
                 actual_type = tkey
                 log_desc = {**desc, "type": actual_type}
@@ -2295,7 +2327,15 @@ class MotorBusterNativeApp:
                         state['creation_pending'] = False
                         
                         if eff_id == -1:
-                            self.log(f"ERROR: HW Effect creation FAILED for Clip '{current_clip.name or current_clip.type}'. No fallback.")
+                            reason = ""
+                            try:
+                                reason = engine.get_last_effect_error() or ""
+                            except Exception:
+                                reason = ""
+                            if reason:
+                                self.log(f"ERROR: HW Effect creation FAILED for Clip '{current_clip.name or current_clip.type}'. {reason}")
+                            else:
+                                self.log(f"ERROR: HW Effect creation FAILED for Clip '{current_clip.name or current_clip.type}'. No fallback.")
                             # Force reset state so we don't spam errors
                             state['effect_id'] = -1
                             state['creation_pending'] = False
@@ -2373,9 +2413,23 @@ class MotorBusterNativeApp:
                              # Log all params being sent to engine
                              update_type = "update_effect_sine"
                              log_payload = {"effect_id": eff_id, "freq": current_freq, "mag": eff_mag, "length_ms": effect_len_ms, "phase": phase_payload}
+                             if self.backend_mode == "directinput":
+                                 eff_mag_di = self._s16_to_di(eff_mag)
+                                 log_payload["mag"] = eff_mag_di
+                                 log_payload["period_us"] = int(1_000_000.0 / max(0.1, float(current_freq)))
+                                 log_payload["length_us"] = int(max(0, effect_len_ms)) * 1000
+                                 log_payload["magnitude_unit"] = "di"
+                                 log_payload["magnitude_src_s16"] = eff_mag
                              self.log_api(update_type, log_payload)
 
-                             new_eff_id = engine.update_effect_sine(eff_id, current_freq, eff_mag, effect_len_ms, phase=phase_payload)
+                             new_eff_id = engine.update_effect_sine(
+                                 eff_id,
+                                 current_freq,
+                                 log_payload["mag"] if self.backend_mode == "directinput" else eff_mag,
+                                 effect_len_ms,
+                                 phase=phase_payload,
+                                 magnitude_unit=("di" if self.backend_mode == "directinput" else "s16"),
+                             )
 
                              if new_eff_id != -1:
                                  eff_id = new_eff_id
@@ -2462,8 +2516,23 @@ class MotorBusterNativeApp:
                     # Clamp to valid API range (0..35900); 36000 wraps to 0
                     phase_to_use = max(0, min(35900, int(phase_to_use)))
                     
-                    self.log_api("update_effect_sine", {"effect_id": eff_id, "freq": current_clip.frequency, "mag": eff_mag, "length_ms": dur_ms, "phase": phase_to_use})
-                    new_id = engine.update_effect_sine(eff_id, current_clip.frequency, eff_mag, dur_ms, phase=phase_to_use)
+                    update_payload = {"effect_id": eff_id, "freq": current_clip.frequency, "mag": eff_mag, "length_ms": dur_ms, "phase": phase_to_use}
+                    if self.backend_mode == "directinput":
+                        eff_mag_di = self._s16_to_di(eff_mag)
+                        update_payload["mag"] = eff_mag_di
+                        update_payload["period_us"] = int(1_000_000.0 / max(0.1, float(current_clip.frequency)))
+                        update_payload["length_us"] = int(max(0, dur_ms)) * 1000
+                        update_payload["magnitude_unit"] = "di"
+                        update_payload["magnitude_src_s16"] = eff_mag
+                    self.log_api("update_effect_sine", update_payload)
+                    new_id = engine.update_effect_sine(
+                        eff_id,
+                        current_clip.frequency,
+                        update_payload["mag"] if self.backend_mode == "directinput" else eff_mag,
+                        dur_ms,
+                        phase=phase_to_use,
+                        magnitude_unit=("di" if self.backend_mode == "directinput" else "s16"),
+                    )
                     if new_id != -1:
                         transferred = True
                         eff_id = new_id
@@ -3426,11 +3495,8 @@ class MotorBusterNativeApp:
                         dpg.add_menu_item(label="Retro", check=True, tag="menu_theme_Retro", callback=lambda: self.apply_theme("Retro"))
 
                     with dpg.menu(label="Backend", tag="menu_backend"):
-                        dpg.add_menu_item(label="SDL3", check=True, tag="menu_backend_sdl",
-                                          default_value=(self.backend_mode == "sdl3"),
-                                          callback=lambda: self._set_backend_mode("sdl3"))
                         dpg.add_menu_item(label="DirectInput", check=True, tag="menu_backend_di",
-                                          default_value=(self.backend_mode == "directinput"),
+                                          default_value=True,
                                           callback=lambda: self._set_backend_mode("directinput"))
 
                     with dpg.menu(label="Diagnose", tag="menu_diagnose"):
@@ -4259,6 +4325,10 @@ class MotorBusterNativeApp:
                 self.log_api("stop_effect", {"scope": "all"})
             except Exception as e:
                 self.log(f"Stop on exit failed: {e}")
+            try:
+                engine.close_device()
+            except Exception as e:
+                self.log(f"Close device on exit failed: {e}")
             dpg.destroy_context()
 
 if __name__ == "__main__":

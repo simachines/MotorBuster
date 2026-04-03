@@ -1,0 +1,8 @@
+2026-04-03 00:26:32,582 INFO:FFB_Engine:SDL3 custom events registered: {'EFFECT_START': 32768, 'EFFECT_STOP': 32769, 'POSITION_REQUEST': 32770}
+2026-04-03 00:26:32,745 INFO:FFB_Engine:Loaded DirectInput provider: unity_di (e:\Users\ernes\Desktop\MotorBuster\MotorBuster\DirectInputForceFeedback.dll)
+2026-04-03 00:26:32,836 INFO:FFB_Engine:DirectInput scan found 2 FFB-capable device(s) via Unity DI
+2026-04-03 00:26:32,836 INFO:FFB_Engine:Connecting to (DI mode): FFBoard HID [VID:0000 PID:0000]
+2026-04-03 00:26:32,836 INFO:FFB_Engine:DirectInput backend ignores SDL device index; using first available DI device
+2026-04-03 00:26:32,950 INFO:FFB_Engine:DirectInput backend initialized via Unity DI for guid={8CC95DC0-4584-11ED-8001-444553540000}
+2026-04-03 00:26:32,950 INFO:FFB_Engine:DirectInput backend active; SDL haptics disabled.
+2026-04-03 00:26:52,653 INFO:FFB_Engine:DI-DESC: resolved payload type=periodic_sine mag_in=3276 unit=s16 mag_di=1000 length_us=2010000 period_us=100000
