@@ -233,6 +233,7 @@ class HapticController:
         self._device_ids: list[int] = []
         self._current_custom_data = None
         self.axis_baseline: dict[str, int] = {}
+        self._axis_last_values: dict[str, int] = {}
         self.preferred_axis_key: Optional[str] = None
 
         # Backend selection
@@ -835,6 +836,81 @@ class HapticController:
             devices.append(DeviceInfo(index=idx, name=name_str))
 
         return devices
+
+    def _open_sdl_input_for_name(self, name_hint: str = "", preferred_index: Optional[int] = None) -> bool:
+        self.joystick = None
+        self.gamepad = None
+        self.preferred_axis_key = None
+
+        sdl_events.SDL_PumpEvents()
+
+        count = ctypes.c_int(0)
+        joystick_ids = sdl_joy.SDL_GetJoysticks(ctypes.byref(count))
+        discovered: list[int] = []
+
+        if joystick_ids:
+            ids_array = ctypes.cast(joystick_ids, ctypes.POINTER(sdl_joy.SDL_JoystickID))
+            discovered = [int(ids_array[i]) for i in range(count.value)]
+            sdl_std.SDL_free(joystick_ids)
+
+        if not discovered:
+            logger.warning("No SDL joystick available for wheel telemetry")
+            return False
+
+        hint = (name_hint or "").strip().lower()
+        ranked: list[tuple[int, int, int]] = []
+        for idx, joy_id in enumerate(discovered):
+            name_ptr = sdl_joy.SDL_GetJoystickNameForID(joy_id)
+            sdl_name = name_ptr.decode("utf-8", errors="replace") if name_ptr else ""
+            sdl_name_lower = sdl_name.lower()
+
+            score = 0
+            if hint and sdl_name_lower == hint:
+                score = 4
+            elif hint and hint in sdl_name_lower:
+                score = 3
+            elif hint and sdl_name_lower and any(token and token in sdl_name_lower for token in hint.split()):
+                score = 2
+            elif preferred_index is not None and idx == preferred_index:
+                score = 1
+
+            ranked.append((score, -idx, joy_id))
+
+        ranked.sort(reverse=True)
+
+        for score, _neg_idx, joy_id in ranked:
+            if score <= 0 and preferred_index is None and hint:
+                continue
+
+            joystick = sdl_joy.SDL_OpenJoystick(joy_id)
+            if not joystick:
+                continue
+
+            self.joystick = joystick
+            if sdl_gp.SDL_IsGamepad(joy_id):
+                self.gamepad = sdl_gp.SDL_OpenGamepad(joy_id)
+                if not self.gamepad:
+                    logger.warning(f"Gamepad open failed for id {joy_id}: {_sdl_error()}")
+            else:
+                self.gamepad = None
+
+            axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
+            if axis_count > 0:
+                self.preferred_axis_key = "joy_0"
+            elif self.gamepad:
+                self.preferred_axis_key = "gp_0"
+            else:
+                self.preferred_axis_key = None
+
+            logger.info(
+                f"Opened SDL input telemetry handle: joy_id={joy_id}, axes={axis_count}, "
+                f"gamepad={'yes' if self.gamepad else 'no'}"
+            )
+            return True
+
+        logger.warning(f"Could not open SDL joystick input for telemetry (hint='{name_hint}')")
+        return False
+
     def connect_device(self, index: int):
         self.close_device()
 
@@ -866,9 +942,7 @@ class HapticController:
             logger.info(f"Connecting to (DI mode): {name} [VID:0000 PID:0000]")
 
             self._force_cartesian_periodic = "simagic" in name.lower()
-            self.joystick = None
-            self.gamepad = None
-            self.preferred_axis_key = None
+            self._open_sdl_input_for_name(name_hint=name, preferred_index=index)
 
             logger.info("DirectInput backend ignores SDL device index; using first available DI device")
             if not self._init_directinput_backend():
@@ -927,11 +1001,13 @@ class HapticController:
         else:
             self.gamepad = None
 
-        # Default axis preference: gamepad LEFTX if available, else joystick axis 0
-        if self.gamepad:
-            self.preferred_axis_key = "gp_0"  # LEFTX
-        else:
+        axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
+        if axis_count > 0:
             self.preferred_axis_key = "joy_0"
+        elif self.gamepad:
+            self.preferred_axis_key = "gp_0"
+        else:
+            self.preferred_axis_key = None
 
         self.haptic = sdl_haptic.SDL_OpenHapticFromJoystick(self.joystick)
         if not self.haptic:
@@ -1074,6 +1150,7 @@ class HapticController:
             self.joystick = None
 
         self.axis_baseline.clear()
+        self._axis_last_values.clear()
         self.preferred_axis_key = None
 
     def detect_device_poll_rate(self, test_duration_s: float = 0.5) -> int:
@@ -1197,8 +1274,88 @@ class HapticController:
         return True
 
     def _apply_baseline(self, key: str, value: int) -> int:
-        # Return raw value without baseline offset to avoid stale baseline issues
-        return value
+        return max(-32767, min(32767, value))
+
+    def _read_axis_by_key(self, key: str) -> Optional[int]:
+        axis_map = [
+            sdl_gp.SDL_GAMEPAD_AXIS_LEFTX,
+            sdl_gp.SDL_GAMEPAD_AXIS_LEFTY,
+            sdl_gp.SDL_GAMEPAD_AXIS_RIGHTX,
+            sdl_gp.SDL_GAMEPAD_AXIS_RIGHTY,
+        ]
+
+        if key.startswith("gp_"):
+            if not self.gamepad:
+                return None
+            idx = int(key.split("_")[1])
+            if 0 <= idx < len(axis_map):
+                return int(sdl_gp.SDL_GetGamepadAxis(self.gamepad, axis_map[idx]))
+            return None
+
+        if not self.joystick:
+            return None
+
+        axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
+        if axis_count <= 0:
+            return None
+
+        idx = int(key.split("_")[1])
+        if 0 <= idx < axis_count:
+            return int(sdl_joy.SDL_GetJoystickAxis(self.joystick, idx))
+        return None
+
+    def _available_axis_values(self) -> list[tuple[str, int]]:
+        values: list[tuple[str, int]] = []
+
+        if self.joystick:
+            axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
+            if axis_count > 0:
+                for idx in range(axis_count):
+                    values.append((f"joy_{idx}", int(sdl_joy.SDL_GetJoystickAxis(self.joystick, idx))))
+
+        if self.gamepad:
+            axis_keys = ("gp_0", "gp_1", "gp_2", "gp_3")
+            for key in axis_keys:
+                raw = self._read_axis_by_key(key)
+                if raw is not None:
+                    values.append((key, raw))
+
+        return values
+
+    def _select_active_axis_key(self, minimum_motion: int = 2048) -> Optional[str]:
+        values = self._available_axis_values()
+        if not values:
+            return None
+
+        best_key = None
+        best_value = 0
+        best_delta = -1
+        best_joystick_rank = -1
+        for key, value in values:
+            prev = self._axis_last_values.get(key, value)
+            delta = abs(value - prev)
+            joystick_rank = 1 if key.startswith("joy_") else 0
+            if (delta, joystick_rank) > (best_delta, best_joystick_rank):
+                best_key = key
+                best_value = value
+                best_delta = delta
+                best_joystick_rank = joystick_rank
+
+        for key, value in values:
+            self._axis_last_values[key] = value
+
+        if best_key is not None and best_delta >= minimum_motion:
+            if self.preferred_axis_key != best_key:
+                logger.info(f"Wheel axis auto-selected: {best_key} (value={best_value}, delta={best_delta})")
+            self.preferred_axis_key = best_key
+            return best_key
+
+        if self.preferred_axis_key and any(key == self.preferred_axis_key for key, _ in values):
+            return self.preferred_axis_key
+
+        fallback_key = next((key for key, _ in values if key.startswith("joy_")), values[0][0])
+        self.preferred_axis_key = fallback_key
+        return fallback_key
 
     def poll_input(self):
         """Polls SDL events to update joystick/gamepad state. Call once per frame."""
@@ -1216,39 +1373,26 @@ class HapticController:
         if not self.joystick:
             return None
         try:
-            axis_map = [
-                sdl_gp.SDL_GAMEPAD_AXIS_LEFTX,
-                sdl_gp.SDL_GAMEPAD_AXIS_LEFTY,
-                sdl_gp.SDL_GAMEPAD_AXIS_RIGHTX,
-                sdl_gp.SDL_GAMEPAD_AXIS_RIGHTY,
-            ]
-
-            # Decide which axis key to use
-            key = None
-            if self.preferred_axis_key:
-                key = self.preferred_axis_key
-            elif axis_idx >= 0:
-                key = f"gp_{axis_idx}" if self.gamepad else f"joy_{axis_idx}"
+            if axis_idx >= 0:
+                key = f"joy_{axis_idx}"
             else:
-                key = "gp_0" if self.gamepad else "joy_0"
+                key = self._select_active_axis_key()
 
-            # Read from gamepad if key matches
-            if key.startswith("gp_") and self.gamepad:
-                idx = int(key.split("_")[1])
-                if 0 <= idx < len(axis_map):
-                    raw = int(sdl_gp.SDL_GetGamepadAxis(self.gamepad, axis_map[idx]))
-                    return self._apply_baseline(key, raw)
-
-            # Fallback to joystick
-            axis_count = sdl_joy.SDL_GetNumJoystickAxes(self.joystick)
-            if axis_count <= 0:
-                logger.warning(f"SDL_GetNumJoystickAxes returned {axis_count}, joystick may be disconnected")
+            if not key:
                 return None
-            idx = int(key.split("_")[1]) if key and key.startswith("joy_") else axis_idx
-            if idx < 0 or idx >= axis_count:
-                idx = 0
-            raw = int(sdl_joy.SDL_GetJoystickAxis(self.joystick, idx))
-            return self._apply_baseline(f"joy_{idx}", raw)
+
+            raw = self._read_axis_by_key(key)
+            if raw is None and axis_idx < 0:
+                self.preferred_axis_key = None
+                key = self._select_active_axis_key(minimum_motion=0)
+                if not key:
+                    return None
+                raw = self._read_axis_by_key(key)
+
+            if raw is None:
+                return None
+
+            return self._apply_baseline(key, raw)
         except Exception as e:
             logger.warning(f"Exception in get_axis_value: {e}")
             return None
@@ -1315,14 +1459,43 @@ class HapticController:
         target.fade_level = int(envelope.get("fade_level", 0))
 
     def _period_from_frequency(self, freq_hz: float, period_override: Optional[int] = None) -> int:
-        if period_override and period_override > 0:
-            return max(1, int(period_override))
-        safe_freq = max(0.1, float(freq_hz))
-        period_ms = max(1, min(1000, int(round(1000.0 / safe_freq))))
-        actual_freq = round(1000.0 / period_ms, 2)
+        info = self.describe_frequency_output(freq_hz, period_override=period_override, backend_mode="sdl3")
+        period_ms = int(info["period_value"])
+        actual_freq = float(info["actual_hz"])
+        safe_freq = float(info["requested_hz"])
         if actual_freq != round(safe_freq, 2):
             logger.warning(f"Frequency rounded: requested {safe_freq}Hz -> actual {actual_freq}Hz (period={period_ms}ms)")
         return period_ms
+
+    def describe_frequency_output(
+        self,
+        freq_hz: float,
+        period_override: Optional[int] = None,
+        backend_mode: Optional[str] = None,
+    ) -> Dict[str, object]:
+        mode = (backend_mode or self.backend_mode or "sdl3").strip().lower()
+        safe_freq = max(0.1, float(freq_hz))
+
+        if mode == "directinput":
+            period_us = max(1, int(period_override)) if period_override and period_override > 0 else max(1, int(1_000_000.0 / safe_freq))
+            actual_freq = round(1_000_000.0 / period_us, 2)
+            return {
+                "backend": "directinput",
+                "requested_hz": round(safe_freq, 2),
+                "actual_hz": actual_freq,
+                "period_value": period_us,
+                "period_unit": "us",
+            }
+
+        period_ms = max(1, min(1000, int(period_override))) if period_override and period_override > 0 else max(1, min(1000, int(round(1000.0 / safe_freq))))
+        actual_freq = round(1000.0 / period_ms, 2)
+        return {
+            "backend": "sdl3",
+            "requested_hz": round(safe_freq, 2),
+            "actual_hz": actual_freq,
+            "period_value": period_ms,
+            "period_unit": "ms",
+        }
 
     def _build_periodic(self, effect, kind: str, desc: Dict) -> None:
         periodic_type = PERIODIC_TYPES.get(kind, sdl_haptic.SDL_HAPTIC_SINE)

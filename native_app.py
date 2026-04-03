@@ -476,6 +476,7 @@ class MotorBusterNativeApp:
         self._should_trigger_freeze_now = False # Immediate freeze trigger for HW mode start
         self._freeze_cycle_phase = "pause"
         self._freeze_cycle_phase_end = 0.0
+        self._last_logged_freq_output = None
         
         # Probe State
         self._probe_thread = None
@@ -911,6 +912,7 @@ class MotorBusterNativeApp:
              if engine.connect_device(idx):
                  dpg.set_value("status_text", "Status: Connected")
                  dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
+                 self._last_logged_freq_output = None
                  
                  # Ensure device starts in a neutral state
                  engine.stop_effect()
@@ -1123,6 +1125,15 @@ class MotorBusterNativeApp:
 
         return max(-100.0, min(100.0, normalized)), is_active
 
+    def _log_frequency_output(self, requested_freq_hz: float):
+        info = engine.describe_frequency_output(requested_freq_hz)
+        key = (info["backend"], info["requested_hz"], info["actual_hz"])
+        if key != self._last_logged_freq_output:
+            self.log(
+                f"Freq ({info['backend']}): requested {info['requested_hz']:.2f} Hz, actual {info['actual_hz']:.2f} Hz"
+            )
+            self._last_logged_freq_output = key
+
     # --- Transport Logic ---
     def toggle_play(self):
         self.sequencer.is_playing = not self.sequencer.is_playing
@@ -1155,6 +1166,7 @@ class MotorBusterNativeApp:
             dpg.configure_item("btn_play", label="Play")
             engine.stop_effect() # Stop all
             self.log_api("stop_effect", {"scope": "all"})
+            self._last_logged_freq_output = None
             if dpg.does_item_exist("status_fallback"):
                 dpg.configure_item("status_fallback", show=False)
             
@@ -1183,6 +1195,7 @@ class MotorBusterNativeApp:
         # Reset effect states
         engine.stop_effect()
         self.log_api("stop_effect", {"scope": "all"})
+        self._last_logged_freq_output = None
         if dpg.does_item_exist("status_fallback"):
             dpg.configure_item("status_fallback", show=False)
         for k in self.track_states:
@@ -2176,6 +2189,7 @@ class MotorBusterNativeApp:
 
     def process_sequencer_logic(self):
         cur_t = self.sequencer.current_time
+        periodic_clip_types = ("Sine", "Square", "Triangle", "Sawtooth", "SawtoothUp", "SawtoothDown")
         
         # Read Global Gain
         global_gain = 1.0
@@ -2302,6 +2316,9 @@ class MotorBusterNativeApp:
                 actual_type = tkey
                 log_desc = {**desc, "type": actual_type}
                 self.log_api("play_descriptor", log_desc)
+
+                if current_clip.type in periodic_clip_types:
+                    self._log_frequency_output(float(current_clip.frequency))
                 
                 # ASYNC: Queue the effect start instead of executing synchronously
                 engine.queue_effect_start(desc, t_idx, current_clip.id, -1)
@@ -2403,8 +2420,8 @@ class MotorBusterNativeApp:
                         else:
                             current_freq = float(current_clip.frequency)
 
-                        # Always refresh on-screen monitor frequency
-                        dpg.set_value("monitor_freq", f"Freq: {current_freq:.2f} Hz")
+                        if current_clip.type in periodic_clip_types:
+                            self._log_frequency_output(current_freq)
 
                         should_send = (is_sweep and sweep_ready) or has_changed
 
@@ -2677,6 +2694,8 @@ class MotorBusterNativeApp:
                     state['last_start_mag'] = None
                     state['last_end_mag'] = None
                     state['clip_was_infinite'] = False
+        if not self.sequencer.is_playing:
+            self._last_logged_freq_output = None
 
 
     # --- Rendering ---
@@ -3484,14 +3503,11 @@ class MotorBusterNativeApp:
 
         # Update specific items that don't auto-update with theme
         if dpg.does_item_exist("status_text"):
-             # Only color it green if it's actually connected/green-candidate
-             # Otherwise respect the Red disconnected state (or whatever current color is)
-             curr_s = dpg.get_value("status_text")
-             if "Connected" in curr_s:
-                 dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
-        if dpg.does_item_exist("monitor_freq"):
-             dpg.configure_item("monitor_freq", color=self.theme_colors.get("text_green", (0, 255, 0)))
-
+            # Only color it green if it's actually connected/green-candidate
+            # Otherwise respect the Red disconnected state (or whatever current color is)
+            curr_s = dpg.get_value("status_text")
+            if "Connected" in curr_s:
+                dpg.configure_item("status_text", color=self.theme_colors.get("text_green", (0, 255, 0)))
         if dpg.does_item_exist("txt_license_link"):
              # Use defined link color, fallback to Blue if missing
              link_col = ui.get("link_color", (100, 200, 255))
@@ -3760,9 +3776,6 @@ class MotorBusterNativeApp:
                 dpg.add_checkbox(label="Loop", tag="chk_loop")
                 
                 dpg.add_text("0.00s", tag="time_display")
-                
-                dpg.add_spacer(width=20)
-                dpg.add_text("Freq: --", tag="monitor_freq", color=(100, 255, 100))
 
                 dpg.add_spacer(width=20)
                 dpg.add_button(label="Clear", width=70, callback=lambda: self._clear_wheel_history())
