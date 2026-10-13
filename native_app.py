@@ -1475,6 +1475,10 @@ class MotorBusterNativeApp:
                 dpg.add_text("Rest between runs (s):")
                 dpg.add_input_float(tag="phase_repeat_rest", default_value=2.0, width=70, min_value=0.0, max_value=60.0, step=0)
             with dpg.group(horizontal=True):
+                dpg.add_text("Magnitude (%):")
+                dpg.add_slider_int(tag="phase_repeat_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
+                dpg.add_input_int(tag="phase_repeat_magnitude_num", default_value=25, width=60, min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
+            with dpg.group(horizontal=True):
                 dpg.add_text("Effect:")
                 dpg.add_combo(tag="phase_repeat_effect", width=220,
                               items=["Periodic sine", "Streamed constant force"],
@@ -1519,6 +1523,10 @@ class MotorBusterNativeApp:
                 dpg.add_combo(tag="phase_sweep_effect", width=220,
                               items=["Periodic sine", "Streamed constant force"],
                               default_value="Periodic sine")
+            with dpg.group(horizontal=True):
+                dpg.add_text("Magnitude (%):")
+                dpg.add_slider_int(tag="phase_sweep_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
+                dpg.add_input_int(tag="phase_sweep_magnitude_num", default_value=25, width=60, min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Run phase sweep", tag="btn_phase_sweep_run", width=140, callback=self._phase_sweep_run)
                 dpg.add_button(label="Stop phase sweep", tag="btn_phase_sweep_stop", width=140, enabled=False, callback=self._phase_sweep_stop)
@@ -1818,7 +1826,7 @@ class MotorBusterNativeApp:
         'marker_changed', 'marker_value',
         'phase_deg', 'phase_deg_m2', 'resid_rms_counts', 'n_records', 'mean_dt_us',
         'update_rate_hz_mean', 'update_interval_ms_std', 'update_interval_ms_max',
-        'host_pulse_ms', 'host_play_ms',
+        'host_pulse_ms', 'host_play_ms', 'magnitude_pct',
     )
 
     def _phase_repeat_run(self, sender=None, app_data=None):
@@ -1846,7 +1854,7 @@ class MotorBusterNativeApp:
         capture_s = dpg.get_value('phase_repeat_capture') if dpg.does_item_exist('phase_repeat_capture') else 4.0
         repeats = int(dpg.get_value('phase_repeat_repeats') if dpg.does_item_exist('phase_repeat_repeats') else 20)
         rest_s = dpg.get_value('phase_repeat_rest') if dpg.does_item_exist('phase_repeat_rest') else 2.0
-        torque_pct = dpg.get_value('sweep_torque_pct') if dpg.does_item_exist('sweep_torque_pct') else 10
+        magnitude_pct = dpg.get_value('phase_repeat_magnitude') if dpg.does_item_exist('phase_repeat_magnitude') else 25
         effect = dpg.get_value('phase_repeat_effect') if dpg.does_item_exist('phase_repeat_effect') else 'Periodic sine'
 
         freq = max(1.0, min(500.0, float(freq)))
@@ -1869,14 +1877,14 @@ class MotorBusterNativeApp:
         self._phase_repeat_set_status('Status: starting...')
 
         threading.Thread(target=self._phase_repeat_worker,
-                         args=(freq, capture_s, repeats, rest_s, torque_pct, effect_mode),
+                         args=(freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode),
                          daemon=True).start()
 
     def _phase_repeat_stop(self, sender=None, app_data=None):
         self.phase_repeat_stop = True
         self._phase_repeat_set_status('Status: stopping...')
 
-    def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, torque_pct, effect_mode='sine'):
+    def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode='sine'):
         base = os.path.dirname(os.path.abspath(__file__))
         folder = os.path.join(base, 'phase_runs')
         try:
@@ -1901,7 +1909,7 @@ class MotorBusterNativeApp:
                 self._phase_repeat_set_status(f'Run {run_idx}/{repeats}...')
                 self._phase_repeat_set_progress((run_idx - 1) / max(1, repeats))
                 try:
-                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, torque_pct, ts, folder, effect_mode)
+                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode)
                     results.append(row)
                     self._phase_repeat_append_result(results_path, row)
                     self.log(self._phase_repeat_row_log(row))
@@ -1933,7 +1941,7 @@ class MotorBusterNativeApp:
             if dpg.does_item_exist('btn_phase_sweep_run'):
                 dpg.configure_item('btn_phase_sweep_run', enabled=True)
 
-    def _phase_repeat_run_once(self, freq, capture_s, run_idx, torque_pct, ts, folder, effect_mode='sine'):
+    def _phase_repeat_run_once(self, freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode='sine'):
         t_a = t_b = t_c = 0.0
         updates = []
         try:
@@ -1942,7 +1950,7 @@ class MotorBusterNativeApp:
             except Exception:
                 pass
 
-            amplitude = int(32767 * torque_pct / 100.0)
+            amplitude = int(32767 * magnitude_pct / 100.0)
             di_mag = self._s16_to_di(amplitude)
             duration_us = int((capture_s + 1.0) * 1e6)
 
@@ -2026,6 +2034,7 @@ class MotorBusterNativeApp:
             'update_interval_ms_max': update_stats.get('interval_ms_max'),
             'host_pulse_ms': (t_b - t_a) * 1e3,
             'host_play_ms': (t_c - t_b) * 1e3,
+            'magnitude_pct': magnitude_pct,
         }
 
     def _phase_find_markers(self, records):
@@ -2308,12 +2317,24 @@ class MotorBusterNativeApp:
         while time.time() < deadline and not self._phase_stop_requested():
             time.sleep(0.02)
 
+    def _phase_magnitude_slider_changed(self, sender=None, app_data=None):
+        target = {'phase_repeat_magnitude': 'phase_repeat_magnitude_num',
+                  'phase_sweep_magnitude': 'phase_sweep_magnitude_num'}.get(sender)
+        if target and dpg.does_item_exist(target):
+            dpg.set_value(target, app_data)
+
+    def _phase_magnitude_num_changed(self, sender=None, app_data=None):
+        target = {'phase_repeat_magnitude_num': 'phase_repeat_magnitude',
+                  'phase_sweep_magnitude_num': 'phase_sweep_magnitude'}.get(sender)
+        if target and dpg.does_item_exist(target):
+            dpg.set_value(target, app_data)
+
     # --- Phase sweep ---
     _PHASE_SWEEP_COLUMNS = (
         'freq_hz', 'f_fit_mean_hz', 'amp_counts_mean', 'valid_runs', 'total_runs',
         'circ_mean_deg', 'circ_std_deg', 'sem_deg', 'phase_unwrapped_deg',
         'circ_mean_deg_m2', 'circ_std_deg_m2', 'play_window_ms_mean',
-        'phase_unwrapped_deg_m2',
+        'phase_unwrapped_deg_m2', 'magnitude_pct',
     )
 
     def _phase_stop_requested(self):
@@ -2368,7 +2389,7 @@ class MotorBusterNativeApp:
         repeats = int(dpg.get_value('phase_sweep_repeats') if dpg.does_item_exist('phase_sweep_repeats') else 20)
         capture_s = dpg.get_value('phase_sweep_capture') if dpg.does_item_exist('phase_sweep_capture') else 3.0
         rest_s = dpg.get_value('phase_sweep_rest') if dpg.does_item_exist('phase_sweep_rest') else 1.0
-        torque_pct = dpg.get_value('sweep_torque_pct') if dpg.does_item_exist('sweep_torque_pct') else 10
+        magnitude_pct = dpg.get_value('phase_sweep_magnitude') if dpg.does_item_exist('phase_sweep_magnitude') else 25
         effect = dpg.get_value('phase_sweep_effect') if dpg.does_item_exist('phase_sweep_effect') else 'Periodic sine'
         freq_list_text = dpg.get_value('phase_sweep_freq_list') if dpg.does_item_exist('phase_sweep_freq_list') else ''
 
@@ -2401,14 +2422,14 @@ class MotorBusterNativeApp:
         self._phase_sweep_set_status('Status: starting...')
 
         threading.Thread(target=self._phase_sweep_worker,
-                         args=(freqs, repeats, capture_s, rest_s, torque_pct, effect_mode),
+                         args=(freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode),
                          daemon=True).start()
 
     def _phase_sweep_stop(self, sender=None, app_data=None):
         self.phase_sweep_stop = True
         self._phase_sweep_set_status('Status: stopping after current run...')
 
-    def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, torque_pct, effect_mode='sine'):
+    def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode='sine'):
         base = os.path.dirname(os.path.abspath(__file__))
         folder = os.path.join(base, 'phase_runs')
         try:
@@ -2442,7 +2463,7 @@ class MotorBusterNativeApp:
                         f'Freq {freq:g} Hz, run {run_idx}/{repeats}, '
                         f'elapsed {time.time() - start_time:.0f}s...')
                     try:
-                        row = self._phase_repeat_run_once(freq, cap, run_idx, torque_pct, ts, folder, effect_mode)
+                        row = self._phase_repeat_run_once(freq, cap, run_idx, magnitude_pct, ts, folder, effect_mode)
                         run_results.append(row)
                     except Exception as e:
                         import traceback
@@ -2456,7 +2477,7 @@ class MotorBusterNativeApp:
                         self._phase_repeat_interruptible_sleep(rest_s)
 
                 if run_results:
-                    sweep_row = self._phase_sweep_summarize(freq, run_results)
+                    sweep_row = self._phase_sweep_summarize(freq, run_results, magnitude_pct)
                     sweep_rows.append(sweep_row)
                     self.log(f'Phase sweep {freq:g} Hz: '
                              f'{sweep_row["valid_runs"]}/{sweep_row["total_runs"]} valid')
@@ -2496,7 +2517,7 @@ class MotorBusterNativeApp:
             f'Phase sweep done: {len(sweep_rows)} freqs, {elapsed_total:.0f}s')
         self.log(f'[Phase sweep] complete, results in {results_path}')
 
-    def _phase_sweep_summarize(self, freq, run_results):
+    def _phase_sweep_summarize(self, freq, run_results, magnitude_pct=None):
         valid = [r for r in run_results if r.get('phase_deg') is not None]
         n_valid = len(valid)
         n_total = len(run_results)
@@ -2514,6 +2535,7 @@ class MotorBusterNativeApp:
             'circ_std_deg_m2': None,
             'play_window_ms_mean': None,
             'phase_unwrapped_deg_m2': None,
+            'magnitude_pct': magnitude_pct,
         }
         if n_valid:
             row['f_fit_mean_hz'] = float(np.mean([r['f_fit_hz'] for r in valid]))
