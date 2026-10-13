@@ -11,6 +11,7 @@ import threading
 import json
 from typing import Optional, Callable
 from dataclasses import dataclass, field
+import math
 
 # Estimated number of measurement cycles the MCU runs per sweep point.
 # Used only to size the host-side response timeout (the MCU replies when Ready).
@@ -34,6 +35,15 @@ class SweepConfig:
 
     # Command type to send for each sweep point (e.g. 'sine', 'constant', 'selftest')
     command_type: str = 'sine'
+
+    # Host-side response timeout sizing (in periods). Must be >= the firmware's
+    # fixed measure window (BODE_DEFAULT_MEASURE_PERIODS = 100), otherwise the
+    # host will time out before the MCU replies.
+    measure_periods: int = 100
+
+    # Number of repeated measurements per frequency; magnitudes are averaged
+    # in the linear domain.
+    runs_per_point: int = 3
 
     # Execution
     single_simulation: bool = True
@@ -61,14 +71,18 @@ class SweepConfig:
             return self._snap_to_sample_rate_divisors()
 
         if self.num_frequencies == 1:
-            return [self.freq_min_hz]
+            return [float(round(self.freq_min_hz))]
 
         if self.spacing == 'logarithmic':
             ratio = (self.freq_max_hz / self.freq_min_hz) ** (1.0 / (self.num_frequencies - 1))
-            return [self.freq_min_hz * (ratio ** i) for i in range(self.num_frequencies)]
+            freqs = [self.freq_min_hz * (ratio ** i) for i in range(self.num_frequencies)]
         else:
             step = (self.freq_max_hz - self.freq_min_hz) / (self.num_frequencies - 1)
-            return [self.freq_min_hz + step * i for i in range(self.num_frequencies)]
+            freqs = [self.freq_min_hz + step * i for i in range(self.num_frequencies)]
+
+        # The firmware takes an integer frequency (Hz). Round so the commanded
+        # frequency matches the frequency recorded/plotted for each point.
+        return [float(round(f)) for f in freqs]
 
     def _snap_to_sample_rate_divisors(self) -> list[float]:
         '''Return self-test frequencies that divide the 200000 Hz sample rate.
@@ -137,6 +151,8 @@ class SweepData:
                 'amplitude': self.config.amplitude,
                 'max_torque_nm': self.config.max_torque_nm,
                 'settling_periods': self.config.settling_periods,
+                'measure_periods': self.config.measure_periods,
+                'runs_per_point': self.config.runs_per_point,
                 'ramp_periods': self.config.ramp_periods,
             },
             'results': [
@@ -238,40 +254,57 @@ class SweepEngine:
                     period_dur = config.get_period_duration(freq_hz)
 
                     self._log(f'  Freq {freq_hz:.2f} Hz: sweeping '
-                              f'(settle={config.settling_periods}, ramp={config.ramp_periods})')
+                              f'(settle={config.settling_periods}, ramp={config.ramp_periods}, '
+                              f'runs={config.runs_per_point})')
 
-                    # Clear any stale response
-                    self._response_data = None
-                    self._response_event.clear()
-
-                    # Send the sweep-point command; the MCU runs settle + measure
-                    # internally and replies with a 0xBB response when Ready.
-                    if self.on_send_effect:
-                        self.on_send_effect(config.command_type, freq_hz, config.amplitude,
-                                            config.settling_periods,
-                                            config.ramp_periods,
-                                            config.max_torque_nm)
-
-                    # Wait for the MCU response. Account for settle + ramp +
-                    # measure cycles (each scaled by the period duration), add
-                    # a fixed buffer for USB/processing overhead, then a 10%
-                    # margin so the MCU has time to actually output before we
-                    # consider it a timeout. Low frequencies need more headroom.
+                    # Wait for the MCU response. The firmware's ISR runs ~2.5x
+                    # slower than nominal (a 32 Hz sweep takes ~7.5 s, not ~3.2 s),
+                    # so size the timeout against the real response time plus a
+                    # generous buffer instead of the theoretical 200 kHz rate.
                     base_timeout = period_dur * (config.settling_periods +
                                                  config.ramp_periods +
-                                                 MEASURE_CYCLES_ESTIMATE) + 2.0
-                    timeout = base_timeout * 1.10
-                    got_response = self._response_event.wait(timeout=timeout)
+                                                 config.measure_periods) * 2.5 + 3.0
+                    timeout = base_timeout
+
+                    # Run the point multiple times and average the magnitude in
+                    # the linear domain (dB is logarithmic, so a straight mean
+                    # of dB values would be biased).
+                    mags_linear = []
+                    last_phase = 0.0
+                    for run_i in range(config.runs_per_point):
+                        if self._cancel_event.is_set():
+                            break
+
+                        # Clear any stale response
+                        self._response_data = None
+                        self._response_event.clear()
+
+                        # Send the sweep-point command; the MCU runs settle +
+                        # measure internally and replies with 0xBB when Ready.
+                        if self.on_send_effect:
+                            self.on_send_effect(config.command_type, freq_hz, config.amplitude,
+                                                config.settling_periods,
+                                                config.ramp_periods,
+                                                config.max_torque_nm)
+
+                        got_response = self._response_event.wait(timeout=timeout)
+                        if got_response and self._response_data:
+                            rd = self._response_data
+                            mags_linear.append(10.0 ** (rd.get('mag_db', 0.0) / 20.0))
+                            last_phase = rd.get('phase_deg', 0.0)
+                        else:
+                            self._log(f'    run {run_i + 1}/{config.runs_per_point}: '
+                                      'no response (timeout)', level='warning')
 
                     result = SweepResult(freq_hz=freq_hz)
 
-                    if got_response and self._response_data:
-                        rd = self._response_data
-                        result.mag_db = rd.get('mag_db', 0.0)
-                        result.phase_deg = rd.get('phase_deg', 0.0)
+                    if mags_linear:
+                        avg_linear = sum(mags_linear) / len(mags_linear)
+                        result.mag_db = 20.0 * math.log10(max(avg_linear, 1e-12))
+                        result.phase_deg = last_phase
                         result.valid = True
-                        self._log(f'  Result: Mag = {result.mag_db:.2f} dB, '
-                                  f'Phase = {result.phase_deg:.2f} deg')
+                        self._log(f'  Result: Mag = {result.mag_db:.2f} dB '
+                                  f'(avg of {len(mags_linear)} runs)')
                     else:
                         # The MCU did not respond within the settle + ramp +
                         # measure window. This means the MCU is not running the

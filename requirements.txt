@@ -4,3 +4,4 @@ pysdl3
 Pillow
 pywin32
 pyserial
+numpy

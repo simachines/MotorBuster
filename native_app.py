@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import uuid
 import json
 import math
+import numpy as np
 import bisect
 from typing import Optional
 import warnings
@@ -518,6 +519,13 @@ class MotorBusterNativeApp:
         self._cmd_expects_response = False
         self._cmd_sent_time = 0.0
         self._cmd_timeout = 5.0
+        # Debug stream capture state
+        self.stream_capturing = False
+        self.stream_records = []
+        self.phase_repeat_running = False
+        self.phase_repeat_stop = False
+        self.phase_sweep_running = False
+        self.phase_sweep_stop = False
         
         # Diagnostic state (still referenced by UI)
         self.freeze_test_active = False
@@ -1489,6 +1497,75 @@ class MotorBusterNativeApp:
             dpg.add_spacer(height=8)
             dpg.add_separator()
 
+            # --- Phase repeatability test ---
+            dpg.add_text("Phase repeatability test", color=(200, 200, 255))
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_text("Frequency (Hz):")
+                dpg.add_input_float(tag="phase_repeat_freq", default_value=10.0, width=90, min_value=1.0, max_value=500.0, step=0)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Capture seconds:")
+                dpg.add_input_float(tag="phase_repeat_capture", default_value=4.0, width=70, min_value=1.0, max_value=60.0, step=0)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Repeats:")
+                dpg.add_input_int(tag="phase_repeat_repeats", default_value=20, width=70, min_value=1, max_value=100)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Rest between runs (s):")
+                dpg.add_input_float(tag="phase_repeat_rest", default_value=2.0, width=70, min_value=0.0, max_value=60.0, step=0)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Effect:")
+                dpg.add_combo(tag="phase_repeat_effect", width=220,
+                              items=["Periodic sine", "Streamed constant force"],
+                              default_value="Periodic sine")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Run phase test", tag="btn_phase_repeat_run", width=130, callback=self._phase_repeat_run)
+                dpg.add_button(label="Stop phase test", tag="btn_phase_repeat_stop", width=130, enabled=False, callback=self._phase_repeat_stop)
+            dpg.add_progress_bar(tag="phase_repeat_progress", width=-1, default_value=0.0)
+            dpg.add_text("Status: Ready", tag="txt_phase_repeat_status", wrap=600, color=(200, 200, 200))
+
+            dpg.add_spacer(height=8)
+            dpg.add_separator()
+
+            # --- Phase sweep ---
+            dpg.add_text("Phase sweep", color=(200, 200, 255))
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_text("Start Hz:")
+                dpg.add_input_float(tag="phase_sweep_start", default_value=5.0, width=70, min_value=1.0, max_value=500.0, step=0)
+                dpg.add_spacer(width=10)
+                dpg.add_text("End Hz:")
+                dpg.add_input_float(tag="phase_sweep_end", default_value=200.0, width=70, min_value=1.0, max_value=500.0, step=0)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Step Hz:")
+                dpg.add_input_float(tag="phase_sweep_step", default_value=5.0, width=70, min_value=0.1, max_value=500.0, step=0)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Repeats per frequency:")
+                dpg.add_input_int(tag="phase_sweep_repeats", default_value=20, width=70, min_value=1, max_value=100)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Capture seconds:")
+                dpg.add_input_float(tag="phase_sweep_capture", default_value=3.0, width=70, min_value=1.0, max_value=60.0, step=0)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Rest (s):")
+                dpg.add_input_float(tag="phase_sweep_rest", default_value=1.0, width=70, min_value=0.0, max_value=60.0, step=0)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Frequency list:")
+                dpg.add_input_text(tag="phase_sweep_freq_list", width=400, default_value="",
+                                   hint="comma-separated Hz (overrides Start/End/Step)")
+                dpg.add_button(label="Use whole-ms periods", width=170, callback=self._phase_sweep_use_whole_ms)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Effect:")
+                dpg.add_combo(tag="phase_sweep_effect", width=220,
+                              items=["Periodic sine", "Streamed constant force"],
+                              default_value="Periodic sine")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Run phase sweep", tag="btn_phase_sweep_run", width=140, callback=self._phase_sweep_run)
+                dpg.add_button(label="Stop phase sweep", tag="btn_phase_sweep_stop", width=140, enabled=False, callback=self._phase_sweep_stop)
+            dpg.add_progress_bar(tag="phase_sweep_progress", width=-1, default_value=0.0)
+            dpg.add_text("Status: Ready", tag="txt_phase_sweep_status", wrap=600, color=(200, 200, 200))
+
+            dpg.add_spacer(height=8)
+            dpg.add_separator()
+
             # --- Bode plots ---
             dpg.add_text("Bode Plot", color=(200, 200, 255))
             dpg.add_separator()
@@ -1689,14 +1766,835 @@ class MotorBusterNativeApp:
         """Export sweep results."""
         sweep_engine.export_results("motorbuster_sweep_results.json")
 
+    def _on_stream_record(self, rec: dict):
+        """Accumulate a debug stream record (called from the serial read thread)."""
+        if getattr(self, 'stream_capturing', False):
+            self.stream_records.append(rec)
+
+    def _start_phase_capture(self):
+        """Start ADC capture for the phase experiment (no tone is played)."""
+        if getattr(self, 'stream_capturing', False):
+            return
+        self.stream_records = []
+        self.stream_capturing = True
+        serial_manager.set_stream_callback(self._on_stream_record)
+        serial_manager.send_stream_start(40.0)
+        self.log('ADC capture started (phase experiment)')
+
+    def _stop_phase_capture(self):
+        """Stop ADC capture and save the phase CSV."""
+        if not getattr(self, 'stream_capturing', False):
+            return
+        serial_manager.send_stream_stop()
+        serial_manager.set_stream_callback(None)
+        self.stream_capturing = False
+        self._save_phase_csv()
+
+    def _save_phase_csv(self):
+        """Write captured records to a timestamped CSV for the phase experiment."""
+        records = getattr(self, 'stream_records', [])
+        if not records:
+            self.log('Phase capture: no records to save')
+            return
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f'motorbuster_phase_{ts}.csv')
+        try:
+            with open(path, 'w', newline='') as f:
+                f.write('index,adc,theta_rad,cos_theta,sin_theta,t_us,t_marker\n')
+                for i, r in enumerate(records):
+                    th = r['theta']
+                    f.write(f"{i},{r['adc']},{th:.6f},{math.cos(th):.6f},{math.sin(th):.6f},{r['t_us']},{r.get('t_marker', 0)}\n")
+            self.log(f'Phase capture saved to {path} ({len(records)} records)')
+        except Exception as e:
+            self.log(f'Phase capture save failed: {e}')
+
+    # --- Phase repeatability test ---
+    _PHASE_RESULT_COLUMNS = (
+        'run', 'marker_valid', 'f_fit_hz', 'amp_counts',
+        'marker1_ms_into_capture', 'marker2_ms_into_capture', 'play_window_ms',
+        'marker_changed', 'marker_value',
+        'phase_deg', 'phase_deg_m2', 'resid_rms_counts', 'n_records', 'mean_dt_us',
+        'update_rate_hz_mean', 'update_interval_ms_std', 'update_interval_ms_max',
+        'host_pulse_ms', 'host_play_ms',
+    )
+
+    def _phase_repeat_run(self, sender=None, app_data=None):
+        if not self.serial_connected:
+            self.log('Phase repeatability test requires a serial connection')
+            self._phase_repeat_set_status('Status: serial not connected')
+            return
+        if sweep_engine.is_running:
+            self.log('Cannot run phase test while a sweep is running')
+            self._phase_repeat_set_status('Status: sweep in progress')
+            return
+        if getattr(self, 'stream_capturing', False):
+            self.log('Cannot run phase test: stream capture already active')
+            self._phase_repeat_set_status('Status: stream capture active')
+            return
+        if getattr(self, 'phase_repeat_running', False):
+            self.log('Phase repeatability test already running')
+            return
+        if getattr(self, 'phase_sweep_running', False):
+            self.log('Cannot run phase test while a phase sweep is running')
+            self._phase_repeat_set_status('Status: phase sweep in progress')
+            return
+
+        freq = dpg.get_value('phase_repeat_freq') if dpg.does_item_exist('phase_repeat_freq') else 10.0
+        capture_s = dpg.get_value('phase_repeat_capture') if dpg.does_item_exist('phase_repeat_capture') else 4.0
+        repeats = int(dpg.get_value('phase_repeat_repeats') if dpg.does_item_exist('phase_repeat_repeats') else 20)
+        rest_s = dpg.get_value('phase_repeat_rest') if dpg.does_item_exist('phase_repeat_rest') else 2.0
+        torque_pct = dpg.get_value('sweep_torque_pct') if dpg.does_item_exist('sweep_torque_pct') else 10
+        effect = dpg.get_value('phase_repeat_effect') if dpg.does_item_exist('phase_repeat_effect') else 'Periodic sine'
+
+        freq = max(1.0, min(500.0, float(freq)))
+        capture_s = max(1.0, float(capture_s))
+        repeats = max(1, min(100, int(repeats)))
+        rest_s = max(0.0, float(rest_s))
+        effect_mode = 'constant' if 'constant' in str(effect).lower() else 'sine'
+
+        self.phase_repeat_running = True
+        self.phase_repeat_stop = False
+        self.phase_sweep_stop = False
+        if dpg.does_item_exist('btn_phase_repeat_run'):
+            dpg.configure_item('btn_phase_repeat_run', enabled=False)
+        if dpg.does_item_exist('btn_phase_repeat_stop'):
+            dpg.configure_item('btn_phase_repeat_stop', enabled=True)
+        if dpg.does_item_exist('btn_phase_sweep_run'):
+            dpg.configure_item('btn_phase_sweep_run', enabled=False)
+        if dpg.does_item_exist('phase_repeat_progress'):
+            dpg.set_value('phase_repeat_progress', 0.0)
+        self._phase_repeat_set_status('Status: starting...')
+
+        threading.Thread(target=self._phase_repeat_worker,
+                         args=(freq, capture_s, repeats, rest_s, torque_pct, effect_mode),
+                         daemon=True).start()
+
+    def _phase_repeat_stop(self, sender=None, app_data=None):
+        self.phase_repeat_stop = True
+        self._phase_repeat_set_status('Status: stopping...')
+
+    def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, torque_pct, effect_mode='sine'):
+        base = os.path.dirname(os.path.abspath(__file__))
+        folder = os.path.join(base, 'phase_runs')
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as e:
+            self.log(f'Phase repeat: could not create {folder}: {e}')
+
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        results_path = os.path.join(folder, f'results_{freq:g}Hz_{ts}.csv')
+        results = []
+
+        try:
+            with open(results_path, 'w', newline='') as rf:
+                rf.write(','.join(self._PHASE_RESULT_COLUMNS) + '\n')
+        except Exception as e:
+            self.log(f'Phase repeat: could not write results header {results_path}: {e}')
+
+        try:
+            for run_idx in range(1, repeats + 1):
+                if self.phase_repeat_stop:
+                    break
+                self._phase_repeat_set_status(f'Run {run_idx}/{repeats}...')
+                self._phase_repeat_set_progress((run_idx - 1) / max(1, repeats))
+                try:
+                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, torque_pct, ts, folder, effect_mode)
+                    results.append(row)
+                    self._phase_repeat_append_result(results_path, row)
+                    self.log(self._phase_repeat_row_log(row))
+                except Exception as e:
+                    import traceback
+                    self.log(f'Phase repeat run {run_idx} failed: {e}')
+                    self.log(traceback.format_exc())
+                self._phase_repeat_set_progress(run_idx / max(1, repeats))
+                if run_idx < repeats and not self.phase_repeat_stop:
+                    self._phase_repeat_interruptible_sleep(rest_s)
+        except Exception as e:
+            self.log(f'Phase repeat worker error: {e}')
+        finally:
+            self.phase_repeat_running = False
+
+        try:
+            text, csv_line = self._phase_repeat_summary(results)
+            self._phase_repeat_set_status(text)
+            self.log(f'[Phase repeat] {text}')
+            with open(results_path, 'a', newline='') as rf:
+                rf.write(csv_line + '\n')
+        except Exception as e:
+            self.log(f'Phase repeat: could not write summary: {e}')
+        finally:
+            if dpg.does_item_exist('btn_phase_repeat_run'):
+                dpg.configure_item('btn_phase_repeat_run', enabled=True)
+            if dpg.does_item_exist('btn_phase_repeat_stop'):
+                dpg.configure_item('btn_phase_repeat_stop', enabled=False)
+            if dpg.does_item_exist('btn_phase_sweep_run'):
+                dpg.configure_item('btn_phase_sweep_run', enabled=True)
+
+    def _phase_repeat_run_once(self, freq, capture_s, run_idx, torque_pct, ts, folder, effect_mode='sine'):
+        t_a = t_b = t_c = 0.0
+        updates = []
+        try:
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+
+            amplitude = int(32767 * torque_pct / 100.0)
+            di_mag = self._s16_to_di(amplitude)
+            duration_us = int((capture_s + 1.0) * 1e6)
+
+            if effect_mode == 'constant':
+                try:
+                    engine.play_descriptor({
+                        'type': 'constant',
+                        'magnitude': 0,
+                        'length_us': duration_us,
+                        'magnitude_unit': 'di',
+                    })
+                except Exception as e:
+                    self.log(f'Constant effect create failed: {e}')
+
+            self.stream_records = []
+            serial_manager.set_stream_callback(self._on_stream_record)
+            self.stream_capturing = True
+            serial_manager.send_stream_start(freq)
+
+            time.sleep(0.15)
+
+            if effect_mode == 'constant':
+                updates, t_a, t_b, t_c = self._phase_run_constant(freq, capture_s, amplitude, duration_us)
+            else:
+                t_a = time.perf_counter()
+                serial_manager.send_mark()
+                t_b = time.perf_counter()
+                engine.play_descriptor({
+                    'type': 'periodic_sine',
+                    'magnitude': di_mag,
+                    'frequency_hz': float(freq),
+                    'length_us': duration_us,
+                    'magnitude_unit': 'di',
+                })
+                serial_manager.send_mark()
+                t_c = time.perf_counter()
+
+                deadline = time.time() + capture_s
+                while time.time() < deadline and not self._phase_stop_requested():
+                    time.sleep(0.02)
+        finally:
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+            serial_manager.send_stream_stop()
+            serial_manager.set_stream_callback(None)
+            self.stream_capturing = False
+            time.sleep(0.2)
+
+        records = list(self.stream_records)
+        if records:
+            marker_value = records[-1].get('t_marker', 0)
+            marker_changed = records[0].get('t_marker', 0) != marker_value
+        else:
+            marker_value = 0
+            marker_changed = False
+        self._phase_repeat_save_raw(records, freq, run_idx, ts, folder)
+        if effect_mode == 'constant':
+            self._phase_save_update_csv(updates, freq, run_idx, ts, folder)
+        analysis = self._phase_repeat_analyse(records, freq)
+        update_stats = self._phase_update_stats(updates)
+
+        return {
+            'run': run_idx,
+            'marker_valid': bool(analysis.get('marker_valid', False)),
+            'f_fit_hz': analysis.get('f_fit_hz'),
+            'amp_counts': analysis.get('amp_counts'),
+            'marker1_ms_into_capture': analysis.get('marker1_ms'),
+            'marker2_ms_into_capture': analysis.get('marker2_ms'),
+            'play_window_ms': analysis.get('play_window_ms'),
+            'marker_changed': marker_changed,
+            'marker_value': marker_value,
+            'phase_deg': analysis.get('phase_deg'),
+            'phase_deg_m2': analysis.get('phase_deg_m2'),
+            'resid_rms_counts': analysis.get('resid_rms_counts'),
+            'n_records': len(records),
+            'mean_dt_us': analysis.get('mean_dt_us', 0.0),
+            'update_rate_hz_mean': update_stats.get('rate_hz_mean'),
+            'update_interval_ms_std': update_stats.get('interval_ms_std'),
+            'update_interval_ms_max': update_stats.get('interval_ms_max'),
+            'host_pulse_ms': (t_b - t_a) * 1e3,
+            'host_play_ms': (t_c - t_b) * 1e3,
+        }
+
+    def _phase_find_markers(self, records):
+        if not records:
+            return None, None
+        leftover = records[0].get('t_marker', 0)
+        marker1 = None
+        marker2 = None
+        for r in records:
+            v = r.get('t_marker', 0)
+            if marker1 is None:
+                if v != leftover:
+                    marker1 = v
+            else:
+                if v != marker1:
+                    marker2 = v
+                    break
+        return marker1, marker2
+
+    def _win_timer_begin(self):
+        try:
+            if sys.platform == 'win32':
+                ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
+
+    def _win_timer_end(self):
+        try:
+            if sys.platform == 'win32':
+                ctypes.windll.winmm.timeEndPeriod(1)
+        except Exception:
+            pass
+
+    def _phase_run_constant(self, freq, capture_s, amplitude, duration_us):
+        updates = []
+        duration_ms = int((capture_s + 1.0) * 1000)
+        A = amplitude
+        self._win_timer_begin()
+        try:
+            t_a = time.perf_counter()
+            serial_manager.send_mark()
+            t_b = time.perf_counter()
+            t_mark1 = t_b
+            value = 0
+            engine.update_effect_constant(0, value, duration_ms)
+            updates.append((0.0, value))
+            serial_manager.send_mark()
+            t_c = time.perf_counter()
+
+            target_interval = 1.0 / 1000.0
+            deadline = time.perf_counter() + capture_s
+            next_t = time.perf_counter() + target_interval
+            while True:
+                now = time.perf_counter()
+                if now >= deadline or self._phase_stop_requested():
+                    break
+                if now >= next_t:
+                    t = now - t_mark1
+                    value = int(round(A * math.sin(2.0 * math.pi * freq * t)))
+                    engine.update_effect_constant(0, value, duration_ms)
+                    updates.append((t, value))
+                    next_t += target_interval
+                    if next_t < now:
+                        next_t = now
+        finally:
+            self._win_timer_end()
+        return updates, t_a, t_b, t_c
+
+    def _phase_update_stats(self, updates):
+        if len(updates) < 2:
+            return {'rate_hz_mean': None, 'interval_ms_std': None, 'interval_ms_max': None}
+        times = np.array([u[0] for u in updates], dtype=float)
+        intervals = np.diff(times)
+        mean_interval = float(np.mean(intervals))
+        rate_hz_mean = (1.0 / mean_interval) if mean_interval > 0 else None
+        return {
+            'rate_hz_mean': rate_hz_mean,
+            'interval_ms_std': float(np.std(intervals)) * 1e3,
+            'interval_ms_max': float(np.max(intervals)) * 1e3,
+        }
+
+    def _phase_save_update_csv(self, updates, freq, run_idx, ts, folder):
+        path = os.path.join(folder, f'{ts}_{freq:g}Hz_run{run_idx:02d}_updates.csv')
+        try:
+            with open(path, 'w', newline='') as f:
+                f.write('t_s,value\n')
+                for t_s, value in updates:
+                    f.write(f'{t_s:.6f},{value}\n')
+            self.log(f'Phase repeat run {run_idx}: updates saved to {path} ({len(updates)} updates)')
+        except Exception as e:
+            self.log(f'Phase repeat run {run_idx}: update save failed: {e}')
+        return path
+
+    def _phase_repeat_save_raw(self, records, freq, run_idx, ts, folder):
+        path = os.path.join(folder, f'{ts}_{freq:g}Hz_run{run_idx:02d}.csv')
+        try:
+            with open(path, 'w', newline='') as f:
+                f.write('index,adc,theta_rad,cos_theta,sin_theta,t_us,t_marker\n')
+                for i, r in enumerate(records):
+                    th = r['theta']
+                    f.write(f"{i},{r['adc']},{th:.6f},{math.cos(th):.6f},{math.sin(th):.6f},"
+                            f"{r['t_us']},{r.get('t_marker', 0)}\n")
+            self.log(f'Phase repeat run {run_idx}: raw saved to {path} ({len(records)} records)')
+        except Exception as e:
+            self.log(f'Phase repeat run {run_idx}: raw save failed: {e}')
+        return path
+
+    def _phase_repeat_analyse(self, records, nominal_freq):
+        out = {'marker_valid': False, 'tm': 0.0, 'tm2': None, 'marker1_ms': None,
+               'marker2_ms': None, 'play_window_ms': None, 'mean_dt_us': 0.0}
+        if not records:
+            return out
+
+        W = (2 ** 32) / 96.0
+
+        raw = [r['t_us'] for r in records]
+        offset = 0.0
+        prev = raw[0]
+        t_us = []
+        for v in raw:
+            if v < prev:
+                offset += W
+            t_us.append(v + offset)
+            prev = v
+
+        t0 = t_us[0]
+        t = np.array([(x - t0) / 1e6 for x in t_us], dtype=float)
+        t_end = float(t[-1])
+
+        marker1_us, marker2_us = self._phase_find_markers(records)
+
+        def to_s(mus):
+            if mus is None:
+                return None
+            dm = (mus - raw[0]) % W
+            if dm > W / 2.0:
+                dm -= W
+            return dm * 1e-6
+
+        tm = to_s(marker1_us)
+        tm2 = to_s(marker2_us)
+
+        out['mean_dt_us'] = float(np.mean(np.diff(t_us))) if len(t_us) > 1 else 0.0
+        out['tm'] = tm if tm is not None else 0.0
+        out['marker1_ms'] = tm * 1e3 if tm is not None else None
+        out['marker2_ms'] = tm2 * 1e3 if tm2 is not None else None
+        if tm is not None and tm2 is not None:
+            out['play_window_ms'] = (tm2 - tm) * 1e3
+        out['marker_valid'] = bool(tm is not None and 0.0 <= tm <= t_end - 1.0)
+        if not out['marker_valid']:
+            return out
+
+        adc = np.array([r['adc'] for r in records], dtype=float)
+        mask = t >= (tm + 0.5)
+        if int(np.count_nonzero(mask)) < 8:
+            return out
+
+        t_win = t[mask]
+        adc_win = adc[mask]
+        n_win = int(t_win.size)
+
+        f_lo = nominal_freq * 0.97
+        f_hi = nominal_freq * 1.03
+        f_candidates = np.arange(f_lo, f_hi + 1e-12, 0.002)
+
+        best_f = None
+        best_rss = float('inf')
+        best_coef = None
+        for f in f_candidates:
+            A = np.column_stack([
+                np.cos(2.0 * np.pi * f * t_win),
+                np.sin(2.0 * np.pi * f * t_win),
+                np.ones(n_win),
+                t_win,
+            ])
+            coef, _, _, _ = np.linalg.lstsq(A, adc_win, rcond=None)
+            resid = adc_win - A @ coef
+            rss = float(np.dot(resid, resid))
+            if rss < best_rss:
+                best_rss = rss
+                best_f = float(f)
+                best_coef = coef
+
+        if best_coef is None:
+            return out
+
+        a = float(best_coef[0])
+        b = float(best_coef[1])
+        amp = float(math.hypot(a, b))
+        psi = math.atan2(b, a)
+        phase = math.degrees(2.0 * math.pi * best_f * tm - psi + math.pi / 2.0)
+        phase = (phase + 180.0) % 360.0 - 180.0
+        resid_rms = float(math.sqrt(best_rss / n_win))
+
+        out['f_fit_hz'] = best_f
+        out['amp_counts'] = amp
+        out['phase_deg'] = phase
+        out['resid_rms_counts'] = resid_rms
+
+        if tm2 is not None and 0.0 <= tm2 <= t_end - 1.0:
+            phase_m2 = math.degrees(2.0 * math.pi * best_f * tm2 - psi + math.pi / 2.0)
+            phase_m2 = (phase_m2 + 180.0) % 360.0 - 180.0
+            out['phase_deg_m2'] = phase_m2
+
+        return out
+
+    def _phase_repeat_summary(self, results):
+        valid = [r for r in results if r.get('phase_deg') is not None]
+        n_valid = len(valid)
+        n_total = len(results)
+        if n_valid == 0:
+            text = f'Phase repeatability: {n_total} run(s), 0 valid fits'
+            line = (f'SUMMARY,valid_runs=0,total_runs={n_total},'
+                    f'circ_mean_deg=,circ_std_deg=,f_mean_hz=,f_std_hz=')
+            return text, line
+
+        phases_deg = np.array([r['phase_deg'] for r in valid])
+        z = np.exp(1j * np.radians(phases_deg))
+        mean_z = np.mean(z)
+        R = float(np.abs(mean_z))
+        circ_mean_deg = float(np.degrees(np.angle(mean_z)))
+        Rc = min(max(R, 1e-12), 1.0)
+        circ_std_deg = float(np.degrees(math.sqrt(-2.0 * math.log(Rc))))
+
+        freqs = np.array([r['f_fit_hz'] for r in valid])
+        f_mean = float(np.mean(freqs))
+        f_std = float(np.std(freqs))
+
+        text = (f'Phase repeatability: {n_valid}/{n_total} valid. '
+                f'phase circ_mean={circ_mean_deg:.2f} deg, circ_std={circ_std_deg:.2f} deg; '
+                f'f mean={f_mean:.4f} Hz, std={f_std:.4f} Hz')
+        line = (f'SUMMARY,valid_runs={n_valid},total_runs={n_total},'
+                f'circ_mean_deg={circ_mean_deg:.4f},circ_std_deg={circ_std_deg:.4f},'
+                f'f_mean_hz={f_mean:.6f},f_std_hz={f_std:.6f}')
+        return text, line
+
+    def _phase_repeat_append_result(self, path, row):
+        def _fmt(v):
+            if v is None:
+                return ''
+            if isinstance(v, bool):
+                return 'True' if v else 'False'
+            if isinstance(v, float):
+                return f'{v:.6f}'
+            return str(v)
+        line = ','.join(_fmt(row.get(k)) for k in self._PHASE_RESULT_COLUMNS) + '\n'
+        try:
+            with open(path, 'a', newline='') as rf:
+                rf.write(line)
+        except Exception as e:
+            self.log(f'Phase repeat: could not append result row: {e}')
+
+    def _phase_repeat_row_log(self, row):
+        m1 = row.get('marker1_ms_into_capture')
+        m1_s = f'{m1:.1f}' if m1 is not None else '?'
+        if row.get('marker_valid'):
+            return (f'Phase repeat run {row["run"]}: valid, f={row["f_fit_hz"]:.3f} Hz, '
+                    f'phase={row["phase_deg"]:.2f} deg, amp={row["amp_counts"]:.1f}, '
+                    f'marker1={m1_s} ms')
+        return (f'Phase repeat run {row["run"]}: invalid marker '
+                f'(marker1={m1_s} ms, n={row["n_records"]})')
+
+    def _phase_repeat_set_status(self, msg):
+        if dpg.does_item_exist('txt_phase_repeat_status'):
+            dpg.set_value('txt_phase_repeat_status', msg)
+
+    def _phase_repeat_set_progress(self, frac):
+        if dpg.does_item_exist('phase_repeat_progress'):
+            dpg.set_value('phase_repeat_progress', min(1.0, max(0.0, frac)))
+
+    def _phase_repeat_interruptible_sleep(self, seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not self._phase_stop_requested():
+            time.sleep(0.02)
+
+    # --- Phase sweep ---
+    _PHASE_SWEEP_COLUMNS = (
+        'freq_hz', 'f_fit_mean_hz', 'amp_counts_mean', 'valid_runs', 'total_runs',
+        'circ_mean_deg', 'circ_std_deg', 'sem_deg', 'phase_unwrapped_deg',
+        'circ_mean_deg_m2', 'circ_std_deg_m2', 'play_window_ms_mean',
+    )
+
+    def _phase_stop_requested(self):
+        return bool(getattr(self, 'phase_repeat_stop', False)
+                    or getattr(self, 'phase_sweep_stop', False))
+
+    def _parse_freq_list(self, text):
+        freqs = []
+        for part in (text or '').split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                freqs.append(float(part))
+            except ValueError:
+                continue
+        return freqs
+
+    def _phase_sweep_use_whole_ms(self, sender=None, app_data=None):
+        vals = ('5, 10, 20, 25, 40, 50, 55.556, 62.5, 71.429, 83.333, '
+                '100, 111.111, 125, 142.857, 166.667, 200')
+        if dpg.does_item_exist('phase_sweep_freq_list'):
+            dpg.set_value('phase_sweep_freq_list', vals)
+
+    def _phase_sweep_run(self, sender=None, app_data=None):
+        if not self.serial_connected:
+            self.log('Phase sweep requires a serial connection')
+            self._phase_sweep_set_status('Status: serial not connected')
+            return
+        if sweep_engine.is_running:
+            self.log('Cannot run phase sweep while a sweep is running')
+            self._phase_sweep_set_status('Status: sweep in progress')
+            return
+        if getattr(self, 'phase_repeat_running', False):
+            self.log('Cannot run phase sweep while the phase repeatability test is running')
+            self._phase_sweep_set_status('Status: phase test in progress')
+            return
+        if getattr(self, 'phase_sweep_running', False):
+            self.log('Phase sweep already running')
+            return
+        if getattr(self, 'stream_capturing', False):
+            self.log('Cannot run phase sweep: stream capture already active')
+            self._phase_sweep_set_status('Status: stream capture active')
+            return
+
+        start_hz = dpg.get_value('phase_sweep_start') if dpg.does_item_exist('phase_sweep_start') else 5.0
+        end_hz = dpg.get_value('phase_sweep_end') if dpg.does_item_exist('phase_sweep_end') else 200.0
+        step_hz = dpg.get_value('phase_sweep_step') if dpg.does_item_exist('phase_sweep_step') else 5.0
+        repeats = int(dpg.get_value('phase_sweep_repeats') if dpg.does_item_exist('phase_sweep_repeats') else 20)
+        capture_s = dpg.get_value('phase_sweep_capture') if dpg.does_item_exist('phase_sweep_capture') else 3.0
+        rest_s = dpg.get_value('phase_sweep_rest') if dpg.does_item_exist('phase_sweep_rest') else 1.0
+        torque_pct = dpg.get_value('sweep_torque_pct') if dpg.does_item_exist('sweep_torque_pct') else 10
+        effect = dpg.get_value('phase_sweep_effect') if dpg.does_item_exist('phase_sweep_effect') else 'Periodic sine'
+        freq_list_text = dpg.get_value('phase_sweep_freq_list') if dpg.does_item_exist('phase_sweep_freq_list') else ''
+
+        start_hz = max(1.0, float(start_hz))
+        end_hz = max(start_hz, float(end_hz))
+        step_hz = max(0.1, float(step_hz))
+        repeats = max(1, min(100, int(repeats)))
+        capture_s = max(1.0, float(capture_s))
+        rest_s = max(0.0, float(rest_s))
+        effect_mode = 'constant' if 'constant' in str(effect).lower() else 'sine'
+
+        freq_list = self._parse_freq_list(freq_list_text)
+        if freq_list:
+            freqs = freq_list
+        else:
+            n = max(1, int(round((end_hz - start_hz) / step_hz)) + 1)
+            freqs = [start_hz + i * step_hz for i in range(n)]
+
+        self.phase_sweep_running = True
+        self.phase_sweep_stop = False
+        self.phase_repeat_stop = False
+        if dpg.does_item_exist('btn_phase_sweep_run'):
+            dpg.configure_item('btn_phase_sweep_run', enabled=False)
+        if dpg.does_item_exist('btn_phase_sweep_stop'):
+            dpg.configure_item('btn_phase_sweep_stop', enabled=True)
+        if dpg.does_item_exist('btn_phase_repeat_run'):
+            dpg.configure_item('btn_phase_repeat_run', enabled=False)
+        if dpg.does_item_exist('phase_sweep_progress'):
+            dpg.set_value('phase_sweep_progress', 0.0)
+        self._phase_sweep_set_status('Status: starting...')
+
+        threading.Thread(target=self._phase_sweep_worker,
+                         args=(freqs, repeats, capture_s, rest_s, torque_pct, effect_mode),
+                         daemon=True).start()
+
+    def _phase_sweep_stop(self, sender=None, app_data=None):
+        self.phase_sweep_stop = True
+        self._phase_sweep_set_status('Status: stopping after current run...')
+
+    def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, torque_pct, effect_mode='sine'):
+        base = os.path.dirname(os.path.abspath(__file__))
+        folder = os.path.join(base, 'phase_runs')
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as e:
+            self.log(f'Phase sweep: could not create {folder}: {e}')
+
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        results_path = os.path.join(folder, f'results_sweep_{ts}.csv')
+
+        total_freqs = len(freqs)
+        start_time = time.time()
+        sweep_rows = []
+
+        try:
+            for fi, freq in enumerate(freqs):
+                if self._phase_stop_requested():
+                    break
+                elapsed = time.time() - start_time
+                self._phase_sweep_set_status(
+                    f'Freq {freq:g} Hz ({fi + 1}/{total_freqs}), elapsed {elapsed:.0f}s...')
+                self._phase_sweep_set_progress(fi / max(1, total_freqs))
+
+                cap = 4.0 if freq < 20.0 else capture_s
+
+                run_results = []
+                for run_idx in range(1, repeats + 1):
+                    if self._phase_stop_requested():
+                        break
+                    self._phase_sweep_set_status(
+                        f'Freq {freq:g} Hz, run {run_idx}/{repeats}, '
+                        f'elapsed {time.time() - start_time:.0f}s...')
+                    try:
+                        row = self._phase_repeat_run_once(freq, cap, run_idx, torque_pct, ts, folder, effect_mode)
+                        run_results.append(row)
+                    except Exception as e:
+                        import traceback
+                        self.log(f'Phase sweep run {freq:g} Hz #{run_idx} failed: {e}')
+                        self.log(traceback.format_exc())
+                        run_results.append({'run': run_idx, 'marker_valid': False,
+                                            'f_fit_hz': None, 'amp_counts': None,
+                                            'phase_deg': None, 'phase_deg_m2': None,
+                                            'play_window_ms': None})
+                    if run_idx < repeats and not self._phase_stop_requested():
+                        self._phase_repeat_interruptible_sleep(rest_s)
+
+                if run_results:
+                    sweep_row = self._phase_sweep_summarize(freq, run_results)
+                    sweep_rows.append(sweep_row)
+                    self.log(f'Phase sweep {freq:g} Hz: '
+                             f'{sweep_row["valid_runs"]}/{sweep_row["total_runs"]} valid')
+
+                self._phase_sweep_set_progress((fi + 1) / max(1, total_freqs))
+        except Exception as e:
+            self.log(f'Phase sweep worker error: {e}')
+        finally:
+            self.phase_sweep_running = False
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+            if getattr(self, 'stream_capturing', False):
+                serial_manager.send_stream_stop()
+                serial_manager.set_stream_callback(None)
+                self.stream_capturing = False
+            if dpg.does_item_exist('btn_phase_sweep_run'):
+                dpg.configure_item('btn_phase_sweep_run', enabled=True)
+            if dpg.does_item_exist('btn_phase_sweep_stop'):
+                dpg.configure_item('btn_phase_sweep_stop', enabled=False)
+            if dpg.does_item_exist('btn_phase_repeat_run'):
+                dpg.configure_item('btn_phase_repeat_run', enabled=True)
+
+        self._phase_sweep_assign_unwrapped(sweep_rows)
+        self._phase_sweep_write_results(results_path, sweep_rows)
+
+        elapsed_total = time.time() - start_time
+        self._phase_sweep_set_status(
+            f'Phase sweep done: {len(sweep_rows)} freqs, {elapsed_total:.0f}s')
+        self.log(f'[Phase sweep] complete, results in {results_path}')
+
+    def _phase_sweep_summarize(self, freq, run_results):
+        valid = [r for r in run_results if r.get('phase_deg') is not None]
+        n_valid = len(valid)
+        n_total = len(run_results)
+        row = {
+            'freq_hz': freq,
+            'f_fit_mean_hz': None,
+            'amp_counts_mean': None,
+            'valid_runs': n_valid,
+            'total_runs': n_total,
+            'circ_mean_deg': None,
+            'circ_std_deg': None,
+            'sem_deg': None,
+            'phase_unwrapped_deg': None,
+            'circ_mean_deg_m2': None,
+            'circ_std_deg_m2': None,
+            'play_window_ms_mean': None,
+        }
+        if n_valid:
+            row['f_fit_mean_hz'] = float(np.mean([r['f_fit_hz'] for r in valid]))
+            row['amp_counts_mean'] = float(np.mean([r['amp_counts'] for r in valid]))
+            circ_mean, circ_std = self._phase_sweep_circular_stats([r['phase_deg'] for r in valid])
+            row['circ_mean_deg'] = circ_mean
+            row['circ_std_deg'] = circ_std
+            row['sem_deg'] = circ_std / math.sqrt(n_valid)
+            m2 = [r for r in valid if r.get('phase_deg_m2') is not None]
+            if m2:
+                cm2, cs2 = self._phase_sweep_circular_stats([r['phase_deg_m2'] for r in m2])
+                row['circ_mean_deg_m2'] = cm2
+                row['circ_std_deg_m2'] = cs2
+            pw = [r['play_window_ms'] for r in valid if r.get('play_window_ms') is not None]
+            if pw:
+                row['play_window_ms_mean'] = float(np.mean(pw))
+        return row
+
+    def _phase_sweep_assign_unwrapped(self, sweep_rows):
+        idx = [(r['f_fit_mean_hz'], i) for i, r in enumerate(sweep_rows) if r.get('f_fit_mean_hz') is not None]
+        idx.sort(key=lambda x: x[0])
+        prev = None
+        for _, i in idx:
+            cm = sweep_rows[i].get('circ_mean_deg')
+            if cm is None:
+                continue
+            if prev is None:
+                sweep_rows[i]['phase_unwrapped_deg'] = cm
+            else:
+                sweep_rows[i]['phase_unwrapped_deg'] = self._unwrap_phase(cm, prev)
+            prev = sweep_rows[i]['phase_unwrapped_deg']
+
+    def _phase_sweep_circular_stats(self, phases_deg):
+        phases_rad = np.radians(np.asarray(phases_deg, dtype=float))
+        z = np.exp(1j * phases_rad)
+        mean_z = np.mean(z)
+        R = float(np.abs(mean_z))
+        circ_mean_deg = float(np.degrees(np.angle(mean_z)))
+        Rc = min(max(R, 1e-12), 1.0)
+        circ_std_deg = float(np.degrees(math.sqrt(-2.0 * math.log(Rc))))
+        return circ_mean_deg, circ_std_deg
+
+    def _unwrap_phase(self, phase_deg, prev_unwrapped_deg):
+        diff = (phase_deg - prev_unwrapped_deg + 180.0) % 360.0 - 180.0
+        return prev_unwrapped_deg + diff
+
+    def _phase_sweep_write_results(self, path, sweep_rows):
+        def _fmt(v):
+            if v is None:
+                return ''
+            if isinstance(v, bool):
+                return 'True' if v else 'False'
+            if isinstance(v, float):
+                return f'{v:.6f}'
+            return str(v)
+        try:
+            with open(path, 'w', newline='') as rf:
+                rf.write(','.join(self._PHASE_SWEEP_COLUMNS) + '\n')
+                for row in sweep_rows:
+                    rf.write(','.join(_fmt(row.get(k)) for k in self._PHASE_SWEEP_COLUMNS) + '\n')
+            self.log(f'Phase sweep: results written to {path} ({len(sweep_rows)} rows)')
+        except Exception as e:
+            self.log(f'Phase sweep: could not write results: {e}')
+
+    def _phase_sweep_set_status(self, msg):
+        if dpg.does_item_exist('txt_phase_sweep_status'):
+            dpg.set_value('txt_phase_sweep_status', msg)
+
+    def _phase_sweep_set_progress(self, frac):
+        if dpg.does_item_exist('phase_sweep_progress'):
+            dpg.set_value('phase_sweep_progress', min(1.0, max(0.0, frac)))
+
     def _sweep_engine_send_effect(self, effect_type: str, freq_hz: float, magnitude: int,
                                   settle_periods: int = 2, ramp_periods: int = 1,
                                   max_torque_nm: float = 25.0) -> bool:
-        """Called by sweep engine to send an effect over serial."""
+        """Called by sweep engine to send an effect over serial.
+
+        The STM32 is measure-only: it samples the ADC (encoder) and demodulates,
+        but never drives the motor.  The PC must excite the base through the
+        DirectInput FFB engine so there is a real signal for the MCU to measure.
+        """
+        if effect_type != "selftest":
+            try:
+                di_mag = self._s16_to_di(magnitude)
+                duration_us = int(1_000_000 * (settle_periods + ramp_periods + 100)
+                                  / max(1.0, float(freq_hz)) * 2.5) + 2_000_000
+                desc = {
+                    "type": "sine" if effect_type == "sine" else "constant",
+                    "magnitude": di_mag,
+                    "frequency_hz": float(freq_hz),
+                    "length_us": duration_us,
+                    "magnitude_unit": "di",
+                }
+                engine.play_descriptor(desc)
+            except Exception as e:
+                self.log(f"Sweep excitation failed: {e}")
+
         if self.serial_connected:
             return serial_manager.send_effect(effect_type, freq_hz, magnitude,
                                               settle_periods, ramp_periods, max_torque_nm)
         return False
+
 
     def _sweep_engine_send_stop(self):
         """Called by sweep engine to send stop."""
@@ -1825,8 +2723,15 @@ class MotorBusterNativeApp:
             
             if has_content and self.sequencer.current_time >= max_dur - 0.1:
                 self.sequencer.current_time = 0.0
+
+            # Phase experiment: capture ADC during playback when the checkbox is on.
+            if dpg.does_item_exist('chk_capture_adc') and dpg.get_value('chk_capture_adc'):
+                self._start_phase_capture()
         else:
             dpg.configure_item("btn_play", label="Play")
+            # Phase experiment: stop ADC capture if it was running.
+            if getattr(self, 'stream_capturing', False):
+                self._stop_phase_capture()
             engine.stop_effect() # Stop all
             self.log_api("stop_effect", {"scope": "all"})
             self._last_logged_freq_output = None
@@ -4311,6 +5216,7 @@ class MotorBusterNativeApp:
 
                 dpg.add_spacer(width=50)
                 dpg.add_button(tag="btn_play", label="Play", width=80, callback=self.toggle_play)
+                dpg.add_checkbox(label="Capture ADC during playback", tag="chk_capture_adc", default_value=False)
                 dpg.add_button(label="|<", tag="btn_restart", width=30, callback=self.action_restart)
                 dpg.add_checkbox(label="Loop", tag="chk_loop")
                 

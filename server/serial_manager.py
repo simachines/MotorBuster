@@ -4,9 +4,20 @@ import threading
 import time
 import struct
 import logging
+import math
+import os
 from typing import Optional, Callable
 
 logger = logging.getLogger('Serial_Manager')
+
+# Persist serial traffic to the same log file used by the FFB engine so the
+# exact command/response bytes can be inspected after a sweep.
+_serial_log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'motorbuster_engine.log'))
+if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '') == _serial_log_path for h in logger.handlers):
+    _serial_fh = logging.FileHandler(_serial_log_path, mode='a', encoding='utf-8')
+    _serial_fh.setLevel(logging.INFO)
+    _serial_fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s'))
+    logger.addHandler(_serial_fh)
 
 
 def _hex(data: bytes) -> str:
@@ -26,6 +37,15 @@ CMD_SCALE = 0x09      # Bode_ScaleCal(); no response
 CMD_SELFTEST = 0xFE   # Synthetic cosine sweep; expects 0xBB response
 CMD_STOP = 0xFF       # Bode_Stop(); no response
 
+# Debug stream commands (raw ADC + reference phase capture)
+CMD_STREAM_START = 0x0A   # start streaming; freqHz in bytes [2..5] (LE)
+CMD_STREAM_STOP  = 0x0B   # stop streaming
+CMD_MARK = 0x0C           # latch current timestamp into t_marker; no response
+
+# Debug stream record framing
+STREAM_SYNC = 0xCC        # stream record sync marker
+STREAM_RECORD_LEN = 15    # [0xCC][adc:2B][theta:4B][t_us:4B][t_marker:4B] little-endian
+
 # Map effect type names to command bytes
 EFFECT_CMD_MAP = {
     'sine': CMD_SINE,
@@ -34,6 +54,8 @@ EFFECT_CMD_MAP = {
     'scale': CMD_SCALE,
     'selftest': CMD_SELFTEST,
     'stop': CMD_STOP,
+    'stream_start': CMD_STREAM_START,
+    'stream_stop': CMD_STREAM_STOP,
 }
 
 # Reverse map: command byte -> human-readable name (for response logging)
@@ -44,6 +66,8 @@ CMD_NAME_MAP = {
     CMD_SCALE: 'scale',
     CMD_SELFTEST: 'selftest',
     CMD_STOP: 'stop',
+    CMD_STREAM_START: 'stream_start',
+    CMD_STREAM_STOP: 'stream_stop',
 }
 
 
@@ -72,9 +96,9 @@ def _pack_command(effect_type: str, freq_hz: float = 0.0, magnitude: int = 0,
         logger.error(f'Unknown effect type for serial: {effect_type}')
         return None
 
-    freq_hz_int = int(max(1, min(10000, freq_hz)))
+    freq_hz_int = int(round(max(1.0, min(10000.0, float(freq_hz)))))
     mag_clamped = max(-32767, min(32767, int(magnitude)))  # int16 signed
-    settle_c = max(0, min(4, int(settle_periods)))          # 0..4 (rtP.s_period)
+    settle_c = max(0, min(50, int(settle_periods)))         # 0..50 (rtP.s_period)
     ramp_c = max(0, min(1, int(ramp_periods)))              # 0..1 (rtP.r_period)
     torque_cH = int(max(0, min(65535, round(max_torque_nm * 100))))  # cN.m
 
@@ -118,6 +142,13 @@ def _parse_response(data: bytes) -> Optional[dict]:
         logger.error(f'Response parse failed: {e} (raw: {_hex(data)})')
         return None
 
+    # Reject non-finite measurements (e.g. NaN from atan2(0, 0) on a dead signal)
+    # so a single bogus point cannot scatter the Bode plot.
+    if not (math.isfinite(mag_db) and math.isfinite(phase_deg)):
+        logger.warning(f'Response rejected (non-finite): mag={mag_db} phase={phase_deg} '
+                       f'(raw: {_hex(data[:10])})')
+        return None
+
     logger.debug(f'Response parsed: start=0x{start_byte:02X} cmd=0x{cmd_echo:02X} '
                  f'mag={mag_db:.4f}dB phase={phase_deg:.4f}deg (raw: {_hex(data[:10])})')
 
@@ -128,6 +159,26 @@ def _parse_response(data: bytes) -> Optional[dict]:
     }
 
 
+def _parse_stream_record(data: bytes):
+    '''Parse an MCU debug stream record.
+
+    Format: [0xCC][adc:2B LE][theta:4B float rad][t_us:4B uint32 LE][t_marker:4B uint32 LE]
+    '''
+    if len(data) < STREAM_RECORD_LEN:
+        return None
+    if data[0] != STREAM_SYNC:
+        return None
+    try:
+        adc = struct.unpack('<H', data[1:3])[0]
+        theta = struct.unpack('<f', data[3:7])[0]
+        t_us = struct.unpack('<I', data[7:11])[0]
+        t_marker = struct.unpack('<I', data[11:15])[0]
+    except struct.error as e:
+        logger.error(f'Stream record parse failed: {e} (raw: {_hex(data)})')
+        return None
+    return {'adc': adc, 'theta': theta, 't_us': t_us, 't_marker': t_marker}
+
+
 class SerialManager:
     def __init__(self):
         self._port: Optional[serial.Serial] = None
@@ -135,6 +186,7 @@ class SerialManager:
         self._running = False
         self._lock = threading.Lock()
         self._on_response: Optional[Callable[[dict], None]] = None
+        self._on_stream_record: Optional[Callable[[dict], None]] = None
         self._buffer = bytearray()
 
     @property
@@ -148,6 +200,10 @@ class SerialManager:
     def set_response_callback(self, callback: Callable[[dict], None]):
         '''Set callback for incoming MCU response data.'''
         self._on_response = callback
+
+    def set_stream_callback(self, callback: Optional[Callable[[dict], None]]):
+        '''Set callback for incoming debug stream records (0xCC).'''
+        self._on_stream_record = callback
 
     def connect(self, port: str, baud: int = 115200) -> bool:
         '''Open serial connection to the specified port.'''
@@ -261,11 +317,17 @@ class SerialManager:
             return False
         return self._send_named('center', _pack_command('center'))
 
-    def send_scale(self) -> bool:
-        '''Send scale calibration command (Bode_ScaleCal). No response expected.'''
+    def send_scale(self, torque_nm: float = 0.0) -> bool:
+        '''Send scale calibration command (Bode_ScaleCal) with a known applied torque.
+
+        The firmware computes known_torque = (mag/32767) * maxTorque_cN, so send
+        mag=32767 (100%) and put the full torque in the maxTorque field (cN.m).
+        '''
         if not self.is_connected:
             return False
-        return self._send_named('scale', _pack_command('scale'))
+        magnitude = 32767
+        return self._send_named('scale', _pack_command('scale', 0.0, magnitude, 0, 0, torque_nm),
+                                0.0, magnitude, 0, 0, torque_nm)
 
     def send_selftest(self, freq_hz: float = 0.0, magnitude: int = 0,
                       settle_periods: int = 0, ramp_periods: int = 0,
@@ -278,6 +340,35 @@ class SerialManager:
                                                           max_torque_nm),
                                 freq_hz, magnitude, settle_periods, ramp_periods,
                                 max_torque_nm)
+
+    def send_stream_start(self, freq_hz: float):
+        '''Start the raw ADC debug stream at freq_hz (capture only, no sweep).'''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot start stream')
+            return False
+        return self._send_named('stream_start', _pack_command('stream_start', freq_hz),
+                                freq_hz)
+
+    def send_stream_stop(self):
+        '''Stop the raw ADC debug stream.'''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot stop stream')
+            return False
+        return self._send_named('stream_stop', _pack_command('stream_stop'))
+
+    def send_mark(self) -> bool:
+        # Send MARK (0x0C): latch current timestamp into t_marker. No
+        # response is expected; writes immediately with no sleeps.
+        # Fixed packet: AA 0C 00 00 00 00 00 00 00 00 00 00 A6.
+        if not self.is_connected:
+            return False
+        packet = bytes([START_BYTE, CMD_MARK] + [0x00] * 10 + [0xA6])
+        ok = self._write_packet(packet)
+        if ok:
+            logger.info(f'Serial sent: type=mark (raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=mark (raw: {_hex(packet)})')
+        return ok
 
     def _read_loop(self):
         '''Background thread: read bytes from serial port.'''
@@ -295,43 +386,65 @@ class SerialManager:
                     time.sleep(0.1)
 
     def _process_buffer(self):
-        '''Extract and process complete 10-byte response packets.'''
-        while len(self._buffer) >= 10:
-            start_idx = -1
-            for i in range(len(self._buffer)):
-                if self._buffer[i] == RESPONSE_BYTE:
-                    start_idx = i
-                    break
+        '''Extract and process complete packets: 10-byte 0xBB responses and
+        15-byte 0xCC debug stream records (whichever sync byte comes first).'''
+        while True:
+            idx_bb = self._buffer.find(bytes([RESPONSE_BYTE]))
+            idx_cc = self._buffer.find(bytes([STREAM_SYNC]))
 
-            if start_idx == -1:
+            if idx_bb == -1 and idx_cc == -1:
                 self._buffer.clear()
                 break
 
+            if idx_cc == -1 or (idx_bb != -1 and idx_bb <= idx_cc):
+                start_idx, sync, pkt_len = idx_bb, RESPONSE_BYTE, 10
+            else:
+                start_idx, sync, pkt_len = idx_cc, STREAM_SYNC, STREAM_RECORD_LEN
+
             if start_idx > 0:
                 self._buffer = self._buffer[start_idx:]
-                start_idx = 0
 
-            if len(self._buffer) < 10:
+            if len(self._buffer) < pkt_len:
                 break
 
-            packet = bytes(self._buffer[:10])
-            parsed = _parse_response(packet)
-            if parsed:
-                cmd = parsed.get('cmd', 0)
-                cmd_name = CMD_NAME_MAP.get(cmd, f'0x{cmd:02X}')
-                logger.info(f'Serial received: type={cmd_name} '
-                            f'mag={parsed.get("mag_db", 0.0):.4f}dB '
-                            f'phase={parsed.get("phase_deg", 0.0):.4f}deg '
-                            f'(raw: {_hex(packet)})')
+            packet = bytes(self._buffer[:pkt_len])
+            if sync == RESPONSE_BYTE:
+                self._dispatch_response(packet)
             else:
-                logger.info(f'Serial received: unparsed (raw: {_hex(packet)})')
-            if parsed and self._on_response:
-                try:
-                    self._on_response(parsed)
-                except Exception as e:
-                    logger.error(f'Response callback error: {e} (raw: {_hex(packet)})')
+                self._dispatch_stream_record(packet)
 
-            self._buffer = self._buffer[10:]
+            self._buffer = self._buffer[pkt_len:]
+
+    def _dispatch_response(self, packet: bytes):
+        parsed = _parse_response(packet)
+        if parsed:
+            cmd = parsed.get('cmd', 0)
+            cmd_name = CMD_NAME_MAP.get(cmd, f'0x{cmd:02X}')
+            logger.info(f'Serial received: type={cmd_name} '
+                        f'mag={parsed.get("mag_db", 0.0):.4f}dB '
+                        f'phase={parsed.get("phase_deg", 0.0):.4f}deg '
+                        f'(raw: {_hex(packet)})')
+        else:
+            logger.info(f'Serial received: unparsed (raw: {_hex(packet)})')
+        if parsed and self._on_response:
+            try:
+                self._on_response(parsed)
+            except Exception as e:
+                logger.error(f'Response callback error: {e} (raw: {_hex(packet)})')
+
+    def _dispatch_stream_record(self, packet: bytes):
+        rec = _parse_stream_record(packet)
+        if rec is None:
+            logger.warning(f'Serial received: bad stream record (raw: {_hex(packet)})')
+            return
+        if self._on_stream_record:
+            try:
+                self._on_stream_record(rec)
+            except Exception as e:
+                logger.error(f'Stream callback error: {e} (raw: {_hex(packet)})')
+        else:
+            logger.debug(f'Stream record: adc={rec["adc"]} theta={rec["theta"]:.4f} '
+                         f't_us={rec["t_us"]}')
 
 
 # Global singleton instance
