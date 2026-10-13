@@ -1623,7 +1623,7 @@ class HapticController:
             period_us = int(desc.get("period_us", 0))
             if period_us <= 0:
                 freq = float(desc.get("frequency_hz", 10.0))
-                period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
+                period_us = int(round(1_000_000.0 / freq)) if freq > 0 else 100000
             offset = int(desc.get("offset", 0))
 
             logger.info(
@@ -1809,7 +1809,7 @@ class HapticController:
                 logger.error(self.last_effect_error)
                 return -1
 
-            period_us = int(1_000_000.0 / freq) if freq > 0 else 100000
+            period_us = int(round(1_000_000.0 / freq)) if freq > 0 else 100000
             if duration_us is None:
                 duration_us = int(duration_ms) * 1000
             self._di_set_deadline(duration_us)

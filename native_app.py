@@ -2252,8 +2252,15 @@ class MotorBusterNativeApp:
         f_mean = float(np.mean(freqs))
         f_std = float(np.std(freqs))
 
+        m2 = [r for r in valid if r.get('phase_deg_m2') is not None]
+        if m2:
+            circ_mean_deg_m2 = self._phase_sweep_circular_stats([r['phase_deg_m2'] for r in m2])[0]
+            m2_s = f'{circ_mean_deg_m2:.2f}'
+        else:
+            m2_s = '?'
         text = (f'Phase repeatability: {n_valid}/{n_total} valid. '
-                f'phase circ_mean={circ_mean_deg:.2f} deg, circ_std={circ_std_deg:.2f} deg; '
+                f'phase (from MARK2): {m2_s} deg, '
+                f'phase (from MARK1, includes play call): {circ_mean_deg:.2f} deg; '
                 f'f mean={f_mean:.4f} Hz, std={f_std:.4f} Hz')
         line = (f'SUMMARY,valid_runs={n_valid},total_runs={n_total},'
                 f'circ_mean_deg={circ_mean_deg:.4f},circ_std_deg={circ_std_deg:.4f},'
@@ -2304,6 +2311,7 @@ class MotorBusterNativeApp:
         'freq_hz', 'f_fit_mean_hz', 'amp_counts_mean', 'valid_runs', 'total_runs',
         'circ_mean_deg', 'circ_std_deg', 'sem_deg', 'phase_unwrapped_deg',
         'circ_mean_deg_m2', 'circ_std_deg_m2', 'play_window_ms_mean',
+        'phase_unwrapped_deg_m2',
     )
 
     def _phase_stop_requested(self):
@@ -2323,8 +2331,11 @@ class MotorBusterNativeApp:
         return freqs
 
     def _phase_sweep_use_whole_ms(self, sender=None, app_data=None):
-        vals = ('5, 10, 20, 25, 40, 50, 55.556, 62.5, 71.429, 83.333, '
-                '100, 111.111, 125, 142.857, 166.667, 200')
+        # Whole-ms period preset: frequency = 1000 / n Hz (n = period in ms),
+        # covering 5 to 100 Hz. Full float precision so the period rounding
+        # round-trips to exactly n * 1000 us.
+        ns = [200, 100, 66, 50, 40, 33, 28, 25, 22, 20, 18, 16, 15, 14, 13, 12, 11, 10]
+        vals = ', '.join(repr(1000.0 / n) for n in ns)
         if dpg.does_item_exist('phase_sweep_freq_list'):
             dpg.set_value('phase_sweep_freq_list', vals)
 
@@ -2447,6 +2458,13 @@ class MotorBusterNativeApp:
                     sweep_rows.append(sweep_row)
                     self.log(f'Phase sweep {freq:g} Hz: '
                              f'{sweep_row["valid_runs"]}/{sweep_row["total_runs"]} valid')
+                    m2 = sweep_row.get('circ_mean_deg_m2')
+                    m1 = sweep_row.get('circ_mean_deg')
+                    m2_s = f'{m2:.2f}' if m2 is not None else '?'
+                    m1_s = f'{m1:.2f}' if m1 is not None else '?'
+                    self._phase_sweep_set_status(
+                        f'Freq {freq:g} Hz: phase (from MARK2): {m2_s} deg, '
+                        f'phase (from MARK1, includes play call): {m1_s} deg')
 
                 self._phase_sweep_set_progress((fi + 1) / max(1, total_freqs))
         except Exception as e:
@@ -2493,6 +2511,7 @@ class MotorBusterNativeApp:
             'circ_mean_deg_m2': None,
             'circ_std_deg_m2': None,
             'play_window_ms_mean': None,
+            'phase_unwrapped_deg_m2': None,
         }
         if n_valid:
             row['f_fit_mean_hz'] = float(np.mean([r['f_fit_hz'] for r in valid]))
@@ -2524,6 +2543,17 @@ class MotorBusterNativeApp:
             else:
                 sweep_rows[i]['phase_unwrapped_deg'] = self._unwrap_phase(cm, prev)
             prev = sweep_rows[i]['phase_unwrapped_deg']
+
+        prev2 = None
+        for _, i in idx:
+            cm2 = sweep_rows[i].get('circ_mean_deg_m2')
+            if cm2 is None:
+                continue
+            if prev2 is None:
+                sweep_rows[i]['phase_unwrapped_deg_m2'] = cm2
+            else:
+                sweep_rows[i]['phase_unwrapped_deg_m2'] = self._unwrap_phase(cm2, prev2)
+            prev2 = sweep_rows[i]['phase_unwrapped_deg_m2']
 
     def _phase_sweep_circular_stats(self, phases_deg):
         phases_rad = np.radians(np.asarray(phases_deg, dtype=float))
@@ -3894,7 +3924,7 @@ class MotorBusterNativeApp:
                     desc["magnitude_src_s16"] = eff_mag
                     if tkey in ("periodic_sine", "square", "triangle", "sawtoothup", "sawtoothdown"):
                         safe_freq = max(0.1, float(current_clip.frequency))
-                        desc["period_us"] = int(1_000_000.0 / safe_freq)
+                        desc["period_us"] = int(round(1_000_000.0 / safe_freq))
                     if tkey in ("spring", "damper", "inertia", "friction"):
                         coeff = abs(int(eff_mag))
                         coeff_di = self._s16_to_di(coeff)
