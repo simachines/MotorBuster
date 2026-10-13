@@ -1459,44 +1459,6 @@ class MotorBusterNativeApp:
             dpg.add_spacer(height=8)
             dpg.add_separator()
 
-            # --- Sweep section ---
-            dpg.add_text("Sweep", color=(200, 200, 255))
-            dpg.add_separator()
-            with dpg.group(horizontal=True):
-                dpg.add_text("Min (Hz):")
-                dpg.add_input_float(tag="sweep_freq_min", default_value=30.0, width=100, step=0, min_value=30.0)
-                dpg.add_spacer(width=15)
-                dpg.add_text("Max (Hz):")
-                dpg.add_input_float(tag="sweep_freq_max", default_value=500.0, width=100, step=0)
-                dpg.add_spacer(width=15)
-                dpg.add_text("Points:")
-                dpg.add_input_int(tag="sweep_num_freq", default_value=20, width=80, min_value=2, max_value=200)
-            with dpg.group(horizontal=True):
-                dpg.add_text("Max Torque (Nm):")
-                dpg.add_input_float(tag="sweep_max_torque", default_value=25.0, width=100, min_value=0.1, max_value=100.0, step=0)
-                dpg.add_spacer(width=15)
-                dpg.add_text("Torque:")
-                dpg.add_slider_int(tag="sweep_torque_pct", default_value=10, min_value=0, max_value=100, width=200,
-                                   callback=self._on_sweep_torque_slider)
-                dpg.add_text("10% (2.5 Nm)", tag="txt_sweep_torque_readout", color=(180, 220, 180))
-            with dpg.group(horizontal=True):
-                dpg.add_text("Settle periods:")
-                dpg.add_input_int(tag="sweep_settling", default_value=2, width=70, min_value=0, max_value=4)
-                dpg.add_spacer(width=15)
-                dpg.add_text("Ramp periods:")
-                dpg.add_input_int(tag="sweep_ramp", default_value=1, width=70, min_value=0, max_value=1)
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Preview", width=80, callback=self._sweep_preview_freqs)
-                dpg.add_button(label="Run", tag="btn_sweep_run", width=90, callback=self._sweep_run)
-                dpg.add_button(label="Stop", tag="btn_sweep_cancel", width=80, enabled=False, callback=self._sweep_cancel)
-                dpg.add_button(label="Export", tag="btn_sweep_export", width=80, enabled=False, callback=self._sweep_export)
-            dpg.add_text("", tag="txt_sweep_freqs", wrap=600, color=(180, 220, 180))
-            dpg.add_progress_bar(tag="sweep_progress", width=-1, default_value=0.0)
-            dpg.add_text("Status: Ready", tag="txt_sweep_status", color=(200, 200, 200))
-
-            dpg.add_spacer(height=8)
-            dpg.add_separator()
-
             # --- Phase repeatability test ---
             dpg.add_text("Phase repeatability test", color=(200, 200, 255))
             dpg.add_separator()
@@ -1566,36 +1528,76 @@ class MotorBusterNativeApp:
             dpg.add_spacer(height=8)
             dpg.add_separator()
 
-            # --- Bode plots ---
-            dpg.add_text("Bode Plot", color=(200, 200, 255))
-            dpg.add_separator()
-            dpg.add_text("Magnitude (dB)", color=(180, 220, 180))
-            with dpg.plot(label="Magnitude", height=200, width=-1,
-                          anti_aliased=True, no_title=True):
-                dpg.add_plot_axis(dpg.mvXAxis, label="Frequency (Hz)",
-                                  tag="bode_mag_x", scale=dpg.mvPlotScale_Linear)
-                dpg.add_plot_axis(dpg.mvYAxis, label="Magnitude (dB)",
-                                  tag="bode_mag_y")
-                dpg.add_line_series([], [], label="Mag", tag="bode_mag_line",
-                                    parent="bode_mag_y")
-                dpg.add_scatter_series([], [], label="Mag points", tag="bode_mag_series",
-                                       parent="bode_mag_y")
+            # --- Legacy lock-in sweep (firmware) ---
+            with dpg.collapsing_header(label="Legacy lock-in sweep (firmware): magnitude only, phase NOT valid", default_open=False):
+                # --- Sweep section ---
+                dpg.add_text("Sweep", color=(200, 200, 255))
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Min (Hz):")
+                    dpg.add_input_float(tag="sweep_freq_min", default_value=30.0, width=100, step=0, min_value=30.0)
+                    dpg.add_spacer(width=15)
+                    dpg.add_text("Max (Hz):")
+                    dpg.add_input_float(tag="sweep_freq_max", default_value=500.0, width=100, step=0)
+                    dpg.add_spacer(width=15)
+                    dpg.add_text("Points:")
+                    dpg.add_input_int(tag="sweep_num_freq", default_value=20, width=80, min_value=2, max_value=200)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Max Torque (Nm):")
+                    dpg.add_input_float(tag="sweep_max_torque", default_value=25.0, width=100, min_value=0.1, max_value=100.0, step=0)
+                    dpg.add_spacer(width=15)
+                    dpg.add_text("Torque:")
+                    dpg.add_slider_int(tag="sweep_torque_pct", default_value=10, min_value=0, max_value=100, width=200,
+                                       callback=self._on_sweep_torque_slider)
+                    dpg.add_text("10% (2.5 Nm)", tag="txt_sweep_torque_readout", color=(180, 220, 180))
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Settle periods:")
+                    dpg.add_input_int(tag="sweep_settling", default_value=2, width=70, min_value=0, max_value=4)
+                    dpg.add_spacer(width=15)
+                    dpg.add_text("Ramp periods:")
+                    dpg.add_input_int(tag="sweep_ramp", default_value=1, width=70, min_value=0, max_value=1)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Preview", width=80, callback=self._sweep_preview_freqs)
+                    dpg.add_button(label="Run", tag="btn_sweep_run", width=90, callback=self._sweep_run)
+                    dpg.add_button(label="Stop", tag="btn_sweep_cancel", width=80, enabled=False, callback=self._sweep_cancel)
+                    dpg.add_button(label="Export", tag="btn_sweep_export", width=80, enabled=False, callback=self._sweep_export)
+                dpg.add_text("", tag="txt_sweep_freqs", wrap=600, color=(180, 220, 180))
+                dpg.add_progress_bar(tag="sweep_progress", width=-1, default_value=0.0)
+                dpg.add_text("Status: Ready", tag="txt_sweep_status", color=(200, 200, 200))
 
-            dpg.add_spacer(height=6)
-            dpg.add_text("Phase (deg)", color=(180, 220, 180))
-            with dpg.plot(label="Phase", height=200, width=-1,
-                          anti_aliased=True, no_title=True):
-                dpg.add_plot_axis(dpg.mvXAxis, label="Frequency (Hz)",
-                                  tag="bode_phase_x", scale=dpg.mvPlotScale_Linear)
-                dpg.add_plot_axis(dpg.mvYAxis, label="Phase (deg)",
-                                  tag="bode_phase_y")
-                dpg.add_line_series([], [], label="Phase", tag="bode_phase_line",
-                                    parent="bode_phase_y")
-                dpg.add_scatter_series([], [], label="Phase points", tag="bode_phase_series",
-                                       parent="bode_phase_y")
+                dpg.add_spacer(height=8)
+                dpg.add_separator()
 
-            dpg.add_spacer(height=4)
-            dpg.add_text("Points: 0", tag="txt_bode_points", color=(200, 200, 200))
+                # --- Bode plots ---
+                dpg.add_text("Bode Plot", color=(200, 200, 255))
+                dpg.add_separator()
+                dpg.add_text("Magnitude (dB)", color=(180, 220, 180))
+                with dpg.plot(label="Magnitude", height=200, width=-1,
+                              anti_aliased=True, no_title=True):
+                    dpg.add_plot_axis(dpg.mvXAxis, label="Frequency (Hz)",
+                                      tag="bode_mag_x", scale=dpg.mvPlotScale_Linear)
+                    dpg.add_plot_axis(dpg.mvYAxis, label="Magnitude (dB)",
+                                      tag="bode_mag_y")
+                    dpg.add_line_series([], [], label="Mag", tag="bode_mag_line",
+                                        parent="bode_mag_y")
+                    dpg.add_scatter_series([], [], label="Mag points", tag="bode_mag_series",
+                                           parent="bode_mag_y")
+
+                dpg.add_spacer(height=6)
+                dpg.add_text("Phase: INVALID (no time reference)", color=(180, 220, 180))
+                with dpg.plot(label="Phase", height=200, width=-1,
+                              anti_aliased=True, no_title=True):
+                    dpg.add_plot_axis(dpg.mvXAxis, label="Frequency (Hz)",
+                                      tag="bode_phase_x", scale=dpg.mvPlotScale_Linear)
+                    dpg.add_plot_axis(dpg.mvYAxis, label="Phase (deg)",
+                                      tag="bode_phase_y")
+                    dpg.add_line_series([], [], label="Phase", tag="bode_phase_line",
+                                        parent="bode_phase_y")
+                    dpg.add_scatter_series([], [], label="Phase points", tag="bode_phase_series",
+                                           parent="bode_phase_y")
+
+                dpg.add_spacer(height=4)
+                dpg.add_text("Points: 0", tag="txt_bode_points", color=(200, 200, 200))
 
         # Autosize fit the window to its contents, then disable autosize so the
         # user can still drag to make it larger (autosize locks the size).
