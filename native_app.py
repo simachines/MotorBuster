@@ -1484,6 +1484,15 @@ class MotorBusterNativeApp:
                               items=["Periodic sine", "Streamed constant force"],
                               default_value="Periodic sine")
             with dpg.group(horizontal=True):
+                dpg.add_text("Acquisition:")
+                dpg.add_combo(tag="phase_repeat_acquisition", width=170,
+                              items=["Legacy (0xCC)", "STREAM2 (DMA)"],
+                              default_value="Legacy (0xCC)")
+                dpg.add_spacer(width=10)
+                dpg.add_text("STREAM2 rate (kHz):")
+                dpg.add_combo(tag="phase_repeat_stream2_rate", width=60,
+                              items=["5", "10", "20"], default_value="10")
+            with dpg.group(horizontal=True):
                 dpg.add_button(label="Run phase test", tag="btn_phase_repeat_run", width=130, callback=self._phase_repeat_run)
                 dpg.add_button(label="Stop phase test", tag="btn_phase_repeat_stop", width=130, enabled=False, callback=self._phase_repeat_stop)
             dpg.add_progress_bar(tag="phase_repeat_progress", width=-1, default_value=0.0)
@@ -1523,6 +1532,15 @@ class MotorBusterNativeApp:
                 dpg.add_combo(tag="phase_sweep_effect", width=220,
                               items=["Periodic sine", "Streamed constant force"],
                               default_value="Periodic sine")
+            with dpg.group(horizontal=True):
+                dpg.add_text("Acquisition:")
+                dpg.add_combo(tag="phase_sweep_acquisition", width=170,
+                              items=["Legacy (0xCC)", "STREAM2 (DMA)"],
+                              default_value="Legacy (0xCC)")
+                dpg.add_spacer(width=10)
+                dpg.add_text("STREAM2 rate (kHz):")
+                dpg.add_combo(tag="phase_sweep_stream2_rate", width=60,
+                              items=["5", "10", "20"], default_value="10")
             with dpg.group(horizontal=True):
                 dpg.add_text("Magnitude (%):")
                 dpg.add_slider_int(tag="phase_sweep_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
