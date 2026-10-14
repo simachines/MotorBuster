@@ -18,3 +18,4 @@ phase_runs/
 phase_repeatability_runs/
 phase_sweep_runs/
 step_response_runs/
+tap_test_runs/

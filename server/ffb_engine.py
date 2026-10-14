@@ -1511,6 +1511,7 @@ class HapticController:
         effect.periodic.period = self._period_from_frequency(desc.get("frequency_hz", 50.0), desc.get("period_ms"))
         effect.periodic.magnitude = self._clamp_short(desc.get("magnitude", 20000))
         effect.periodic.length = int(desc.get("length_ms", sdl_haptic.SDL_HAPTIC_INFINITY))
+        effect.periodic.offset = self._clamp_short(int(desc.get("offset", 0)))
         # Offset phase by +60 degrees to compensate for SDL's phase reference
         raw_phase = int(desc.get("phase", 0))
         adjusted_phase = (raw_phase - 9000) % 36000

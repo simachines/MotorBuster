@@ -38,6 +38,28 @@ import logging
 logger = logging.getLogger('Phase_Test')
 
 
+def _git_info():
+    import subprocess
+    base = os.path.dirname(os.path.abspath(__file__))
+    commit = None
+    dirty = None
+    try:
+        commit = subprocess.check_output(
+            ['git', '-C', base, 'rev-parse', 'HEAD'],
+            stderr=subprocess.DEVNULL, text=True).strip()
+    except Exception:
+        commit = None
+    if commit:
+        try:
+            out = subprocess.check_output(
+                ['git', '-C', base, 'status', '--porcelain'],
+                stderr=subprocess.DEVNULL, text=True).strip()
+            dirty = bool(out)
+        except Exception:
+            dirty = None
+    return commit, dirty
+
+
 class SystemLogHandler(logging.Handler):
     """Forward logging records (errors/warnings) to the app's system log panel."""
     def __init__(self, app):
@@ -531,6 +553,8 @@ class MotorBusterNativeApp:
         self.phase_sweep_stop = False
         self.step_running = False
         self.step_stop = False
+        self.tap_running = False
+        self.tap_stop = False
         
         # Diagnostic state (still referenced by UI)
         self.freeze_test_active = False
@@ -1445,6 +1469,10 @@ class MotorBusterNativeApp:
                               callback=self._on_serial_baud_changed)
                 dpg.add_button(label="Connect", tag="btn_serial_connect", callback=self._connect_serial)
             dpg.add_text("COM: Offline", tag="txt_serial_status", color=(100, 100, 100))
+            with dpg.group(horizontal=True):
+                dpg.add_text("Base / notes:")
+                dpg.add_input_text(tag="base_notes", width=400, default_value="",
+                                   hint="e.g. CONSPIT Ares, settings")
 
             dpg.add_spacer(height=8)
             dpg.add_separator()
@@ -1483,6 +1511,9 @@ class MotorBusterNativeApp:
                 dpg.add_text("Magnitude (%):")
                 dpg.add_slider_int(tag="phase_repeat_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
                 dpg.add_input_int(tag="phase_repeat_magnitude_num", default_value=25, width=self._num_input_width(5), min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Offset (%):")
+                dpg.add_input_int(tag="phase_repeat_offset", default_value=0, width=self._num_input_width(5), min_value=-100, max_value=100)
             with dpg.group(horizontal=True):
                 dpg.add_text("Effect:")
                 dpg.add_combo(tag="phase_repeat_effect", width=220,
@@ -1551,6 +1582,9 @@ class MotorBusterNativeApp:
                 dpg.add_slider_int(tag="phase_sweep_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
                 dpg.add_input_int(tag="phase_sweep_magnitude_num", default_value=25, width=self._num_input_width(5), min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
             with dpg.group(horizontal=True):
+                dpg.add_text("Offset (%):")
+                dpg.add_input_int(tag="phase_sweep_offset", default_value=0, width=self._num_input_width(5), min_value=-100, max_value=100)
+            with dpg.group(horizontal=True):
                 dpg.add_button(label="Run phase sweep", tag="btn_phase_sweep_run", width=140, callback=self._phase_sweep_run)
                 dpg.add_button(label="Stop phase sweep", tag="btn_phase_sweep_stop", width=140, enabled=False, callback=self._phase_sweep_stop)
             dpg.add_progress_bar(tag="phase_sweep_progress", width=-1, default_value=0.0)
@@ -1593,6 +1627,24 @@ class MotorBusterNativeApp:
                 dpg.add_button(label="Stop step test", tag="btn_step_stop", width=130, enabled=False, callback=self._step_stop)
             dpg.add_progress_bar(tag="step_progress", width=-1, default_value=0.0)
             dpg.add_text("Status: Ready", tag="txt_step_status", wrap=600, color=(200, 200, 200))
+
+            dpg.add_spacer(height=8)
+            dpg.add_separator()
+
+            # --- Tap test (capture-only) ---
+            dpg.add_text("Tap test", color=(200, 200, 255))
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_text("Capture seconds:")
+                dpg.add_input_float(tag="tap_capture_s", default_value=8.0, width=70, min_value=1.0, max_value=60.0, step=0)
+                dpg.add_spacer(width=10)
+                dpg.add_text("STREAM2 rate (kHz):")
+                dpg.add_combo(tag="tap_stream2_rate", width=60, items=["5", "10", "20"], default_value="10")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Run tap test", tag="btn_tap_run", width=130, callback=self._tap_run)
+                dpg.add_button(label="Stop tap test", tag="btn_tap_stop", width=130, enabled=False, callback=self._tap_stop)
+            dpg.add_progress_bar(tag="tap_progress", width=-1, default_value=0.0)
+            dpg.add_text("Status: Ready", tag="txt_tap_status", wrap=600, color=(200, 200, 200))
 
             dpg.add_spacer(height=8)
             dpg.add_separator()
@@ -1891,9 +1943,38 @@ class MotorBusterNativeApp:
         'marker_changed', 'marker_value',
         'phase_deg', 'phase_deg_m2', 'resid_rms_counts', 'n_records', 'mean_dt_us',
         'update_rate_hz_mean', 'update_interval_ms_std', 'update_interval_ms_max',
-        'host_pulse_ms', 'host_play_ms', 'magnitude_pct',
+        'host_pulse_ms', 'host_play_ms', 'magnitude_pct', 'offset_pct', 'dc_counts',
         'acquisition_mode', 'fs_hz', 'crc_errors', 'block_gaps', 'dropped_blocks',
     )
+
+    def _get_base_notes(self):
+        return getattr(self, '_session_base_notes', '') or ''
+
+    def _capture_base_notes(self):
+        try:
+            self._session_base_notes = (dpg.get_value('base_notes') or '') if dpg.does_item_exist('base_notes') else ''
+        except Exception:
+            self._session_base_notes = ''
+
+    def _write_run_info(self, folder, test_type, settings):
+        info = {
+            'test_type': test_type,
+            'datetime': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'settings': settings,
+            'com_port': serial_manager.port_name or 'unknown',
+            'base_notes': self._get_base_notes(),
+            'firmware_version': 'unknown',
+        }
+        commit, dirty = _git_info()
+        info['motor_buster_git_commit'] = commit or 'unknown'
+        info['motor_buster_git_dirty'] = dirty
+        path = os.path.join(folder, 'run_info.json')
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                json.dump(info, f, indent=2)
+            self.log(f'Session info saved to {path}')
+        except Exception as e:
+            self.log(f'Could not write run_info.json: {e}')
 
     def _phase_repeat_run(self, sender=None, app_data=None):
         if not self.serial_connected:
@@ -1924,6 +2005,7 @@ class MotorBusterNativeApp:
         effect = dpg.get_value('phase_repeat_effect') if dpg.does_item_exist('phase_repeat_effect') else 'Periodic sine'
         acq = dpg.get_value('phase_repeat_acquisition') if dpg.does_item_exist('phase_repeat_acquisition') else 'Legacy (0xCC)'
         rate_khz = dpg.get_value('phase_repeat_stream2_rate') if dpg.does_item_exist('phase_repeat_stream2_rate') else '10'
+        offset_pct = dpg.get_value('phase_repeat_offset') if dpg.does_item_exist('phase_repeat_offset') else 0
 
         freq = max(1.0, min(500.0, float(freq)))
         capture_s = max(1.0, float(capture_s))
@@ -1932,7 +2014,14 @@ class MotorBusterNativeApp:
         effect_mode = 'constant' if 'constant' in str(effect).lower() else 'sine'
         acquisition_mode = 'stream2' if 'stream2' in str(acq).lower() else 'legacy'
         fs_hz = int(float(str(rate_khz))) * 1000
+        offset_pct = max(-100, min(100, int(offset_pct)))
+        magnitude_pct = int(round(float(magnitude_pct)))
+        if abs(offset_pct) + magnitude_pct > 100:
+            self.log(f'Phase repeat: |offset| ({abs(offset_pct)}%) + magnitude ({magnitude_pct}%) exceeds 100%')
+            self._phase_repeat_set_status('Status: |offset| + magnitude must be <= 100%')
+            return
 
+        self._capture_base_notes()
         self.phase_repeat_running = True
         self.phase_repeat_stop = False
         self.phase_sweep_stop = False
@@ -1948,7 +2037,7 @@ class MotorBusterNativeApp:
 
         threading.Thread(target=self._phase_repeat_worker,
                          args=(freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode,
-                               acquisition_mode, fs_hz),
+                               acquisition_mode, fs_hz, offset_pct),
                          daemon=True).start()
 
     def _phase_repeat_stop(self, sender=None, app_data=None):
@@ -1956,7 +2045,7 @@ class MotorBusterNativeApp:
         self._phase_repeat_set_status('Status: stopping...')
 
     def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode='sine',
-                             acquisition_mode='legacy', fs_hz=10000):
+                             acquisition_mode='legacy', fs_hz=10000, offset_pct=0):
         base = os.path.dirname(os.path.abspath(__file__))
         ts = time.strftime('%Y%m%d_%H%M%S')
         folder = os.path.join(base, 'phase_repeatability_runs', ts)
@@ -1965,6 +2054,12 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Phase repeat: could not create {folder}: {e}')
         self.log(f'Phase repeatability session folder: {folder}')
+        self._write_run_info(folder, 'phase_repeatability', {
+            'frequency_hz': freq, 'capture_s': capture_s, 'repeats': repeats,
+            'rest_s': rest_s, 'magnitude_pct': magnitude_pct, 'offset_pct': offset_pct,
+            'effect_mode': effect_mode, 'acquisition_mode': acquisition_mode,
+            'fs_hz': fs_hz,
+        })
 
         results_path = os.path.join(folder, f'results_{freq:g}Hz.csv')
         results = []
@@ -1983,7 +2078,7 @@ class MotorBusterNativeApp:
                 self._phase_repeat_set_progress((run_idx - 1) / max(1, repeats))
                 try:
                     row = self._phase_repeat_run_once(freq, capture_s, run_idx, magnitude_pct, folder, effect_mode,
-                                                      acquisition_mode, fs_hz)
+                                                      acquisition_mode, fs_hz, offset_pct)
                     results.append(row)
                     self._phase_repeat_append_result(results_path, row)
                     self.log(self._phase_repeat_row_log(row))
@@ -2016,10 +2111,10 @@ class MotorBusterNativeApp:
                 dpg.configure_item('btn_phase_sweep_run', enabled=True)
 
     def _phase_repeat_run_once(self, freq, capture_s, run_idx, magnitude_pct, folder, effect_mode='sine',
-                               acquisition_mode='legacy', fs_hz=10000):
+                               acquisition_mode='legacy', fs_hz=10000, offset_pct=0):
         if acquisition_mode == 'stream2':
             return self._phase_repeat_run_once_stream2(freq, capture_s, run_idx, magnitude_pct, folder,
-                                                       effect_mode, fs_hz)
+                                                       effect_mode, fs_hz, offset_pct)
         t_a = t_b = t_c = 0.0
         updates = []
         try:
@@ -2030,6 +2125,7 @@ class MotorBusterNativeApp:
 
             amplitude = int(32767 * magnitude_pct / 100.0)
             di_mag = self._s16_to_di(amplitude)
+            di_offset = int(round(offset_pct * 100.0))
             duration_us = int((capture_s + 1.0) * 1e6)
 
             if effect_mode == 'constant':
@@ -2062,6 +2158,7 @@ class MotorBusterNativeApp:
                     'frequency_hz': float(freq),
                     'length_us': duration_us,
                     'magnitude_unit': 'di',
+                    'offset': di_offset,
                 })
                 serial_manager.send_mark()
                 t_c = time.perf_counter()
@@ -2113,6 +2210,8 @@ class MotorBusterNativeApp:
             'host_pulse_ms': (t_b - t_a) * 1e3,
             'host_play_ms': (t_c - t_b) * 1e3,
             'magnitude_pct': magnitude_pct,
+            'offset_pct': offset_pct,
+            'dc_counts': analysis.get('dc_counts'),
             'acquisition_mode': 'legacy',
             'fs_hz': None,
             'crc_errors': None,
@@ -2120,7 +2219,7 @@ class MotorBusterNativeApp:
             'dropped_blocks': None,
         }
 
-    def _phase_repeat_run_once_stream2(self, freq, capture_s, run_idx, magnitude_pct, folder, effect_mode, fs_hz):
+    def _phase_repeat_run_once_stream2(self, freq, capture_s, run_idx, magnitude_pct, folder, effect_mode, fs_hz, offset_pct=0):
         """One STREAM2 acquisition run.
 
         Sequence: STREAM2_START -> wait 0.3 s -> TARGET_SINE -> MARK1 ->
@@ -2135,6 +2234,7 @@ class MotorBusterNativeApp:
 
             amplitude = int(32767 * magnitude_pct / 100.0)
             di_mag = self._s16_to_di(amplitude)
+            di_offset = int(round(offset_pct * 100.0))
             duration_us = int((capture_s + 1.0) * 1e6)
 
             self.stream2_blocks = []
@@ -2157,6 +2257,7 @@ class MotorBusterNativeApp:
                 'frequency_hz': float(freq),
                 'length_us': duration_us,
                 'magnitude_unit': 'di',
+                'offset': di_offset,
             })
             serial_manager.send_mark()  # MARK2 (the phase reference)
             t_c = time.perf_counter()
@@ -2218,6 +2319,8 @@ class MotorBusterNativeApp:
             'host_pulse_ms': (t_b - t_a) * 1e3,
             'host_play_ms': (t_c - t_b) * 1e3,
             'magnitude_pct': magnitude_pct,
+            'offset_pct': offset_pct,
+            'dc_counts': analysis.get('dc_counts'),
             'acquisition_mode': 'stream2',
             'fs_hz': int(fs_hz),
             'crc_errors': stats.get('crc_errors', 0),
@@ -2420,7 +2523,8 @@ class MotorBusterNativeApp:
     @staticmethod
     def _phase_repeat_analyse(records, nominal_freq):
         out = {'marker_valid': False, 'tm': 0.0, 'tm2': None, 'marker1_ms': None,
-               'marker2_ms': None, 'play_window_ms': None, 'mean_dt_us': 0.0}
+               'marker2_ms': None, 'play_window_ms': None, 'mean_dt_us': 0.0,
+               'dc_counts': None}
         if not records:
             return out
 
@@ -2507,6 +2611,7 @@ class MotorBusterNativeApp:
 
         out['f_fit_hz'] = best_f
         out['amp_counts'] = amp
+        out['dc_counts'] = float(best_coef[2])
         out['phase_deg'] = phase
         out['resid_rms_counts'] = resid_rms
 
@@ -2525,8 +2630,8 @@ class MotorBusterNativeApp:
         [cos, sin, 1, t]), but the time origin is target_t0_cyc (MARK2), so the phase
         is directly the sine phase at MARK2 and matches legacy phase_deg_m2.
         '''
-        out = {'f_fit_hz': None, 'amp_counts': None, 'phase_deg_m2': None,
-               'resid_rms_counts': None, 'n_records': 0}
+        out = {'f_fit_hz': None, 'amp_counts': None, 'dc_counts': None,
+               'phase_deg_m2': None, 'resid_rms_counts': None, 'n_records': 0}
         tau = np.asarray(tau, dtype=float)
         adc = np.asarray(adc, dtype=float)
         out['n_records'] = int(tau.size)
@@ -2577,6 +2682,7 @@ class MotorBusterNativeApp:
 
         out['f_fit_hz'] = best_f
         out['amp_counts'] = amp
+        out['dc_counts'] = float(best_coef[2])
         out['phase_deg_m2'] = phase
         out['resid_rms_counts'] = resid_rms
         return out
@@ -2588,7 +2694,7 @@ class MotorBusterNativeApp:
         if n_valid == 0:
             text = f'Phase repeatability: {n_total} run(s), 0 valid fits'
             line = (f'SUMMARY,valid_runs=0,total_runs={n_total},'
-                    f'circ_mean_deg=,circ_std_deg=,f_mean_hz=,f_std_hz=')
+                    f'circ_mean_deg=,circ_std_deg=,f_mean_hz=,f_std_hz=,dc_mean=')
             return text, line
 
         phases_deg = np.array([r['phase_deg'] for r in valid])
@@ -2603,19 +2709,24 @@ class MotorBusterNativeApp:
         f_mean = float(np.mean(freqs))
         f_std = float(np.std(freqs))
 
+        dc_vals = [r['dc_counts'] for r in valid if r.get('dc_counts') is not None]
+        dc_mean = float(np.mean(dc_vals)) if dc_vals else None
+
         m2 = [r for r in valid if r.get('phase_deg_m2') is not None]
         if m2:
             circ_mean_deg_m2 = self._phase_sweep_circular_stats([r['phase_deg_m2'] for r in m2])[0]
             m2_s = f'{circ_mean_deg_m2:.2f}'
         else:
             m2_s = '?'
+        dc_s = f'{dc_mean:.4f}' if dc_mean is not None else ''
         text = (f'Phase repeatability: {n_valid}/{n_total} valid. '
                 f'phase (from MARK2): {m2_s} deg, '
                 f'phase (from MARK1, includes play call): {circ_mean_deg:.2f} deg; '
-                f'f mean={f_mean:.4f} Hz, std={f_std:.4f} Hz')
+                f'f mean={f_mean:.4f} Hz, std={f_std:.4f} Hz'
+                + (f'; dc mean={dc_mean:.4f} counts' if dc_mean is not None else ''))
         line = (f'SUMMARY,valid_runs={n_valid},total_runs={n_total},'
                 f'circ_mean_deg={circ_mean_deg:.4f},circ_std_deg={circ_std_deg:.4f},'
-                f'f_mean_hz={f_mean:.6f},f_std_hz={f_std:.6f}')
+                f'f_mean_hz={f_mean:.6f},f_std_hz={f_std:.6f},dc_mean={dc_s}')
         return text, line
 
     def _phase_repeat_append_result(self, path, row):
@@ -2681,7 +2792,7 @@ class MotorBusterNativeApp:
         'freq_hz', 'f_fit_mean_hz', 'amp_counts_mean', 'valid_runs', 'total_runs',
         'circ_mean_deg', 'circ_std_deg', 'sem_deg', 'phase_unwrapped_deg',
         'circ_mean_deg_m2', 'circ_std_deg_m2', 'play_window_ms_mean',
-        'phase_unwrapped_deg_m2', 'magnitude_pct',
+        'phase_unwrapped_deg_m2', 'magnitude_pct', 'offset_pct', 'dc_counts_mean',
         'acquisition_mode', 'fs_hz', 'crc_errors', 'block_gaps', 'dropped_blocks',
     )
 
@@ -2741,6 +2852,7 @@ class MotorBusterNativeApp:
         effect = dpg.get_value('phase_sweep_effect') if dpg.does_item_exist('phase_sweep_effect') else 'Periodic sine'
         acq = dpg.get_value('phase_sweep_acquisition') if dpg.does_item_exist('phase_sweep_acquisition') else 'Legacy (0xCC)'
         rate_khz = dpg.get_value('phase_sweep_stream2_rate') if dpg.does_item_exist('phase_sweep_stream2_rate') else '10'
+        offset_pct = dpg.get_value('phase_sweep_offset') if dpg.does_item_exist('phase_sweep_offset') else 0
         freq_list_text = dpg.get_value('phase_sweep_freq_list') if dpg.does_item_exist('phase_sweep_freq_list') else ''
 
         start_hz = max(1.0, float(start_hz))
@@ -2752,6 +2864,12 @@ class MotorBusterNativeApp:
         effect_mode = 'constant' if 'constant' in str(effect).lower() else 'sine'
         acquisition_mode = 'stream2' if 'stream2' in str(acq).lower() else 'legacy'
         fs_hz = int(float(str(rate_khz))) * 1000
+        offset_pct = max(-100, min(100, int(offset_pct)))
+        magnitude_pct = int(round(float(magnitude_pct)))
+        if abs(offset_pct) + magnitude_pct > 100:
+            self.log(f'Phase sweep: |offset| ({abs(offset_pct)}%) + magnitude ({magnitude_pct}%) exceeds 100%')
+            self._phase_sweep_set_status('Status: |offset| + magnitude must be <= 100%')
+            return
 
         freq_list = self._parse_freq_list(freq_list_text)
         if freq_list:
@@ -2760,6 +2878,7 @@ class MotorBusterNativeApp:
             n = max(1, int(round((end_hz - start_hz) / step_hz)) + 1)
             freqs = [start_hz + i * step_hz for i in range(n)]
 
+        self._capture_base_notes()
         self.phase_sweep_running = True
         self.phase_sweep_stop = False
         self.phase_repeat_stop = False
@@ -2775,7 +2894,7 @@ class MotorBusterNativeApp:
 
         threading.Thread(target=self._phase_sweep_worker,
                          args=(freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode,
-                               acquisition_mode, fs_hz),
+                               acquisition_mode, fs_hz, offset_pct),
                          daemon=True).start()
 
     def _phase_sweep_stop(self, sender=None, app_data=None):
@@ -2783,7 +2902,7 @@ class MotorBusterNativeApp:
         self._phase_sweep_set_status('Status: stopping after current run...')
 
     def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode='sine',
-                            acquisition_mode='legacy', fs_hz=10000):
+                            acquisition_mode='legacy', fs_hz=10000, offset_pct=0):
         base = os.path.dirname(os.path.abspath(__file__))
         ts = time.strftime('%Y%m%d_%H%M%S')
         folder = os.path.join(base, 'phase_sweep_runs', ts)
@@ -2792,6 +2911,12 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Phase sweep: could not create {folder}: {e}')
         self.log(f'Phase sweep session folder: {folder}')
+        self._write_run_info(folder, 'phase_sweep', {
+            'frequencies_hz': list(freqs), 'repeats': repeats, 'capture_s': capture_s,
+            'rest_s': rest_s, 'magnitude_pct': magnitude_pct, 'offset_pct': offset_pct,
+            'effect_mode': effect_mode, 'acquisition_mode': acquisition_mode,
+            'fs_hz': fs_hz,
+        })
 
         results_path = os.path.join(folder, 'results_sweep.csv')
 
@@ -2819,7 +2944,7 @@ class MotorBusterNativeApp:
                         f'elapsed {time.time() - start_time:.0f}s...')
                     try:
                         row = self._phase_repeat_run_once(freq, cap, run_idx, magnitude_pct, folder, effect_mode,
-                                                          acquisition_mode, fs_hz)
+                                                          acquisition_mode, fs_hz, offset_pct)
                         run_results.append(row)
                     except Exception as e:
                         import traceback
@@ -2833,7 +2958,7 @@ class MotorBusterNativeApp:
                         self._phase_repeat_interruptible_sleep(rest_s)
 
                 if run_results:
-                    sweep_row = self._phase_sweep_summarize(freq, run_results, magnitude_pct, acquisition_mode, fs_hz)
+                    sweep_row = self._phase_sweep_summarize(freq, run_results, magnitude_pct, acquisition_mode, fs_hz, offset_pct)
                     sweep_rows.append(sweep_row)
                     self.log(f'Phase sweep {freq:g} Hz: '
                              f'{sweep_row["valid_runs"]}/{sweep_row["total_runs"]} valid')
@@ -2873,7 +2998,7 @@ class MotorBusterNativeApp:
             f'Phase sweep done: {len(sweep_rows)} freqs, {elapsed_total:.0f}s')
         self.log(f'[Phase sweep] complete, results in {results_path}')
 
-    def _phase_sweep_summarize(self, freq, run_results, magnitude_pct=None, acquisition_mode='legacy', fs_hz=None):
+    def _phase_sweep_summarize(self, freq, run_results, magnitude_pct=None, acquisition_mode='legacy', fs_hz=None, offset_pct=0):
         valid = [r for r in run_results if r.get('phase_deg') is not None]
         n_valid = len(valid)
         n_total = len(run_results)
@@ -2904,6 +3029,8 @@ class MotorBusterNativeApp:
             'play_window_ms_mean': None,
             'phase_unwrapped_deg_m2': None,
             'magnitude_pct': magnitude_pct,
+            'offset_pct': offset_pct,
+            'dc_counts_mean': None,
             'acquisition_mode': acquisition_mode,
             'fs_hz': fs_hz,
             'crc_errors': crc_sum,
@@ -2913,6 +3040,9 @@ class MotorBusterNativeApp:
         if n_valid:
             row['f_fit_mean_hz'] = float(np.mean([r['f_fit_hz'] for r in valid]))
             row['amp_counts_mean'] = float(np.mean([r['amp_counts'] for r in valid]))
+            dc_vals = [r['dc_counts'] for r in valid if r.get('dc_counts') is not None]
+            if dc_vals:
+                row['dc_counts_mean'] = float(np.mean(dc_vals))
             circ_mean, circ_std = self._phase_sweep_circular_stats([r['phase_deg'] for r in valid])
             row['circ_mean_deg'] = circ_mean
             row['circ_std_deg'] = circ_std
@@ -2999,6 +3129,7 @@ class MotorBusterNativeApp:
         'rise_time_10_90_ms', 'max_slope_counts_per_ms', 'avg_slew_counts_per_ms',
         'max_slope_Nm_per_ms', 'avg_slew_Nm_per_ms',
         'overshoot_pct', 'overshoot_noise_floor_pct', 'settling_time_2pct_ms', 'settling_band_used',
+        'drift_counts',
         'crc_errors', 'block_gaps', 'dropped_blocks', 'host_pulse_ms',
     )
 
@@ -3071,6 +3202,7 @@ class MotorBusterNativeApp:
         counts_per_nm = max(0.1, float(counts_per_nm))
         fs_hz = int(float(str(rate_khz))) * 1000
 
+        self._capture_base_notes()
         self.step_running = True
         self.step_stop = False
         if dpg.does_item_exist('btn_step_run'):
@@ -3110,6 +3242,11 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Step test: could not create {folder}: {e}')
         self.log(f'Step response session folder: {folder}')
+        self._write_run_info(folder, 'step_response', {
+            'magnitudes_pct': list(mags), 'repeats': repeats, 'overrides': dict(overrides),
+            'baseline_ms': baseline_ms, 'hold_ms': hold_ms, 'rest_s': rest_s,
+            'fs_hz': fs_hz, 'counts_per_nm': counts_per_nm,
+        })
         results_path = os.path.join(folder, 'results_step.csv')
         summary_path = os.path.join(folder, 'results_step_summary.csv')
 
@@ -3135,7 +3272,7 @@ class MotorBusterNativeApp:
                         self._step_set_status(f'{mag_pct:g}% {label} rep {rep}/{n_rep}...')
                         try:
                             row = self._step_run_once(mag_pct, label, baseline_di, step_di, folder, fs_hz,
-                                                      baseline_ms, hold_ms, counts_per_nm)
+                                                      baseline_ms, hold_ms, counts_per_nm, rep)
                         except Exception as e:
                             import traceback
                             self.log(f'Step {mag_pct:g}% {label} rep {rep} failed: {e}')
@@ -3185,7 +3322,7 @@ class MotorBusterNativeApp:
             self.log(f'Step test: could not append result row: {e}')
 
     def _step_run_once(self, mag_pct, direction, baseline_di, step_di, folder, fs_hz,
-                       baseline_ms=150, hold_ms=500, counts_per_nm=38.0):
+                       baseline_ms=150, hold_ms=500, counts_per_nm=38.0, rep=1):
         t_a = t_b = 0.0
         baseline_s = baseline_ms / 1000.0
         hold_s = hold_ms / 1000.0
@@ -3230,7 +3367,7 @@ class MotorBusterNativeApp:
                     'dropped_blocks': stats.get('dropped_blocks', 0),
                     'host_pulse_ms': (t_b - t_a) * 1e3}
 
-        self._step_save_raw(built, mag_pct, direction, folder)
+        self._step_save_raw(built, mag_pct, direction, folder, rep)
         fs_actual = int(built.get('fs') or fs_hz)
         m = self._step_analyse(built['tau'], built['adc'], fs_actual, hold_s=hold_s, counts_per_nm=counts_per_nm)
         row = {
@@ -3248,6 +3385,7 @@ class MotorBusterNativeApp:
             'overshoot_noise_floor_pct': m.get('overshoot_noise_floor_pct'),
             'settling_time_2pct_ms': m.get('settling_time_2pct_ms'),
             'settling_band_used': m.get('settling_band_used'),
+            'drift_counts': m.get('drift_counts'),
             'crc_errors': stats.get('crc_errors', 0),
             'block_gaps': stats.get('block_gaps', 0),
             'dropped_blocks': stats.get('dropped_blocks', 0),
@@ -3307,7 +3445,8 @@ class MotorBusterNativeApp:
                'avg_slew_counts_per_ms': None, 'max_slope_Nm_per_ms': None,
                'avg_slew_Nm_per_ms': None, 'overshoot_pct': None,
                'overshoot_noise_floor_pct': None,
-               'settling_time_2pct_ms': None, 'settling_band_used': None}
+               'settling_time_2pct_ms': None, 'settling_band_used': None,
+               'drift_counts': None}
         if tau.size < 40:
             return out
 
@@ -3406,21 +3545,38 @@ class MotorBusterNativeApp:
                 out['overshoot_pct'] = (final - float(np.min(post_smooth2))) / step_mag * 100.0
         out['overshoot_noise_floor_pct'] = 3.0 * noise_rms / math.sqrt(win2) / step_mag * 100.0
 
+        # Settling: 2 ms centered moving average; band = max(2% of step,
+        # 4 x noise RMS of the 2 ms-smoothed baseline). Settling time = the first
+        # time after which the smoothed signal stays inside the band for >= 50 ms.
+        smooth2_noise_rms = float(np.std(adc_smooth2[bmask]))
         band_2pct = 0.02 * step_mag
-        band_noise = 4.0 * smooth_noise_rms
+        band_noise = 4.0 * smooth2_noise_rms
         settling_band = max(band_2pct, band_noise)
         out['settling_band_used'] = '2%' if band_2pct >= band_noise else '4*noise'
-        dev = np.abs(adc_smooth - final)
-        viol = np.where(pre_final & (dev > settling_band))[0]
-        out['settling_time_2pct_ms'] = float(tau[viol[-1]]) * 1e3 if viol.size else 0.0
+        dev = np.abs(adc_smooth2 - final)
+        inside = dev <= settling_band
+        n_persist = max(1, int(round(fs * 0.050)))
+        idx0 = int(np.searchsorted(tau, 0.0))
+        settle_time = None
+        for i in range(idx0, tau.size - n_persist + 1):
+            if bool(np.all(inside[i:i + n_persist])):
+                settle_time = float(tau[i])
+                break
+        out['settling_time_2pct_ms'] = (settle_time * 1e3) if settle_time is not None else None
+
+        # Drift during hold: mean of last 100 ms of hold minus mean of tau = 100-200 ms.
+        dmask_early = (tau >= 0.100) & (tau <= 0.200)
+        dmask_late = (tau >= (hold_s - 0.100)) & (tau <= hold_s)
+        if int(np.count_nonzero(dmask_early)) >= 5 and int(np.count_nonzero(dmask_late)) >= 5:
+            out['drift_counts'] = float(np.mean(adc[dmask_late])) - float(np.mean(adc[dmask_early]))
 
         return out
 
-    def _step_save_raw(self, built, mag_pct, direction, folder):
+    def _step_save_raw(self, built, mag_pct, direction, folder, rep=1):
         tau = built['tau']
         adc = built['adc']
         target = built['target']
-        path = os.path.join(folder, f'step_{mag_pct:g}pct_{direction}.csv')
+        path = os.path.join(folder, f'step_{mag_pct:g}pct_{direction}_r{rep:02d}.csv')
         try:
             with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write('sample_index,tau_s,adc,target\n')
@@ -3436,7 +3592,8 @@ class MotorBusterNativeApp:
                         'dead_time_ms', 't50_ms', 't90_ms', 'rise_time_10_90_ms',
                         'max_slope_counts_per_ms', 'avg_slew_counts_per_ms',
                         'max_slope_Nm_per_ms', 'avg_slew_Nm_per_ms',
-                        'overshoot_pct', 'overshoot_noise_floor_pct', 'settling_time_2pct_ms']
+                        'overshoot_pct', 'overshoot_noise_floor_pct', 'settling_time_2pct_ms',
+                        'drift_counts']
         groups = {}
         for r in rows:
             groups.setdefault((r.get('magnitude_pct'), r.get('direction')), []).append(r)
@@ -3466,6 +3623,343 @@ class MotorBusterNativeApp:
             self.log(f'Step test: summary written to {path}')
         except Exception as e:
             self.log(f'Step test: could not write summary: {e}')
+
+    # --- Tap test (capture-only) ---
+    _TAP_RESULT_COLUMNS = (
+        'tap_index', 'onset_s', 'peak_counts', 'freq_hz', 'freq2_hz', 'damping_ratio',
+    )
+
+    def _tap_run(self, sender=None, app_data=None):
+        if not self.serial_connected:
+            self.log('Tap test requires a serial connection')
+            self._tap_set_status('Status: serial not connected')
+            return
+        if sweep_engine.is_running or getattr(self, 'phase_repeat_running', False) \
+                or getattr(self, 'phase_sweep_running', False) or getattr(self, 'step_running', False):
+            self.log('Cannot run tap test while another test is running')
+            self._tap_set_status('Status: another test in progress')
+            return
+        if getattr(self, 'tap_running', False):
+            self.log('Tap test already running')
+            return
+
+        capture_s = dpg.get_value('tap_capture_s') if dpg.does_item_exist('tap_capture_s') else 8.0
+        rate_khz = dpg.get_value('tap_stream2_rate') if dpg.does_item_exist('tap_stream2_rate') else '10'
+        capture_s = max(1.0, min(60.0, float(capture_s)))
+        fs_hz = int(float(str(rate_khz))) * 1000
+
+        self._capture_base_notes()
+        self.tap_running = True
+        self.tap_stop = False
+        if dpg.does_item_exist('btn_tap_run'):
+            dpg.configure_item('btn_tap_run', enabled=False)
+        if dpg.does_item_exist('btn_tap_stop'):
+            dpg.configure_item('btn_tap_stop', enabled=True)
+        if dpg.does_item_exist('tap_progress'):
+            dpg.set_value('tap_progress', 0.0)
+        self._tap_set_status('Status: starting...')
+        threading.Thread(target=self._tap_worker, args=(capture_s, fs_hz), daemon=True).start()
+
+    def _tap_stop(self, sender=None, app_data=None):
+        self.tap_stop = True
+        self._tap_set_status('Status: stopping...')
+
+    def _tap_set_status(self, msg):
+        if dpg.does_item_exist('txt_tap_status'):
+            dpg.set_value('txt_tap_status', msg)
+
+    def _tap_set_progress(self, frac):
+        if dpg.does_item_exist('tap_progress'):
+            dpg.set_value('tap_progress', min(1.0, max(0.0, frac)))
+
+    def _tap_worker(self, capture_s, fs_hz):
+        base = os.path.dirname(os.path.abspath(__file__))
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        folder = os.path.join(base, 'tap_test_runs', ts)
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as e:
+            self.log(f'Tap test: could not create {folder}: {e}')
+        self.log(f'Tap test session folder: {folder}')
+        self._write_run_info(folder, 'tap_test', {
+            'capture_s': capture_s, 'fs_hz': fs_hz,
+        })
+
+        raw_path = os.path.join(folder, 'tap_raw.csv')
+        results_path = os.path.join(folder, 'results_tap.csv')
+        summary_path = os.path.join(folder, 'results_tap_summary.csv')
+
+        rows = []
+        try:
+            # Capture-only acquisition: stop any lingering FFB effects so the
+            # wheelbase is passive and only responds to the physical tap.
+            try:
+                engine.stop_effect()
+                self.log('Tap test: stopped all FFB effects before capture')
+            except Exception as e:
+                self.log(f'Tap test: stop_effect failed: {e}')
+
+            self.stream2_blocks = []
+            serial_manager.reset_stream2_stats()
+            serial_manager.set_stream2_callback(self._on_stream2_block)
+            serial_manager.send_stream2_start(int(fs_hz))
+
+            deadline = time.time() + capture_s
+            while time.time() < deadline and not self.tap_stop:
+                remaining = deadline - time.time()
+                self._tap_set_status(f'TAP NOW! {remaining:.1f}s remaining...')
+                self._tap_set_progress(1.0 - (remaining / capture_s))
+                time.sleep(0.1)
+
+            serial_manager.send_stream2_stop()
+            serial_manager.set_stream2_callback(None)
+            time.sleep(0.2)
+
+            blocks = list(self.stream2_blocks)
+            stats = serial_manager.get_stream2_stats()
+            self.log(f'Tap test: captured {len(blocks)} STREAM2 blocks, '
+                     f'crc_errors={stats.get("crc_errors", 0)}, '
+                     f'block_gaps={stats.get("block_gaps", 0)}, '
+                     f'dropped_blocks={stats.get("dropped_blocks", 0)}')
+
+            built = self._tap_build_samples(blocks)
+            if built is None or not built['t']:
+                self.log('Tap test: no samples captured')
+                self._tap_set_status('Status: no samples captured')
+                return
+
+            self._tap_save_raw(built['t'], built['adc'], raw_path)
+            fs_actual = int(built.get('fs') or fs_hz)
+            taps = self._tap_detect(built['t'], built['adc'], fs_actual)
+            self.log(f'Tap test: detected {len(taps)} tap(s)')
+
+            for i, tap in enumerate(taps):
+                onset = int(tap['peak_idx'])
+                n_ring = int(round(fs_actual * 0.1))  # ~100 ms ring-down window
+                end = min(len(built['t']), onset + n_ring)
+                seg_t = built['t'][onset:end]
+                seg_adc = built['adc'][onset:end]
+                m = self._tap_analyse_ringdown(seg_t, seg_adc, fs_actual)
+                rows.append({
+                    'tap_index': i + 1,
+                    'onset_s': tap['onset_s'],
+                    'peak_counts': tap['peak_counts'],
+                    'freq_hz': m.get('freq_hz'),
+                    'freq2_hz': m.get('freq2_hz'),
+                    'damping_ratio': m.get('damping_ratio'),
+                })
+        except Exception as e:
+            import traceback
+            self.log(f'Tap test worker error: {e}')
+            self.log(traceback.format_exc())
+        finally:
+            self.tap_running = False
+            try:
+                serial_manager.send_stream2_stop()
+                serial_manager.set_stream2_callback(None)
+            except Exception:
+                pass
+            if dpg.does_item_exist('btn_tap_run'):
+                dpg.configure_item('btn_tap_run', enabled=True)
+            if dpg.does_item_exist('btn_tap_stop'):
+                dpg.configure_item('btn_tap_stop', enabled=False)
+            self._tap_set_progress(1.0)
+
+        self._tap_write_results(results_path, rows)
+        self._tap_write_summary(summary_path, rows)
+        self._tap_set_status(f'Tap test done: {len(rows)} tap(s) analysed')
+        self.log(f'[Tap test] complete: {results_path}, {summary_path}')
+
+    @staticmethod
+    def _tap_build_samples(blocks):
+        """Concatenate STREAM2 blocks into a contiguous (t_s, adc) capture.
+
+        Time uses the firmware's per-capture sample index (first_index), which is
+        reset on STREAM2_START, so t_s = (first_index + k) / fs. Blocks are sorted
+        by first_index so any reordering or dropped blocks keep a monotonic axis.
+        """
+        if not blocks:
+            return None
+        ordered = sorted(blocks, key=lambda b: int(b.get('first_index', 0)))
+        t_list = []
+        adc_list = []
+        fs = None
+        for blk in ordered:
+            blk_fs = int(blk.get('fs', 0))
+            if fs is None and blk_fs:
+                fs = blk_fs
+            first_index = int(blk.get('first_index', 0))
+            for k, adc in enumerate(blk.get('samples', [])):
+                t_list.append((first_index + k) / float(blk_fs) if blk_fs else float(first_index + k))
+                adc_list.append(int(adc))
+        if not t_list:
+            return None
+        return {'t': t_list, 'adc': adc_list, 'fs': fs}
+
+    @staticmethod
+    def _tap_detect(t_s, adc, fs):
+        """Detect taps as sudden excursions well above the noise floor.
+
+        Returns a list of dicts with the tap onset/peak sample indices, onset time
+        and peak amplitude (counts). A refractory window merges the oscillating
+        ring-down of a single tap so it is not double counted.
+        """
+        t = np.asarray(t_s, dtype=float)
+        a = np.asarray(adc, dtype=float)
+        if a.size < 8 or fs <= 0:
+            return []
+        med = float(np.median(a))
+        d = a - med
+        mad = float(np.median(np.abs(d - np.median(d))))
+        noise = 1.4826 * mad
+        threshold = max(8.0 * noise, 20.0)
+        above = np.abs(d) > threshold
+
+        refractory = max(2, int(round(fs * 0.15)))  # 150 ms minimum separation
+        taps = []
+        last_peak_idx = -10 ** 9
+        i = 0
+        n = int(a.size)
+        while i < n:
+            if not above[i]:
+                i += 1
+                continue
+            onset = i
+            j = i
+            while j < n and above[j]:
+                j += 1
+            peak_win_end = min(n, onset + max(2, int(round(fs * 0.05))))
+            seg = d[onset:peak_win_end]
+            k = int(np.argmax(np.abs(seg)))
+            peak_idx = onset + k
+            peak_counts = float(np.abs(d[peak_idx]))
+            if peak_idx - last_peak_idx < refractory:
+                if peak_counts > taps[-1]['peak_counts']:
+                    taps[-1]['peak_idx'] = int(peak_idx)
+                    taps[-1]['peak_counts'] = peak_counts
+                i = j
+                continue
+            taps.append({
+                'onset_idx': int(onset),
+                'onset_s': float(t[onset]),
+                'peak_idx': int(peak_idx),
+                'peak_counts': peak_counts,
+            })
+            last_peak_idx = peak_idx
+            i = j
+        return taps
+
+    @staticmethod
+    def _tap_analyse_ringdown(t_s, adc, fs):
+        """Analyse a single tap ring-down segment.
+
+        Returns the ringing frequency (FFT peak), the second-largest FFT peak and
+        the damping ratio estimated by log-decrement of the oscillation envelope.
+        All quantities are computed on raw ADC counts; frequencies below 20 Hz are
+        ignored to reject mechanical-rig drift.
+        """
+        t = np.asarray(t_s, dtype=float)
+        a = np.asarray(adc, dtype=float)
+        out = {'freq_hz': None, 'freq2_hz': None, 'damping_ratio': None,
+               'peak_counts': None}
+        n = int(a.size)
+        if n < 8 or fs <= 0:
+            return out
+
+        # Remove DC: subtract the settled tail so the oscillation is centred.
+        tail_n = max(1, int(round(n * 0.2)))
+        dc = float(np.mean(a[-tail_n:]))
+        x = a - dc
+        out['peak_counts'] = float(np.max(np.abs(x)))
+
+        # ---- Ringing frequency via FFT (Hann window, zero-padded) ----
+        win = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / max(1, n - 1)))
+        nfft = 1
+        while nfft < max(32768, n):
+            nfft <<= 1
+        spectrum = np.fft.rfft(x * win, n=nfft)
+        freqs = np.fft.rfftfreq(nfft, 1.0 / float(fs))
+        mag = np.abs(spectrum)
+
+        lo = 20.0
+        band = freqs >= lo
+        if int(np.count_nonzero(band)) < 2:
+            return out
+        f_band = freqs[band]
+        m_band = mag[band]
+        order = np.argsort(m_band)[::-1]
+        out['freq_hz'] = float(f_band[order[0]])
+        if order.size >= 2:
+            out['freq2_hz'] = float(f_band[order[1]])
+
+        # ---- Damping via log-decrement of successive peaks ----
+        peak_idx = []
+        for i in range(1, n - 1):
+            if x[i] > x[i - 1] and x[i] > x[i + 1]:
+                peak_idx.append(i)
+        if len(peak_idx) < 2:
+            return out
+        amps = np.abs(x[np.array(peak_idx, dtype=int)])
+        amps = amps[amps >= 0.05 * np.max(amps)]
+        if amps.size < 2:
+            return out
+        ratios = amps[1:] / amps[:-1]
+        ratios = ratios[(ratios > 0.0) & (ratios < 1.0)]
+        if ratios.size == 0:
+            return out
+        delta = float(-np.mean(np.log(ratios)))  # log-decrement
+        if delta <= 0.0:
+            return out
+        zeta = delta / math.sqrt((2.0 * math.pi) ** 2 + delta ** 2)
+        out['damping_ratio'] = float(zeta)
+        return out
+
+    def _tap_save_raw(self, t_s, adc, path):
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write('t_s,adc\n')
+                for tv, av in zip(t_s, adc):
+                    f.write(f'{tv:.9f},{av}\n')
+            self.log(f'Tap test: raw capture saved to {path} ({len(adc)} samples)')
+        except Exception as e:
+            self.log(f'Tap test: raw save failed: {e}')
+        return path
+
+    def _tap_write_results(self, path, rows):
+        def _fmt(v):
+            if v is None:
+                return ''
+            if isinstance(v, float):
+                return f'{v:.6f}'
+            return str(v)
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as rf:
+                rf.write(','.join(self._TAP_RESULT_COLUMNS) + '\n')
+                for row in rows:
+                    rf.write(','.join(_fmt(row.get(k)) for k in self._TAP_RESULT_COLUMNS) + '\n')
+            self.log(f'Tap test: results written to {path} ({len(rows)} rows)')
+        except Exception as e:
+            self.log(f'Tap test: could not write results: {e}')
+
+    def _tap_write_summary(self, path, rows):
+        numeric_cols = ['peak_counts', 'freq_hz', 'freq2_hz', 'damping_ratio']
+        header = ['metric']
+        for c in numeric_cols:
+            header.append(c + '_mean')
+            header.append(c + '_std')
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write(','.join(header) + '\n')
+                for c in numeric_cols:
+                    vs = [r.get(c) for r in rows if r.get(c) is not None]
+                    if not vs:
+                        continue
+                    mean = float(np.mean(vs))
+                    std = float(np.std(vs)) if len(vs) >= 2 else 0.0
+                    f.write(f'{c},{mean:.6f},{std:.6f}\n')
+            self.log(f'Tap test: summary written to {path}')
+        except Exception as e:
+            self.log(f'Tap test: could not write summary: {e}')
 
     def _sweep_engine_send_effect(self, effect_type: str, freq_hz: float, magnitude: int,
                                   settle_periods: int = 2, ramp_periods: int = 1,
