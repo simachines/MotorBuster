@@ -539,6 +539,7 @@ class MotorBusterNativeApp:
         self.serial_baud = 115200
         self.serial_connected = False
         self.serial_timing_data = {}
+        self._firmware_version = 'unknown'
         # Manual command selector state (Cmd tab)
         self._cmd_expects_response = False
         self._cmd_sent_time = 0.0
@@ -1303,6 +1304,7 @@ class MotorBusterNativeApp:
             dpg.set_value("txt_serial_status", f"COM: {port} ({self.serial_baud})")
             self.log(f"Serial connected to {port} @ {self.serial_baud} baud")
             serial_manager.set_response_callback(self._on_serial_response)
+            self._query_firmware_version()
         else:
             self.log(f"Failed to connect to {port}")
 
@@ -1469,6 +1471,7 @@ class MotorBusterNativeApp:
                               callback=self._on_serial_baud_changed)
                 dpg.add_button(label="Connect", tag="btn_serial_connect", callback=self._connect_serial)
             dpg.add_text("COM: Offline", tag="txt_serial_status", color=(100, 100, 100))
+            dpg.add_text("FW unknown", tag="txt_firmware_version", color=(100, 100, 100))
             with dpg.group(horizontal=True):
                 dpg.add_text("Base / notes:")
                 dpg.add_input_text(tag="base_notes", width=400, default_value="",
@@ -1945,6 +1948,7 @@ class MotorBusterNativeApp:
         'update_rate_hz_mean', 'update_interval_ms_std', 'update_interval_ms_max',
         'host_pulse_ms', 'host_play_ms', 'magnitude_pct', 'offset_pct', 'dc_counts',
         'acquisition_mode', 'fs_hz', 'crc_errors', 'block_gaps', 'dropped_blocks',
+        'firmware_version',
     )
 
     def _get_base_notes(self):
@@ -1956,6 +1960,30 @@ class MotorBusterNativeApp:
         except Exception:
             self._session_base_notes = ''
 
+    def _get_firmware_version(self) -> str:
+        '''Return the cached firmware version display string (or 'unknown').'''
+        return getattr(self, '_firmware_version', 'unknown') or 'unknown'
+
+    def _query_firmware_version(self) -> str:
+        '''Send GET_VERSION and cache the result for run_info.json / CSV output.'''
+        info = serial_manager.get_firmware_version(timeout=0.5)
+        if info:
+            self._firmware_version = info.get('display') or 'unknown'
+            self.log(f'Firmware version: {self._firmware_version}')
+        else:
+            self._firmware_version = 'unknown'
+            self.log('Firmware version: unknown (no reply within 500 ms)')
+        self._update_firmware_label()
+        return self._firmware_version
+
+    def _update_firmware_label(self):
+        '''Update the Connection panel firmware label.'''
+        if dpg.does_item_exist('txt_firmware_version'):
+            v = self._get_firmware_version()
+            dpg.set_value('txt_firmware_version', f'FW {v}')
+            color = (100, 255, 100) if v != 'unknown' else (100, 100, 100)
+            dpg.configure_item('txt_firmware_version', color=color)
+
     def _write_run_info(self, folder, test_type, settings):
         info = {
             'test_type': test_type,
@@ -1963,7 +1991,7 @@ class MotorBusterNativeApp:
             'settings': settings,
             'com_port': serial_manager.port_name or 'unknown',
             'base_notes': self._get_base_notes(),
-            'firmware_version': 'unknown',
+            'firmware_version': self._get_firmware_version(),
         }
         commit, dirty = _git_info()
         info['motor_buster_git_commit'] = commit or 'unknown'
@@ -2054,6 +2082,7 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Phase repeat: could not create {folder}: {e}')
         self.log(f'Phase repeatability session folder: {folder}')
+        self._query_firmware_version()
         self._write_run_info(folder, 'phase_repeatability', {
             'frequency_hz': freq, 'capture_s': capture_s, 'repeats': repeats,
             'rest_s': rest_s, 'magnitude_pct': magnitude_pct, 'offset_pct': offset_pct,
@@ -2217,6 +2246,7 @@ class MotorBusterNativeApp:
             'crc_errors': None,
             'block_gaps': None,
             'dropped_blocks': None,
+            'firmware_version': self._get_firmware_version(),
         }
 
     def _phase_repeat_run_once_stream2(self, freq, capture_s, run_idx, magnitude_pct, folder, effect_mode, fs_hz, offset_pct=0):
@@ -2326,6 +2356,7 @@ class MotorBusterNativeApp:
             'crc_errors': stats.get('crc_errors', 0),
             'block_gaps': stats.get('block_gaps', 0),
             'dropped_blocks': stats.get('dropped_blocks', 0),
+            'firmware_version': self._get_firmware_version(),
         }
 
     @staticmethod
@@ -2794,6 +2825,7 @@ class MotorBusterNativeApp:
         'circ_mean_deg_m2', 'circ_std_deg_m2', 'play_window_ms_mean',
         'phase_unwrapped_deg_m2', 'magnitude_pct', 'offset_pct', 'dc_counts_mean',
         'acquisition_mode', 'fs_hz', 'crc_errors', 'block_gaps', 'dropped_blocks',
+        'firmware_version',
     )
 
     def _phase_stop_requested(self):
@@ -2911,6 +2943,7 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Phase sweep: could not create {folder}: {e}')
         self.log(f'Phase sweep session folder: {folder}')
+        self._query_firmware_version()
         self._write_run_info(folder, 'phase_sweep', {
             'frequencies_hz': list(freqs), 'repeats': repeats, 'capture_s': capture_s,
             'rest_s': rest_s, 'magnitude_pct': magnitude_pct, 'offset_pct': offset_pct,
@@ -3036,6 +3069,7 @@ class MotorBusterNativeApp:
             'crc_errors': crc_sum,
             'block_gaps': gap_sum,
             'dropped_blocks': drop_max,
+            'firmware_version': self._get_firmware_version(),
         }
         if n_valid:
             row['f_fit_mean_hz'] = float(np.mean([r['f_fit_hz'] for r in valid]))
@@ -3131,6 +3165,7 @@ class MotorBusterNativeApp:
         'overshoot_pct', 'overshoot_noise_floor_pct', 'settling_time_2pct_ms', 'settling_band_used',
         'drift_counts',
         'crc_errors', 'block_gaps', 'dropped_blocks', 'host_pulse_ms',
+        'firmware_version',
     )
 
     _STEP_DIRECTIONS = (
@@ -3242,6 +3277,7 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Step test: could not create {folder}: {e}')
         self.log(f'Step response session folder: {folder}')
+        self._query_firmware_version()
         self._write_run_info(folder, 'step_response', {
             'magnitudes_pct': list(mags), 'repeats': repeats, 'overrides': dict(overrides),
             'baseline_ms': baseline_ms, 'hold_ms': hold_ms, 'rest_s': rest_s,
@@ -3365,7 +3401,8 @@ class MotorBusterNativeApp:
                     'crc_errors': stats.get('crc_errors', 0),
                     'block_gaps': stats.get('block_gaps', 0),
                     'dropped_blocks': stats.get('dropped_blocks', 0),
-                    'host_pulse_ms': (t_b - t_a) * 1e3}
+                    'host_pulse_ms': (t_b - t_a) * 1e3,
+                    'firmware_version': self._get_firmware_version()}
 
         self._step_save_raw(built, mag_pct, direction, folder, rep)
         fs_actual = int(built.get('fs') or fs_hz)
@@ -3390,6 +3427,7 @@ class MotorBusterNativeApp:
             'block_gaps': stats.get('block_gaps', 0),
             'dropped_blocks': stats.get('dropped_blocks', 0),
             'host_pulse_ms': (t_b - t_a) * 1e3,
+            'firmware_version': self._get_firmware_version(),
         }
         logger.info(
             f'Step run {mag_pct:g}% {direction}: blocks={len(blocks)}, '
@@ -3627,6 +3665,7 @@ class MotorBusterNativeApp:
     # --- Tap test (capture-only) ---
     _TAP_RESULT_COLUMNS = (
         'tap_index', 'onset_s', 'peak_counts', 'freq_hz', 'freq2_hz', 'damping_ratio',
+        'firmware_version',
     )
 
     def _tap_run(self, sender=None, app_data=None):
@@ -3681,6 +3720,7 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Tap test: could not create {folder}: {e}')
         self.log(f'Tap test session folder: {folder}')
+        self._query_firmware_version()
         self._write_run_info(folder, 'tap_test', {
             'capture_s': capture_s, 'fs_hz': fs_hz,
         })
@@ -3747,6 +3787,7 @@ class MotorBusterNativeApp:
                     'freq_hz': m.get('freq_hz'),
                     'freq2_hz': m.get('freq2_hz'),
                     'damping_ratio': m.get('damping_ratio'),
+                    'firmware_version': self._get_firmware_version(),
                 })
         except Exception as e:
             import traceback

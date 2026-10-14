@@ -48,6 +48,8 @@ CMD_STREAM2_STOP  = 0x0E  # stop STREAM2 block capture
 CMD_TARGET_SINE   = 0x0F  # set firmware target: freqHz = float32 bits, mag = int16 DI
 CMD_TARGET_VALUE        = 0x10  # step target value: mag = int16 DI value (does not reset mark count)
 CMD_TARGET_VALUE_BEGIN  = 0x11  # step target value; resets mark count (MARK2 phase-0 latch)
+CMD_GET_VERSION  = 0x12  # request firmware version; reply frame 1 echoes 0x12
+CMD_VERSION_GIT  = 0x13  # version reply frame 2: 4-byte git hash + dirty flag + 3 reserved
 
 # Debug stream record framing
 STREAM_SYNC = 0xCC        # stream record sync marker
@@ -190,6 +192,11 @@ def _pack_target_value_begin(value: int) -> bytes:
     return _pack_command_raw(CMD_TARGET_VALUE_BEGIN, mag_s16=int(value))
 
 
+def _pack_get_version() -> bytes:
+    '''GET_VERSION (0x12): no payload.'''
+    return _pack_command_raw(CMD_GET_VERSION)
+
+
 def _parse_stream2_block(data: bytes) -> Optional[dict]:
     '''Parse a 574-byte STREAM2 block (CRC must be validated by the caller).
 
@@ -305,6 +312,50 @@ def _parse_stream_record(data: bytes):
     return {'adc': adc, 'theta': theta, 't_us': t_us, 't_marker': t_marker}
 
 
+_BOARD_NAMES = {1: 'F411', 2: 'F407', 0: 'unknown'}
+
+
+def _parse_version_frame(data: bytes) -> Optional[dict]:
+    '''Parse a GET_VERSION reply frame (0xBB 0x12 or 0xBB 0x13).
+
+    Frame 0x12: major, minor, patch, board_id, yy, mm, dd, stream2_header_ver.
+    Frame 0x13: 4-byte git hash, dirty flag (0=clean,1=dirty,0xFF=unknown), 3 reserved.
+    '''
+    if len(data) < 10 or data[0] != RESPONSE_BYTE:
+        return None
+    cmd = data[1]
+    if cmd == CMD_GET_VERSION:
+        major, minor, patch, board_id, yy, mm, dd, hdr = data[2:10]
+        return {'cmd': cmd, 'major': major, 'minor': minor, 'patch': patch,
+                'board_id': board_id, 'build_yy': yy, 'build_mm': mm,
+                'build_dd': dd, 'stream2_header_ver': hdr}
+    if cmd == CMD_VERSION_GIT:
+        return {'cmd': cmd, 'git_raw': bytes(data[2:6]), 'dirty': data[6]}
+    return None
+
+
+def _format_version(part1: dict, part2: dict) -> dict:
+    '''Combine the two GET_VERSION frames into a structured version dict.'''
+    version = f'{part1["major"]}.{part1["minor"]}.{part1["patch"]}'
+    board_id = int(part1.get('board_id', 0))
+    board = _BOARD_NAMES.get(board_id, f'Board{board_id}')
+    build_date = (f'{2000 + int(part1["build_yy"]):04d}-'
+                  f'{int(part1["build_mm"]):02d}-{int(part1["build_dd"]):02d}')
+    git_hash = ''.join(f'{b:02X}' for b in part2['git_raw'])
+    dirty = int(part2.get('dirty', 0xFF))
+    dirty_str = {0: 'clean', 1: 'dirty', 0xFF: 'unknown'}.get(dirty, 'unknown')
+    display = f'{version} · {board} · {git_hash} · {dirty_str} · built {build_date}'
+    return {
+        'version': version,
+        'major': part1['major'], 'minor': part1['minor'], 'patch': part1['patch'],
+        'board_id': board_id, 'board': board,
+        'git_hash': git_hash, 'dirty': dirty, 'dirty_str': dirty_str,
+        'build_date': build_date,
+        'stream2_header_ver': part1['stream2_header_ver'],
+        'display': display,
+    }
+
+
 class SerialManager:
     def __init__(self):
         self._port: Optional[serial.Serial] = None
@@ -324,6 +375,13 @@ class SerialManager:
         self._stream2_block_gaps = 0
         self._stream2_dropped_blocks = 0
         self._stream2_last_block_counter = None
+
+        # GET_VERSION (0x12) reply state
+        self._version_part1 = None
+        self._version_part2 = None
+        self._version_info = None
+        self._on_version: Optional[Callable[[dict], None]] = None
+        self._version_ready = threading.Event()
 
     @property
     def is_connected(self) -> bool:
@@ -656,6 +714,11 @@ class SerialManager:
             self._buffer = self._buffer[pkt_len:]
 
     def _dispatch_response(self, packet: bytes):
+        # Version reply frames are NOT mag/phase measurements; route them to the
+        # GET_VERSION handler so they never pollute the Bode data.
+        if len(packet) >= 2 and packet[1] in (CMD_GET_VERSION, CMD_VERSION_GIT):
+            self._handle_version_frame(packet)
+            return
         parsed = _parse_response(packet)
         if parsed:
             cmd = parsed.get('cmd', 0)
@@ -671,6 +734,51 @@ class SerialManager:
                 self._on_response(parsed)
             except Exception as e:
                 logger.error(f'Response callback error: {e} (raw: {_hex(packet)})')
+
+    def _handle_version_frame(self, packet: bytes):
+        frame = _parse_version_frame(packet)
+        if frame is None:
+            logger.warning(f'Serial received: bad version frame (raw: {_hex(packet)})')
+            return
+        if frame['cmd'] == CMD_GET_VERSION:
+            self._version_part1 = frame
+        else:
+            self._version_part2 = frame
+        logger.info(f'Serial received: type=get_version frame 0x{frame["cmd"]:02X} (raw: {_hex(packet)})')
+        if self._version_part1 and self._version_part2:
+            info = _format_version(self._version_part1, self._version_part2)
+            self._version_info = info
+            if self._on_version:
+                try:
+                    self._on_version(info)
+                except Exception as e:
+                    logger.error(f'Version callback error: {e}')
+            self._version_ready.set()
+
+    def get_firmware_version(self, timeout: float = 0.5) -> Optional[dict]:
+        '''Send GET_VERSION (0x12) and wait for the two reply frames.
+
+        Returns the combined version dict, or None if no complete reply arrives
+        within timeout seconds.
+        '''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot query firmware version')
+            return None
+        self._version_part1 = None
+        self._version_part2 = None
+        self._version_info = None
+        self._version_ready.clear()
+        packet = _pack_get_version()
+        ok = self._write_packet(packet)
+        if ok:
+            logger.info(f'Serial sent: type=get_version (raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=get_version (raw: {_hex(packet)})')
+            return None
+        if not self._version_ready.wait(timeout):
+            logger.warning(f'GET_VERSION: no reply within {timeout * 1000:.0f} ms (firmware unknown)')
+            return None
+        return self._version_info
 
     def _dispatch_stream_record(self, packet: bytes):
         rec = _parse_stream_record(packet)
