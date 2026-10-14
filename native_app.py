@@ -2195,7 +2195,9 @@ class MotorBusterNativeApp:
     def _stream2_build_samples(self, blocks, nominal_freq):
         """Reconstruct per-sample (tau_s, adc, target) from STREAM2 blocks.
 
-        Returns None if no block carries a non-zero target_t0_cyc (MARK2 reference).
+        The target is reconstructed as target_a*sin(2*pi*f*tau) + target_b*cos(2*pi*f*tau)
+        (phase 0 at MARK2, matching the firmware's sinf reference).  Returns None if no
+        block carries a non-zero target_t0_cyc (MARK2 reference).
         """
         if not blocks:
             return None
@@ -2232,7 +2234,7 @@ class MotorBusterNativeApp:
                 t_cyc = (t_start + (first_index + k) * cps) & MASK
                 d = ((t_cyc - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
                 tau = d / hclk
-                target = ref_a * math.cos(omega * tau) + ref_b * math.sin(omega * tau)
+                target = ref_a * math.sin(omega * tau) + ref_b * math.cos(omega * tau)
                 tau_list.append(tau)
                 adc_list.append(adc)
                 target_list.append(target)
@@ -2246,8 +2248,8 @@ class MotorBusterNativeApp:
                 d_last = ((t_last - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
                 tau_first = d_first / hclk
                 tau_last = d_last / hclk
-                recon_first = ref_a * math.cos(omega * tau_first) + ref_b * math.sin(omega * tau_first)
-                recon_last = ref_a * math.cos(omega * tau_last) + ref_b * math.sin(omega * tau_last)
+                recon_first = ref_a * math.sin(omega * tau_first) + ref_b * math.cos(omega * tau_first)
+                recon_last = ref_a * math.sin(omega * tau_last) + ref_b * math.cos(omega * tau_last)
                 fw_first = float(blk.get('target_first', 0.0))
                 fw_last = float(blk.get('target_last', 0.0))
                 max_diff = max(max_diff, abs(recon_first - fw_first), abs(recon_last - fw_last))

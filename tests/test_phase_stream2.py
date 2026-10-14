@@ -126,13 +126,53 @@ class TestStream2BuildSamples(unittest.TestCase):
             t_cyc = (t_start + (first_index + k) * cps) & 0xFFFFFFFF
             d = ((t_cyc - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
             expected_tau = d / hclk
-            expected_target = ref_a * math.cos(2 * math.pi * F * expected_tau) \
-                + ref_b * math.sin(2 * math.pi * F * expected_tau)
+            expected_target = ref_a * math.sin(2 * math.pi * F * expected_tau) \
+                + ref_b * math.cos(2 * math.pi * F * expected_tau)
             self.assertAlmostEqual(tau[k], expected_tau, places=12)
             self.assertAlmostEqual(target[k], expected_target, places=12)
 
         # Sanity: the block genuinely crosses the 32-bit wrap.
         self.assertGreaterEqual(t_start, (1 << 32) - 10 * cps)
+
+    def test_target_sign_convention(self):
+        """The target column must be A*sin(2*pi*f*tau), not A*cos(...).
+
+        Phase 0 at MARK2 means target(tau=0) ~= 0 and rising, matching the
+        firmware's sinf reference and the legacy/STREAM2 phase convention.
+        """
+        hclk = 168000000
+        fs = 10000
+        cps = hclk // fs
+        A = 1000.0
+        ref_a, ref_b = A, 0.0      # pure sine, phase 0 at MARK2
+        t0_cyc = 5 * cps           # MARK2 lands exactly on sample index 5
+        n = 256
+        blk = {
+            'target_t0_cyc': t0_cyc,
+            'target_a': ref_a,
+            'target_b': ref_b,
+            'hclk_hz': hclk,
+            'fs': fs,
+            't_start_cyc': 0,
+            'first_index': 0,
+            'samples': list(range(n)),
+            'target_first': 0.0,
+            'target_last': 0.0,
+        }
+
+        app = object.__new__(App)
+        built = app._stream2_build_samples([blk], F)
+        tau = built['tau']
+        target = built['target']
+
+        self.assertAlmostEqual(tau[5], 0.0, places=12)    # MARK2 sample
+        self.assertAlmostEqual(target[5], 0.0, places=9)  # ~0 at tau = 0
+        self.assertGreater(target[6], 0.0)                # rising just after MARK2
+        self.assertLess(target[4], 0.0)                   # negative just before MARK2
+
+        for k in range(n):
+            expected = A * math.sin(2 * math.pi * F * tau[k])
+            self.assertAlmostEqual(target[k], expected, places=9)
 
 
 if __name__ == '__main__':
