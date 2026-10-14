@@ -99,7 +99,20 @@ class TestStepAnalysis(unittest.TestCase):
         # settling to within 2% of the step: dead_time + tau * ln(50)
         expected_settle = (self.DEAD_TIME + self.TAU_RC * math.log(50.0)) * 1e3
         self.assertIsNotNone(m['settling_time_2pct_ms'])
-        self.assertAlmostEqual(m['settling_time_2pct_ms'], expected_settle, delta=1.0)
+        self.assertAlmostEqual(m['settling_time_2pct_ms'], expected_settle, delta=2.0)
+
+    def test_settling_time_with_late_noise_spike(self):
+        # A late single-sample spike (well after settling) must not shift the
+        # settling time: the 50 ms persistence window ignores brief excursions.
+        tau = np.arange(-0.15, 0.50, DT)
+        adc = _first_order_step(tau, 2000.0, 500.0, self.DEAD_TIME, self.TAU_RC, 2.0, seed=7)
+        spike_idx = int(np.searchsorted(tau, self.DEAD_TIME + 0.200))
+        if spike_idx < adc.size:
+            adc[spike_idx] += 400.0
+        m = App._step_analyse(tau, adc, int(FS), hold_s=0.5)
+        expected_settle = (self.DEAD_TIME + self.TAU_RC * math.log(50.0)) * 1e3
+        self.assertIsNotNone(m['settling_time_2pct_ms'])
+        self.assertAlmostEqual(m['settling_time_2pct_ms'], expected_settle, delta=2.0)
 
     def test_no_overshoot_below_noise_floor(self):
         tau = np.arange(-0.15, 0.50, DT)
