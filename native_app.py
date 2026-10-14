@@ -522,6 +522,7 @@ class MotorBusterNativeApp:
         # Debug stream capture state
         self.stream_capturing = False
         self.stream_records = []
+        self.stream2_blocks = []
         self.phase_repeat_running = False
         self.phase_repeat_stop = False
         self.phase_sweep_running = False
@@ -1799,6 +1800,10 @@ class MotorBusterNativeApp:
         if getattr(self, 'stream_capturing', False):
             self.stream_records.append(rec)
 
+    def _on_stream2_block(self, block: dict):
+        """Accumulate a STREAM2 block (called from the serial read thread)."""
+        self.stream2_blocks.append(block)
+
     def _start_phase_capture(self):
         """Start ADC capture for the phase experiment (no tone is played)."""
         if getattr(self, 'stream_capturing', False):
@@ -1845,6 +1850,7 @@ class MotorBusterNativeApp:
         'phase_deg', 'phase_deg_m2', 'resid_rms_counts', 'n_records', 'mean_dt_us',
         'update_rate_hz_mean', 'update_interval_ms_std', 'update_interval_ms_max',
         'host_pulse_ms', 'host_play_ms', 'magnitude_pct',
+        'acquisition_mode', 'fs_hz', 'crc_errors', 'block_gaps', 'dropped_blocks',
     )
 
     def _phase_repeat_run(self, sender=None, app_data=None):
@@ -1874,12 +1880,16 @@ class MotorBusterNativeApp:
         rest_s = dpg.get_value('phase_repeat_rest') if dpg.does_item_exist('phase_repeat_rest') else 2.0
         magnitude_pct = dpg.get_value('phase_repeat_magnitude') if dpg.does_item_exist('phase_repeat_magnitude') else 25
         effect = dpg.get_value('phase_repeat_effect') if dpg.does_item_exist('phase_repeat_effect') else 'Periodic sine'
+        acq = dpg.get_value('phase_repeat_acquisition') if dpg.does_item_exist('phase_repeat_acquisition') else 'Legacy (0xCC)'
+        rate_khz = dpg.get_value('phase_repeat_stream2_rate') if dpg.does_item_exist('phase_repeat_stream2_rate') else '10'
 
         freq = max(1.0, min(500.0, float(freq)))
         capture_s = max(1.0, float(capture_s))
         repeats = max(1, min(100, int(repeats)))
         rest_s = max(0.0, float(rest_s))
         effect_mode = 'constant' if 'constant' in str(effect).lower() else 'sine'
+        acquisition_mode = 'stream2' if 'stream2' in str(acq).lower() else 'legacy'
+        fs_hz = int(float(str(rate_khz))) * 1000
 
         self.phase_repeat_running = True
         self.phase_repeat_stop = False
@@ -1895,14 +1905,16 @@ class MotorBusterNativeApp:
         self._phase_repeat_set_status('Status: starting...')
 
         threading.Thread(target=self._phase_repeat_worker,
-                         args=(freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode),
+                         args=(freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode,
+                               acquisition_mode, fs_hz),
                          daemon=True).start()
 
     def _phase_repeat_stop(self, sender=None, app_data=None):
         self.phase_repeat_stop = True
         self._phase_repeat_set_status('Status: stopping...')
 
-    def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode='sine'):
+    def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode='sine',
+                             acquisition_mode='legacy', fs_hz=10000):
         base = os.path.dirname(os.path.abspath(__file__))
         folder = os.path.join(base, 'phase_runs')
         try:
@@ -1927,7 +1939,8 @@ class MotorBusterNativeApp:
                 self._phase_repeat_set_status(f'Run {run_idx}/{repeats}...')
                 self._phase_repeat_set_progress((run_idx - 1) / max(1, repeats))
                 try:
-                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode)
+                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode,
+                                                      acquisition_mode, fs_hz)
                     results.append(row)
                     self._phase_repeat_append_result(results_path, row)
                     self.log(self._phase_repeat_row_log(row))
@@ -1959,7 +1972,11 @@ class MotorBusterNativeApp:
             if dpg.does_item_exist('btn_phase_sweep_run'):
                 dpg.configure_item('btn_phase_sweep_run', enabled=True)
 
-    def _phase_repeat_run_once(self, freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode='sine'):
+    def _phase_repeat_run_once(self, freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode='sine',
+                               acquisition_mode='legacy', fs_hz=10000):
+        if acquisition_mode == 'stream2':
+            return self._phase_repeat_run_once_stream2(freq, capture_s, run_idx, magnitude_pct, ts, folder,
+                                                       effect_mode, fs_hz)
         t_a = t_b = t_c = 0.0
         updates = []
         try:
@@ -2053,9 +2070,112 @@ class MotorBusterNativeApp:
             'host_pulse_ms': (t_b - t_a) * 1e3,
             'host_play_ms': (t_c - t_b) * 1e3,
             'magnitude_pct': magnitude_pct,
+            'acquisition_mode': 'legacy',
+            'fs_hz': None,
+            'crc_errors': None,
+            'block_gaps': None,
+            'dropped_blocks': None,
         }
 
-    def _phase_find_markers(self, records):
+    def _phase_repeat_run_once_stream2(self, freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode, fs_hz):
+        """One STREAM2 acquisition run.
+
+        Sequence: STREAM2_START -> wait 0.3 s -> TARGET_SINE -> MARK1 ->
+        play_descriptor -> MARK2 -> capture -> STREAM2_STOP.
+        """
+        t_a = t_b = t_c = 0.0
+        try:
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+
+            amplitude = int(32767 * magnitude_pct / 100.0)
+            di_mag = self._s16_to_di(amplitude)
+            duration_us = int((capture_s + 1.0) * 1e6)
+
+            self.stream2_blocks = []
+            serial_manager.reset_stream2_stats()
+            serial_manager.set_stream2_callback(self._on_stream2_block)
+
+            serial_manager.send_stream2_start(int(fs_hz))
+            time.sleep(0.3)
+            serial_manager.send_target_sine(float(freq), di_mag)
+
+            t_a = time.perf_counter()
+            serial_manager.send_mark()  # MARK1 (ignored by STREAM2 analysis)
+            t_b = time.perf_counter()
+
+            # STREAM2 uses the firmware target reference, so excite the wheelbase with
+            # a periodic sine matching TARGET_SINE (effect_mode 'constant' is legacy-only).
+            engine.play_descriptor({
+                'type': 'periodic_sine',
+                'magnitude': di_mag,
+                'frequency_hz': float(freq),
+                'length_us': duration_us,
+                'magnitude_unit': 'di',
+            })
+            serial_manager.send_mark()  # MARK2 (the phase reference)
+            t_c = time.perf_counter()
+
+            deadline = time.time() + capture_s
+            while time.time() < deadline and not self._phase_stop_requested():
+                time.sleep(0.02)
+        finally:
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+            serial_manager.send_stream2_stop()
+            serial_manager.set_stream2_callback(None)
+            time.sleep(0.2)
+
+        blocks = list(self.stream2_blocks)
+        stats = serial_manager.get_stream2_stats()
+        built = self._stream2_build_samples(blocks, freq)
+        n_records = 0
+        if built is None:
+            self.log(f'Phase repeat run {run_idx} (STREAM2): no valid MARK2 reference, run invalid')
+            analysis = {'f_fit_hz': None, 'amp_counts': None, 'phase_deg_m2': None,
+                        'resid_rms_counts': None, 'n_records': 0}
+        else:
+            n_records = len(built['adc'])
+            self._phase_repeat_save_raw_stream2(built, freq, run_idx, ts, folder)
+            if built.get('crosscheck_max_diff') is not None:
+                self.log(f'Phase repeat run {run_idx} (STREAM2): target cross-check '
+                         f'max |recon - fw| = {built["crosscheck_max_diff"]:.6f}')
+            analysis = self._phase_repeat_analyse_stream2(built['tau'], built['adc'], freq)
+
+        return {
+            'run': run_idx,
+            'marker_valid': bool(analysis.get('f_fit_hz') is not None),
+            'f_fit_hz': analysis.get('f_fit_hz'),
+            'amp_counts': analysis.get('amp_counts'),
+            'marker1_ms_into_capture': None,
+            'marker2_ms_into_capture': None,
+            'play_window_ms': None,
+            'marker_changed': None,
+            'marker_value': None,
+            'phase_deg': analysis.get('phase_deg_m2'),
+            'phase_deg_m2': analysis.get('phase_deg_m2'),
+            'resid_rms_counts': analysis.get('resid_rms_counts'),
+            'n_records': n_records,
+            'mean_dt_us': (1e6 / float(fs_hz)) if fs_hz else None,
+            'update_rate_hz_mean': None,
+            'update_interval_ms_std': None,
+            'update_interval_ms_max': None,
+            'host_pulse_ms': (t_b - t_a) * 1e3,
+            'host_play_ms': (t_c - t_b) * 1e3,
+            'magnitude_pct': magnitude_pct,
+            'acquisition_mode': 'stream2',
+            'fs_hz': int(fs_hz),
+            'crc_errors': stats.get('crc_errors', 0),
+            'block_gaps': stats.get('block_gaps', 0),
+            'dropped_blocks': stats.get('dropped_blocks', 0),
+        }
+
+    @staticmethod
+    def _phase_find_markers(records):
         if not records:
             return None, None
         leftover = records[0].get('t_marker', 0)
@@ -2071,6 +2191,90 @@ class MotorBusterNativeApp:
                     marker2 = v
                     break
         return marker1, marker2
+
+    def _stream2_build_samples(self, blocks, nominal_freq):
+        """Reconstruct per-sample (tau_s, adc, target) from STREAM2 blocks.
+
+        Returns None if no block carries a non-zero target_t0_cyc (MARK2 reference).
+        """
+        if not blocks:
+            return None
+
+        MASK = 0xFFFFFFFF
+        t0_cyc = None
+        ref_a = ref_b = None
+        hclk = None
+        fs = None
+        for blk in blocks:
+            if int(blk.get('target_t0_cyc', 0)) != 0:
+                t0_cyc = int(blk['target_t0_cyc'])
+                ref_a = float(blk.get('target_a', 0.0))
+                ref_b = float(blk.get('target_b', 0.0))
+                hclk = int(blk.get('hclk_hz', 0))
+                fs = int(blk.get('fs', 0))
+                break
+        if t0_cyc is None or not hclk:
+            return None
+
+        omega = 2.0 * math.pi * float(nominal_freq)
+        tau_list = []
+        adc_list = []
+        target_list = []
+        max_diff = 0.0
+        for blk in blocks:
+            t_start = int(blk.get('t_start_cyc', 0))
+            first_index = int(blk.get('first_index', 0))
+            blk_hclk = int(blk.get('hclk_hz', hclk))
+            blk_fs = int(blk.get('fs', fs))
+            blk_t0 = int(blk.get('target_t0_cyc', 0))
+            cps = (blk_hclk // blk_fs) if (blk_hclk and blk_fs) else 0
+            for k, adc in enumerate(blk.get('samples', [])):
+                t_cyc = (t_start + (first_index + k) * cps) & MASK
+                d = ((t_cyc - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
+                tau = d / hclk
+                target = ref_a * math.cos(omega * tau) + ref_b * math.sin(omega * tau)
+                tau_list.append(tau)
+                adc_list.append(adc)
+                target_list.append(target)
+            # Cross-check this block's firmware target_first/target_last (post-MARK2 blocks).
+            if blk_t0 != 0 and blk_hclk and blk_fs:
+                n_s = len(blk.get('samples', []))
+                cps_b = blk_hclk // blk_fs
+                t_first = (t_start + first_index * cps_b) & MASK
+                t_last = (t_start + (first_index + n_s - 1) * cps_b) & MASK
+                d_first = ((t_first - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
+                d_last = ((t_last - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
+                tau_first = d_first / hclk
+                tau_last = d_last / hclk
+                recon_first = ref_a * math.cos(omega * tau_first) + ref_b * math.sin(omega * tau_first)
+                recon_last = ref_a * math.cos(omega * tau_last) + ref_b * math.sin(omega * tau_last)
+                fw_first = float(blk.get('target_first', 0.0))
+                fw_last = float(blk.get('target_last', 0.0))
+                max_diff = max(max_diff, abs(recon_first - fw_first), abs(recon_last - fw_last))
+        return {
+            'tau': tau_list,
+            'adc': adc_list,
+            'target': target_list,
+            'fs': fs,
+            'hclk_hz': hclk,
+            'target_t0_cyc': t0_cyc,
+            'crosscheck_max_diff': max_diff,
+        }
+
+    def _phase_repeat_save_raw_stream2(self, built, freq, run_idx, ts, folder):
+        tau = built['tau']
+        adc = built['adc']
+        target = built['target']
+        path = os.path.join(folder, f'{ts}_{freq:g}Hz_run{run_idx:02d}_stream2.csv')
+        try:
+            with open(path, 'w', newline='') as f:
+                f.write('sample_index,tau_s,adc,target\n')
+                for i in range(len(adc)):
+                    f.write(f'{i},{tau[i]:.9f},{adc[i]},{target[i]:.6f}\n')
+            self.log(f'Phase repeat run {run_idx} (STREAM2): raw saved to {path} ({len(adc)} samples)')
+        except Exception as e:
+            self.log(f'Phase repeat run {run_idx} (STREAM2): raw save failed: {e}')
+        return path
 
     def _win_timer_begin(self):
         try:
@@ -2160,7 +2364,8 @@ class MotorBusterNativeApp:
             self.log(f'Phase repeat run {run_idx}: raw save failed: {e}')
         return path
 
-    def _phase_repeat_analyse(self, records, nominal_freq):
+    @staticmethod
+    def _phase_repeat_analyse(records, nominal_freq):
         out = {'marker_valid': False, 'tm': 0.0, 'tm2': None, 'marker1_ms': None,
                'marker2_ms': None, 'play_window_ms': None, 'mean_dt_us': 0.0}
         if not records:
@@ -2182,7 +2387,7 @@ class MotorBusterNativeApp:
         t = np.array([(x - t0) / 1e6 for x in t_us], dtype=float)
         t_end = float(t[-1])
 
-        marker1_us, marker2_us = self._phase_find_markers(records)
+        marker1_us, marker2_us = MotorBusterNativeApp._phase_find_markers(records)
 
         def to_s(mus):
             if mus is None:
@@ -2259,6 +2464,70 @@ class MotorBusterNativeApp:
 
         return out
 
+    @staticmethod
+    def _phase_repeat_analyse_stream2(tau, adc, nominal_freq):
+        '''Fit sine + DC + drift on the STREAM2 time axis (tau_s relative to MARK2).
+
+        Identical fit to _phase_repeat_analyse (free +/-3% frequency window, lstsq on
+        [cos, sin, 1, t]), but the time origin is target_t0_cyc (MARK2), so the phase
+        is directly the sine phase at MARK2 and matches legacy phase_deg_m2.
+        '''
+        out = {'f_fit_hz': None, 'amp_counts': None, 'phase_deg_m2': None,
+               'resid_rms_counts': None, 'n_records': 0}
+        tau = np.asarray(tau, dtype=float)
+        adc = np.asarray(adc, dtype=float)
+        out['n_records'] = int(tau.size)
+        if tau.size < 8:
+            return out
+
+        mask = tau >= 0.5
+        if int(np.count_nonzero(mask)) < 8:
+            return out
+
+        t_win = tau[mask]
+        adc_win = adc[mask]
+        n_win = int(t_win.size)
+
+        f_lo = nominal_freq * 0.97
+        f_hi = nominal_freq * 1.03
+        f_candidates = np.arange(f_lo, f_hi + 1e-12, 0.002)
+
+        best_f = None
+        best_rss = float('inf')
+        best_coef = None
+        for f in f_candidates:
+            A = np.column_stack([
+                np.cos(2.0 * np.pi * f * t_win),
+                np.sin(2.0 * np.pi * f * t_win),
+                np.ones(n_win),
+                t_win,
+            ])
+            coef, _, _, _ = np.linalg.lstsq(A, adc_win, rcond=None)
+            resid = adc_win - A @ coef
+            rss = float(np.dot(resid, resid))
+            if rss < best_rss:
+                best_rss = rss
+                best_f = float(f)
+                best_coef = coef
+
+        if best_coef is None:
+            return out
+
+        a = float(best_coef[0])
+        b = float(best_coef[1])
+        amp = float(math.hypot(a, b))
+        psi = math.atan2(b, a)
+        # Reference (MARK2) is tau = 0, so phase = 2*pi*f*0 - psi + pi/2 = pi/2 - psi.
+        phase = math.degrees(math.pi / 2.0 - psi)
+        phase = (phase + 180.0) % 360.0 - 180.0
+        resid_rms = float(math.sqrt(best_rss / n_win))
+
+        out['f_fit_hz'] = best_f
+        out['amp_counts'] = amp
+        out['phase_deg_m2'] = phase
+        out['resid_rms_counts'] = resid_rms
+        return out
+
     def _phase_repeat_summary(self, results):
         valid = [r for r in results if r.get('phase_deg') is not None]
         n_valid = len(valid)
@@ -2315,6 +2584,13 @@ class MotorBusterNativeApp:
     def _phase_repeat_row_log(self, row):
         m1 = row.get('marker1_ms_into_capture')
         m1_s = f'{m1:.1f}' if m1 is not None else '?'
+        if row.get('acquisition_mode') == 'stream2':
+            extra = (f', crc_err={row.get("crc_errors")}, gaps={row.get("block_gaps")}, '
+                     f'dropped={row.get("dropped_blocks")}')
+            if row.get('marker_valid'):
+                return (f'Phase repeat run {row["run"]} (STREAM2): valid, f={row["f_fit_hz"]:.3f} Hz, '
+                        f'phase={row["phase_deg"]:.2f} deg, amp={row["amp_counts"]:.1f}{extra}')
+            return f'Phase repeat run {row["run"]} (STREAM2): invalid (n={row["n_records"]}){extra}'
         if row.get('marker_valid'):
             return (f'Phase repeat run {row["run"]}: valid, f={row["f_fit_hz"]:.3f} Hz, '
                     f'phase={row["phase_deg"]:.2f} deg, amp={row["amp_counts"]:.1f}, '
@@ -2353,6 +2629,7 @@ class MotorBusterNativeApp:
         'circ_mean_deg', 'circ_std_deg', 'sem_deg', 'phase_unwrapped_deg',
         'circ_mean_deg_m2', 'circ_std_deg_m2', 'play_window_ms_mean',
         'phase_unwrapped_deg_m2', 'magnitude_pct',
+        'acquisition_mode', 'fs_hz', 'crc_errors', 'block_gaps', 'dropped_blocks',
     )
 
     def _phase_stop_requested(self):
@@ -2409,6 +2686,8 @@ class MotorBusterNativeApp:
         rest_s = dpg.get_value('phase_sweep_rest') if dpg.does_item_exist('phase_sweep_rest') else 1.0
         magnitude_pct = dpg.get_value('phase_sweep_magnitude') if dpg.does_item_exist('phase_sweep_magnitude') else 25
         effect = dpg.get_value('phase_sweep_effect') if dpg.does_item_exist('phase_sweep_effect') else 'Periodic sine'
+        acq = dpg.get_value('phase_sweep_acquisition') if dpg.does_item_exist('phase_sweep_acquisition') else 'Legacy (0xCC)'
+        rate_khz = dpg.get_value('phase_sweep_stream2_rate') if dpg.does_item_exist('phase_sweep_stream2_rate') else '10'
         freq_list_text = dpg.get_value('phase_sweep_freq_list') if dpg.does_item_exist('phase_sweep_freq_list') else ''
 
         start_hz = max(1.0, float(start_hz))
@@ -2418,6 +2697,8 @@ class MotorBusterNativeApp:
         capture_s = max(1.0, float(capture_s))
         rest_s = max(0.0, float(rest_s))
         effect_mode = 'constant' if 'constant' in str(effect).lower() else 'sine'
+        acquisition_mode = 'stream2' if 'stream2' in str(acq).lower() else 'legacy'
+        fs_hz = int(float(str(rate_khz))) * 1000
 
         freq_list = self._parse_freq_list(freq_list_text)
         if freq_list:
@@ -2440,14 +2721,16 @@ class MotorBusterNativeApp:
         self._phase_sweep_set_status('Status: starting...')
 
         threading.Thread(target=self._phase_sweep_worker,
-                         args=(freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode),
+                         args=(freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode,
+                               acquisition_mode, fs_hz),
                          daemon=True).start()
 
     def _phase_sweep_stop(self, sender=None, app_data=None):
         self.phase_sweep_stop = True
         self._phase_sweep_set_status('Status: stopping after current run...')
 
-    def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode='sine'):
+    def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode='sine',
+                            acquisition_mode='legacy', fs_hz=10000):
         base = os.path.dirname(os.path.abspath(__file__))
         folder = os.path.join(base, 'phase_runs')
         try:
@@ -2481,7 +2764,8 @@ class MotorBusterNativeApp:
                         f'Freq {freq:g} Hz, run {run_idx}/{repeats}, '
                         f'elapsed {time.time() - start_time:.0f}s...')
                     try:
-                        row = self._phase_repeat_run_once(freq, cap, run_idx, magnitude_pct, ts, folder, effect_mode)
+                        row = self._phase_repeat_run_once(freq, cap, run_idx, magnitude_pct, ts, folder, effect_mode,
+                                                          acquisition_mode, fs_hz)
                         run_results.append(row)
                     except Exception as e:
                         import traceback
@@ -2495,7 +2779,7 @@ class MotorBusterNativeApp:
                         self._phase_repeat_interruptible_sleep(rest_s)
 
                 if run_results:
-                    sweep_row = self._phase_sweep_summarize(freq, run_results, magnitude_pct)
+                    sweep_row = self._phase_sweep_summarize(freq, run_results, magnitude_pct, acquisition_mode, fs_hz)
                     sweep_rows.append(sweep_row)
                     self.log(f'Phase sweep {freq:g} Hz: '
                              f'{sweep_row["valid_runs"]}/{sweep_row["total_runs"]} valid')
@@ -2535,10 +2819,22 @@ class MotorBusterNativeApp:
             f'Phase sweep done: {len(sweep_rows)} freqs, {elapsed_total:.0f}s')
         self.log(f'[Phase sweep] complete, results in {results_path}')
 
-    def _phase_sweep_summarize(self, freq, run_results, magnitude_pct=None):
+    def _phase_sweep_summarize(self, freq, run_results, magnitude_pct=None, acquisition_mode='legacy', fs_hz=None):
         valid = [r for r in run_results if r.get('phase_deg') is not None]
         n_valid = len(valid)
         n_total = len(run_results)
+        crc_sum = None
+        gap_sum = None
+        drop_max = None
+        crc_vals = [r.get('crc_errors') for r in run_results if r.get('crc_errors') is not None]
+        gap_vals = [r.get('block_gaps') for r in run_results if r.get('block_gaps') is not None]
+        drop_vals = [r.get('dropped_blocks') for r in run_results if r.get('dropped_blocks') is not None]
+        if crc_vals:
+            crc_sum = int(sum(crc_vals))
+        if gap_vals:
+            gap_sum = int(sum(gap_vals))
+        if drop_vals:
+            drop_max = int(max(drop_vals))
         row = {
             'freq_hz': freq,
             'f_fit_mean_hz': None,
@@ -2554,6 +2850,11 @@ class MotorBusterNativeApp:
             'play_window_ms_mean': None,
             'phase_unwrapped_deg_m2': None,
             'magnitude_pct': magnitude_pct,
+            'acquisition_mode': acquisition_mode,
+            'fs_hz': fs_hz,
+            'crc_errors': crc_sum,
+            'block_gaps': gap_sum,
+            'dropped_blocks': drop_max,
         }
         if n_valid:
             row['f_fit_mean_hz'] = float(np.mean([r['f_fit_hz'] for r in valid]))
