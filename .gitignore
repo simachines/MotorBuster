@@ -15,3 +15,6 @@ manual_log.txt
 py_compile_error.txt
 motorbuster_engine.log
 phase_runs/
+phase_repeatability_runs/
+phase_sweep_runs/
+step_response_runs/

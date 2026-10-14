@@ -1959,7 +1959,7 @@ class MotorBusterNativeApp:
                              acquisition_mode='legacy', fs_hz=10000):
         base = os.path.dirname(os.path.abspath(__file__))
         ts = time.strftime('%Y%m%d_%H%M%S')
-        folder = os.path.join(base, 'phase_runs', 'phase_repeatability', ts)
+        folder = os.path.join(base, 'phase_repeatability_runs', ts)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
@@ -2786,7 +2786,7 @@ class MotorBusterNativeApp:
                             acquisition_mode='legacy', fs_hz=10000):
         base = os.path.dirname(os.path.abspath(__file__))
         ts = time.strftime('%Y%m%d_%H%M%S')
-        folder = os.path.join(base, 'phase_runs', 'phase_sweep', ts)
+        folder = os.path.join(base, 'phase_sweep_runs', ts)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
@@ -2998,7 +2998,7 @@ class MotorBusterNativeApp:
         'baseline_noise_rms', 'dead_time_ms', 't50_ms', 't90_ms',
         'rise_time_10_90_ms', 'max_slope_counts_per_ms', 'avg_slew_counts_per_ms',
         'max_slope_Nm_per_ms', 'avg_slew_Nm_per_ms',
-        'overshoot_pct', 'settling_time_2pct_ms', 'settling_band_used',
+        'overshoot_pct', 'overshoot_noise_floor_pct', 'settling_time_2pct_ms', 'settling_band_used',
         'crc_errors', 'block_gaps', 'dropped_blocks', 'host_pulse_ms',
     )
 
@@ -3104,7 +3104,7 @@ class MotorBusterNativeApp:
     def _step_worker(self, mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz, counts_per_nm=38.0):
         base = os.path.dirname(os.path.abspath(__file__))
         ts = time.strftime('%Y%m%d_%H%M%S')
-        folder = os.path.join(base, 'phase_runs', 'step_response', ts)
+        folder = os.path.join(base, 'step_response_runs', ts)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
@@ -3245,6 +3245,7 @@ class MotorBusterNativeApp:
             'max_slope_Nm_per_ms': m.get('max_slope_Nm_per_ms'),
             'avg_slew_Nm_per_ms': m.get('avg_slew_Nm_per_ms'),
             'overshoot_pct': m.get('overshoot_pct'),
+            'overshoot_noise_floor_pct': m.get('overshoot_noise_floor_pct'),
             'settling_time_2pct_ms': m.get('settling_time_2pct_ms'),
             'settling_band_used': m.get('settling_band_used'),
             'crc_errors': stats.get('crc_errors', 0),
@@ -3305,12 +3306,17 @@ class MotorBusterNativeApp:
                'rise_time_10_90_ms': None, 'max_slope_counts_per_ms': None,
                'avg_slew_counts_per_ms': None, 'max_slope_Nm_per_ms': None,
                'avg_slew_Nm_per_ms': None, 'overshoot_pct': None,
+               'overshoot_noise_floor_pct': None,
                'settling_time_2pct_ms': None, 'settling_band_used': None}
         if tau.size < 40:
             return out
 
         win = max(3, int(round(fs * 0.0005)) | 1)
         adc_smooth = np.convolve(adc, np.ones(win) / float(win), mode='same')
+
+        # 2 ms centered moving average for overshoot (more noise rejection).
+        win2 = max(2, int(round(fs * 0.002)))
+        adc_smooth2 = np.convolve(adc, np.ones(win2) / float(win2), mode='same')
 
         bmask = (tau >= -0.060) & (tau <= -0.010)
         if int(np.count_nonzero(bmask)) < 5:
@@ -3374,7 +3380,9 @@ class MotorBusterNativeApp:
             slopes = (windows @ lin) / denom  # counts per sample
             slope_counts_per_ms = slopes / (dt * 1000.0)
             centers = tau[n // 2:n // 2 + slopes.size]
-            mask = centers >= 0.0
+            lo = (t10 - 0.001) if t10 is not None else -np.inf
+            hi = t90 if t90 is not None else np.inf
+            mask = (centers >= lo) & (centers <= hi)
             if np.any(mask):
                 out['max_slope_counts_per_ms'] = float(np.max(np.abs(slope_counts_per_ms[mask])))
 
@@ -3388,14 +3396,15 @@ class MotorBusterNativeApp:
             if out['avg_slew_counts_per_ms'] is not None:
                 out['avg_slew_Nm_per_ms'] = out['avg_slew_counts_per_ms'] / counts_per_nm
 
-        # Overshoot and settling on the smoothed signal, before the final window.
+        # Overshoot on the 2 ms smoothed signal, before the final window.
         pre_final = (tau >= 0.0) & (tau < (hold_s - 0.100))
-        post_smooth = adc_smooth[pre_final]
-        if post_smooth.size > 0:
+        post_smooth2 = adc_smooth2[pre_final]
+        if post_smooth2.size > 0:
             if sign > 0:
-                out['overshoot_pct'] = (float(np.max(post_smooth)) - final) / step_mag * 100.0
+                out['overshoot_pct'] = (float(np.max(post_smooth2)) - final) / step_mag * 100.0
             else:
-                out['overshoot_pct'] = (final - float(np.min(post_smooth))) / step_mag * 100.0
+                out['overshoot_pct'] = (final - float(np.min(post_smooth2))) / step_mag * 100.0
+        out['overshoot_noise_floor_pct'] = 3.0 * noise_rms / math.sqrt(win2) / step_mag * 100.0
 
         band_2pct = 0.02 * step_mag
         band_noise = 4.0 * smooth_noise_rms
@@ -3427,7 +3436,7 @@ class MotorBusterNativeApp:
                         'dead_time_ms', 't50_ms', 't90_ms', 'rise_time_10_90_ms',
                         'max_slope_counts_per_ms', 'avg_slew_counts_per_ms',
                         'max_slope_Nm_per_ms', 'avg_slew_Nm_per_ms',
-                        'overshoot_pct', 'settling_time_2pct_ms']
+                        'overshoot_pct', 'overshoot_noise_floor_pct', 'settling_time_2pct_ms']
         groups = {}
         for r in rows:
             groups.setdefault((r.get('magnitude_pct'), r.get('direction')), []).append(r)

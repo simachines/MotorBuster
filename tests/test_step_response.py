@@ -34,6 +34,19 @@ def _first_order_step(tau, baseline, step, dead_time, tau_rc, noise_rms, seed=0)
     return y
 
 
+def _damped_step(tau, baseline, step, dead_time, zeta, omega_n, noise_rms, seed=0):
+    """Synthetic underdamped second-order step (zeta < 1), plus Gaussian noise."""
+    rng = np.random.default_rng(seed)
+    y = np.full_like(tau, float(baseline))
+    t = tau - dead_time
+    mask = t >= 0.0
+    wd = omega_n * math.sqrt(1.0 - zeta * zeta)
+    y[mask] = baseline + step * (1.0 - np.exp(-zeta * omega_n * t[mask]) *
+                                 (np.cos(wd * t[mask]) + (zeta / math.sqrt(1.0 - zeta * zeta)) * np.sin(wd * t[mask])))
+    y += rng.normal(0.0, noise_rms, size=tau.shape)
+    return y
+
+
 class TestStepAnalysis(unittest.TestCase):
     DEAD_TIME = 0.008    # 8 ms pure delay
     TAU_RC = 0.010       # 10 ms first-order time constant
@@ -87,6 +100,26 @@ class TestStepAnalysis(unittest.TestCase):
         expected_settle = (self.DEAD_TIME + self.TAU_RC * math.log(50.0)) * 1e3
         self.assertIsNotNone(m['settling_time_2pct_ms'])
         self.assertAlmostEqual(m['settling_time_2pct_ms'], expected_settle, delta=1.0)
+
+    def test_no_overshoot_below_noise_floor(self):
+        tau = np.arange(-0.15, 0.50, DT)
+        noise_rms = 6.6
+        step = 104.0
+        adc = _first_order_step(tau, 2000.0, step, self.DEAD_TIME, self.TAU_RC, noise_rms, seed=0)
+        m = App._step_analyse(tau, adc, int(FS), hold_s=0.5)
+        self.assertIsNotNone(m['overshoot_pct'])
+        self.assertIsNotNone(m['overshoot_noise_floor_pct'])
+        self.assertLessEqual(m['overshoot_pct'], m['overshoot_noise_floor_pct'])
+
+    def test_damped_step_overshoot(self):
+        tau = np.arange(-0.15, 0.50, DT)
+        zeta = 0.349          # ~31% peak overshoot
+        omega_n = 2.0 * math.pi * 20.0
+        adc = _damped_step(tau, 2000.0, 200.0, self.DEAD_TIME, zeta, omega_n, 0.0, seed=0)
+        m = App._step_analyse(tau, adc, int(FS), hold_s=0.5)
+        self.assertIsNotNone(m['overshoot_pct'])
+        self.assertGreaterEqual(m['overshoot_pct'], 25.0)
+        self.assertLessEqual(m['overshoot_pct'], 33.0)
 
 
 class TestStepResultsIO(unittest.TestCase):
