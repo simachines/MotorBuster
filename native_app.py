@@ -1585,6 +1585,9 @@ class MotorBusterNativeApp:
             with dpg.group(horizontal=True):
                 dpg.add_text("STREAM2 rate (kHz):")
                 dpg.add_combo(tag="step_stream2_rate", width=60, items=["5", "10", "20"], default_value="10")
+                dpg.add_spacer(width=10)
+                dpg.add_text("Counts per Nm:")
+                dpg.add_input_float(tag="step_counts_per_nm", default_value=38.0, width=70, min_value=0.1, max_value=10000.0, step=0)
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Run step test", tag="btn_step_run", width=130, callback=self._step_run)
                 dpg.add_button(label="Stop step test", tag="btn_step_stop", width=130, enabled=False, callback=self._step_stop)
@@ -2993,7 +2996,8 @@ class MotorBusterNativeApp:
     _STEP_RESULT_COLUMNS = (
         'magnitude_pct', 'direction', 'baseline_counts', 'final_counts',
         'baseline_noise_rms', 'dead_time_ms', 't50_ms', 't90_ms',
-        'rise_time_10_90_ms', 'max_slope_counts_per_ms', 'max_slope_smooth_counts_per_ms',
+        'rise_time_10_90_ms', 'max_slope_counts_per_ms', 'avg_slew_counts_per_ms',
+        'max_slope_Nm_per_ms', 'avg_slew_Nm_per_ms',
         'overshoot_pct', 'settling_time_2pct_ms', 'settling_band_used',
         'crc_errors', 'block_gaps', 'dropped_blocks', 'host_pulse_ms',
     )
@@ -3059,10 +3063,12 @@ class MotorBusterNativeApp:
         hold_ms = int(dpg.get_value('step_hold_ms') if dpg.does_item_exist('step_hold_ms') else 500)
         rest_s = float(dpg.get_value('step_rest') if dpg.does_item_exist('step_rest') else 1.0)
         rate_khz = dpg.get_value('step_stream2_rate') if dpg.does_item_exist('step_stream2_rate') else '10'
+        counts_per_nm = float(dpg.get_value('step_counts_per_nm') if dpg.does_item_exist('step_counts_per_nm') else 38.0)
         repeats = max(1, min(100, int(repeats)))
         baseline_ms = max(100, min(2000, int(baseline_ms)))
         hold_ms = max(100, min(5000, int(hold_ms)))
         rest_s = max(0.0, float(rest_s))
+        counts_per_nm = max(0.1, float(counts_per_nm))
         fs_hz = int(float(str(rate_khz))) * 1000
 
         self.step_running = True
@@ -3075,7 +3081,7 @@ class MotorBusterNativeApp:
             dpg.set_value('step_progress', 0.0)
         self._step_set_status('Status: starting...')
         threading.Thread(target=self._step_worker,
-                         args=(mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz),
+                         args=(mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz, counts_per_nm),
                          daemon=True).start()
 
     def _step_stop(self, sender=None, app_data=None):
@@ -3095,7 +3101,7 @@ class MotorBusterNativeApp:
         while time.time() < deadline and not self.step_stop:
             time.sleep(0.02)
 
-    def _step_worker(self, mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz):
+    def _step_worker(self, mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz, counts_per_nm=38.0):
         base = os.path.dirname(os.path.abspath(__file__))
         ts = time.strftime('%Y%m%d_%H%M%S')
         folder = os.path.join(base, 'phase_runs', 'step_response', ts)
@@ -3129,7 +3135,7 @@ class MotorBusterNativeApp:
                         self._step_set_status(f'{mag_pct:g}% {label} rep {rep}/{n_rep}...')
                         try:
                             row = self._step_run_once(mag_pct, label, baseline_di, step_di, folder, fs_hz,
-                                                      baseline_ms, hold_ms)
+                                                      baseline_ms, hold_ms, counts_per_nm)
                         except Exception as e:
                             import traceback
                             self.log(f'Step {mag_pct:g}% {label} rep {rep} failed: {e}')
@@ -3179,7 +3185,7 @@ class MotorBusterNativeApp:
             self.log(f'Step test: could not append result row: {e}')
 
     def _step_run_once(self, mag_pct, direction, baseline_di, step_di, folder, fs_hz,
-                       baseline_ms=150, hold_ms=500):
+                       baseline_ms=150, hold_ms=500, counts_per_nm=38.0):
         t_a = t_b = 0.0
         baseline_s = baseline_ms / 1000.0
         hold_s = hold_ms / 1000.0
@@ -3226,7 +3232,7 @@ class MotorBusterNativeApp:
 
         self._step_save_raw(built, mag_pct, direction, folder)
         fs_actual = int(built.get('fs') or fs_hz)
-        m = self._step_analyse(built['tau'], built['adc'], fs_actual, hold_s=hold_s)
+        m = self._step_analyse(built['tau'], built['adc'], fs_actual, hold_s=hold_s, counts_per_nm=counts_per_nm)
         row = {
             'magnitude_pct': mag_pct, 'direction': direction,
             'baseline_counts': m.get('baseline_counts'),
@@ -3235,7 +3241,9 @@ class MotorBusterNativeApp:
             'dead_time_ms': m.get('dead_time_ms'), 't50_ms': m.get('t50_ms'),
             't90_ms': m.get('t90_ms'), 'rise_time_10_90_ms': m.get('rise_time_10_90_ms'),
             'max_slope_counts_per_ms': m.get('max_slope_counts_per_ms'),
-            'max_slope_smooth_counts_per_ms': m.get('max_slope_smooth_counts_per_ms'),
+            'avg_slew_counts_per_ms': m.get('avg_slew_counts_per_ms'),
+            'max_slope_Nm_per_ms': m.get('max_slope_Nm_per_ms'),
+            'avg_slew_Nm_per_ms': m.get('avg_slew_Nm_per_ms'),
             'overshoot_pct': m.get('overshoot_pct'),
             'settling_time_2pct_ms': m.get('settling_time_2pct_ms'),
             'settling_band_used': m.get('settling_band_used'),
@@ -3289,13 +3297,14 @@ class MotorBusterNativeApp:
                 'fs': fs, 'hclk_hz': hclk, 'target_t0_cyc': t0_cyc}
 
     @staticmethod
-    def _step_analyse(tau, adc, fs, hold_s=0.5):
+    def _step_analyse(tau, adc, fs, hold_s=0.5, counts_per_nm=None):
         tau = np.asarray(tau, dtype=float)
         adc = np.asarray(adc, dtype=float)
         out = {'baseline_counts': None, 'final_counts': None, 'baseline_noise_rms': None,
                'dead_time_ms': None, 't50_ms': None, 't90_ms': None,
                'rise_time_10_90_ms': None, 'max_slope_counts_per_ms': None,
-               'max_slope_smooth_counts_per_ms': None, 'overshoot_pct': None,
+               'avg_slew_counts_per_ms': None, 'max_slope_Nm_per_ms': None,
+               'avg_slew_Nm_per_ms': None, 'overshoot_pct': None,
                'settling_time_2pct_ms': None, 'settling_band_used': None}
         if tau.size < 40:
             return out
@@ -3308,6 +3317,7 @@ class MotorBusterNativeApp:
             return out
         baseline = float(np.mean(adc[bmask]))
         noise_rms = float(np.std(adc[bmask]))
+        smooth_noise_rms = float(np.std(adc_smooth[bmask]))
         out['baseline_counts'] = baseline
         out['baseline_noise_rms'] = noise_rms
 
@@ -3332,9 +3342,6 @@ class MotorBusterNativeApp:
             idx0 = int(np.searchsorted(tau, 0.0))
             for i in range(idx0, tau.size - n_persist + 1):
                 if side[i] > 0 and np.all(side[i:i + n_persist] > 0):
-                    # First sample of a run that stays past for >=1 ms. Persistence
-                    # only validates the crossing; report the threshold crossing
-                    # interpolated between sample i-1 and i.
                     if i <= 0:
                         return float(tau[i])
                     v0 = float(adc_smooth[i - 1])
@@ -3352,32 +3359,50 @@ class MotorBusterNativeApp:
         out['dead_time_ms'] = t10 * 1e3 if t10 is not None else None
         out['t50_ms'] = t50 * 1e3 if t50 is not None else None
         out['t90_ms'] = t90 * 1e3 if t90 is not None else None
+        rise_ms = None
         if t10 is not None and t90 is not None:
-            out['rise_time_10_90_ms'] = (t90 - t10) * 1e3
+            rise_ms = (t90 - t10) * 1e3
+            out['rise_time_10_90_ms'] = rise_ms
 
-        dt = np.diff(tau)
-        if dt.size > 0 and np.all(dt > 0):
-            pmask = tau[1:] >= 0.0
-            sl_u = np.abs(np.diff(adc) / dt) / 1000.0
-            sl_s = np.abs(np.diff(adc_smooth) / dt) / 1000.0
-            if np.any(pmask):
-                out['max_slope_counts_per_ms'] = float(np.max(sl_u[pmask]))
-                out['max_slope_smooth_counts_per_ms'] = float(np.max(sl_s[pmask]))
+        # Max slope: least-squares line fit over a sliding ~1 ms window (raw data).
+        n = max(2, int(round(fs * 0.001)))
+        dt = float(np.median(np.diff(tau)))
+        if dt > 0 and tau.size > n:
+            lin = np.arange(n, dtype=float) - (n - 1) / 2.0
+            denom = float(np.sum(lin * lin))
+            windows = np.lib.stride_tricks.sliding_window_view(adc, n)
+            slopes = (windows @ lin) / denom  # counts per sample
+            slope_counts_per_ms = slopes / (dt * 1000.0)
+            centers = tau[n // 2:n // 2 + slopes.size]
+            mask = centers >= 0.0
+            if np.any(mask):
+                out['max_slope_counts_per_ms'] = float(np.max(np.abs(slope_counts_per_ms[mask])))
 
-        post = tau >= 0.0
-        post_adc = adc[post]
-        if post_adc.size > 0:
+        # Average slew: 0.8 * |step| / rise_time_10_90 (counts/ms).
+        if rise_ms is not None and rise_ms > 0:
+            out['avg_slew_counts_per_ms'] = 0.8 * step_mag / rise_ms
+
+        if counts_per_nm is not None and counts_per_nm > 0:
+            if out['max_slope_counts_per_ms'] is not None:
+                out['max_slope_Nm_per_ms'] = out['max_slope_counts_per_ms'] / counts_per_nm
+            if out['avg_slew_counts_per_ms'] is not None:
+                out['avg_slew_Nm_per_ms'] = out['avg_slew_counts_per_ms'] / counts_per_nm
+
+        # Overshoot and settling on the smoothed signal, before the final window.
+        pre_final = (tau >= 0.0) & (tau < (hold_s - 0.100))
+        post_smooth = adc_smooth[pre_final]
+        if post_smooth.size > 0:
             if sign > 0:
-                out['overshoot_pct'] = (float(np.max(post_adc)) - final) / step_mag * 100.0
+                out['overshoot_pct'] = (float(np.max(post_smooth)) - final) / step_mag * 100.0
             else:
-                out['overshoot_pct'] = (final - float(np.min(post_adc))) / step_mag * 100.0
+                out['overshoot_pct'] = (final - float(np.min(post_smooth))) / step_mag * 100.0
 
         band_2pct = 0.02 * step_mag
-        band_noise = 3.0 * noise_rms
+        band_noise = 4.0 * smooth_noise_rms
         settling_band = max(band_2pct, band_noise)
-        out['settling_band_used'] = '2%' if band_2pct >= band_noise else '3*noise'
-        dev = np.abs(adc - final)
-        viol = np.where(post & (dev > settling_band))[0]
+        out['settling_band_used'] = '2%' if band_2pct >= band_noise else '4*noise'
+        dev = np.abs(adc_smooth - final)
+        viol = np.where(pre_final & (dev > settling_band))[0]
         out['settling_time_2pct_ms'] = float(tau[viol[-1]]) * 1e3 if viol.size else 0.0
 
         return out
@@ -3400,7 +3425,8 @@ class MotorBusterNativeApp:
     def _step_write_summary(self, path, rows):
         numeric_cols = ['baseline_counts', 'final_counts', 'baseline_noise_rms',
                         'dead_time_ms', 't50_ms', 't90_ms', 'rise_time_10_90_ms',
-                        'max_slope_counts_per_ms', 'max_slope_smooth_counts_per_ms',
+                        'max_slope_counts_per_ms', 'avg_slew_counts_per_ms',
+                        'max_slope_Nm_per_ms', 'avg_slew_Nm_per_ms',
                         'overshoot_pct', 'settling_time_2pct_ms']
         groups = {}
         for r in rows:

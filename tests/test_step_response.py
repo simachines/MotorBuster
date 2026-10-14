@@ -71,6 +71,23 @@ class TestStepAnalysis(unittest.TestCase):
         self.assertAlmostEqual(m['dead_time_ms'], t10 * 1e3, delta=0.6)
         self.assertAlmostEqual(m['rise_time_10_90_ms'], rise * 1e3, delta=3.0)
 
+    def test_metrics_on_synthetic_step(self):
+        tau = np.arange(-0.15, 0.50, DT)
+        step = 500.0
+        adc = _first_order_step(tau, 2000.0, step, self.DEAD_TIME, self.TAU_RC, 1.0, seed=2)
+        m = App._step_analyse(tau, adc, int(FS), hold_s=0.5)
+        # max slope within +/-10% of the instantaneous max (step / tau)
+        expected_slope = step / (self.TAU_RC * 1e3)  # counts/ms
+        self.assertIsNotNone(m['max_slope_counts_per_ms'])
+        self.assertAlmostEqual(m['max_slope_counts_per_ms'], expected_slope, delta=0.1 * expected_slope)
+        # first-order step has no overshoot
+        self.assertIsNotNone(m['overshoot_pct'])
+        self.assertLess(abs(m['overshoot_pct']), 2.0)
+        # settling to within 2% of the step: dead_time + tau * ln(50)
+        expected_settle = (self.DEAD_TIME + self.TAU_RC * math.log(50.0)) * 1e3
+        self.assertIsNotNone(m['settling_time_2pct_ms'])
+        self.assertAlmostEqual(m['settling_time_2pct_ms'], expected_settle, delta=1.0)
+
 
 class TestStepResultsIO(unittest.TestCase):
     def test_step_result_and_summary_roundtrip(self):
@@ -82,7 +99,8 @@ class TestStepResultsIO(unittest.TestCase):
             'baseline_counts': 2000.0, 'final_counts': 2500.0,
             'baseline_noise_rms': 1.5, 'dead_time_ms': 8.0, 't50_ms': 15.0,
             't90_ms': 25.0, 'rise_time_10_90_ms': 17.0,
-            'max_slope_counts_per_ms': 60.0, 'max_slope_smooth_counts_per_ms': 55.0,
+            'max_slope_counts_per_ms': 60.0, 'avg_slew_counts_per_ms': 30.0,
+            'max_slope_Nm_per_ms': 1.578947, 'avg_slew_Nm_per_ms': 0.789474,
             'overshoot_pct': 2.5, 'settling_time_2pct_ms': 40.0,
             'settling_band_used': '2%', 'crc_errors': 0, 'block_gaps': 0,
             'dropped_blocks': 0, 'host_pulse_ms': 0.1,
