@@ -42,9 +42,19 @@ CMD_STREAM_START = 0x0A   # start streaming; freqHz in bytes [2..5] (LE)
 CMD_STREAM_STOP  = 0x0B   # stop streaming
 CMD_MARK = 0x0C           # latch current timestamp into t_marker; no response
 
+# STREAM2 commands (bench-mark-phase firmware: DMA block capture + firmware target)
+CMD_STREAM2_START = 0x0D  # start STREAM2 block capture; fs (u32) in freqHz field
+CMD_STREAM2_STOP  = 0x0E  # stop STREAM2 block capture
+CMD_TARGET_SINE   = 0x0F  # set firmware target: freqHz = float32 bits, mag = int16 DI
+
 # Debug stream record framing
 STREAM_SYNC = 0xCC        # stream record sync marker
 STREAM_RECORD_LEN = 15    # [0xCC][adc:2B][theta:4B][t_us:4B][t_marker:4B] little-endian
+
+# STREAM2 block framing
+STREAM2_SYNC = b'\xDD\xAD'  # block sync marker
+STREAM2_BLOCK_LEN = 574     # 60-byte header + 512-byte samples + 2-byte CRC
+STREAM2_VERSION = 2
 
 # Map effect type names to command bytes
 EFFECT_CMD_MAP = {
@@ -120,6 +130,109 @@ def _pack_command(effect_type: str, freq_hz: float = 0.0, magnitude: int = 0,
     return body + struct.pack('<B', checksum)
 
 
+def _crc16_ccitt_false(data: bytes) -> int:
+    '''CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no final XOR).'''
+    crc = 0xFFFF
+    for b in data:
+        crc ^= (b << 8)
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
+
+
+def _pack_command_raw(cmd_byte: int, freq_u32: int = 0, mag_s16: int = 0,
+                      settle: int = 0, ramp: int = 0, torque_cH: int = 0) -> bytes:
+    '''Pack a 13-byte command from raw field values (no remapping).
+
+    Same wire format as _pack_command (12-byte body + XOR checksum) but accepts
+    arbitrary u32/s16 payloads so STREAM2 can place an fs value or float32 bit
+    pattern into the freqHz field.
+    '''
+    freq_u32 = int(freq_u32) & 0xFFFFFFFF
+    mag_s16 = max(-32768, min(32767, int(mag_s16)))
+    body = struct.pack('<BBIhBBH', START_BYTE, int(cmd_byte), freq_u32, mag_s16,
+                       int(settle), int(ramp), int(torque_cH))
+    checksum = 0
+    for b in body:
+        checksum ^= b
+    return body + struct.pack('<B', checksum)
+
+
+def _pack_stream2_start(fs_hz: int) -> bytes:
+    '''STREAM2_START (0x0D): fs (u32) placed in the freqHz field.'''
+    return _pack_command_raw(CMD_STREAM2_START, freq_u32=int(fs_hz))
+
+
+def _pack_stream2_stop() -> bytes:
+    '''STREAM2_STOP (0x0E).'''
+    return _pack_command_raw(CMD_STREAM2_STOP)
+
+
+def _pack_target_sine(freq_hz: float, amplitude_s16: int) -> bytes:
+    '''TARGET_SINE (0x0F): freqHz field = float32 bit pattern, mag = int16 DI.'''
+    freq_bits = struct.unpack('<I', struct.pack('<f', float(freq_hz)))[0]
+    return _pack_command_raw(CMD_TARGET_SINE, freq_u32=freq_bits, mag_s16=int(amplitude_s16))
+
+
+def _parse_stream2_block(data: bytes) -> Optional[dict]:
+    '''Parse a 574-byte STREAM2 block (CRC must be validated by the caller).
+
+    Layout (little-endian):
+      0 u8 0xDD | 1 u8 0xAD | 2 u8 version(=2) | 3 u8 flags
+      4 u32 block_counter | 8 u32 first_index | 12 u16 fs | 14 u16 reserved
+     16 u32 t_start_cyc | 20 u32 t_cb_cyc | 24 u32 mark_cyc
+     28 u32 dropped_blocks | 32 u8 target_type | 33 u8[3] reserved
+     36 f32 target_a | 40 f32 target_b | 44 u32 target_t0_cyc
+     48 f32 target_first | 52 f32 target_last | 56 u32 hclk_hz
+     60 u16[256] samples | 572 u16 crc16
+    '''
+    if len(data) < STREAM2_BLOCK_LEN:
+        return None
+    if data[0] != STREAM2_SYNC[0] or data[1] != STREAM2_SYNC[1]:
+        return None
+    version = data[2]
+    if version != STREAM2_VERSION:
+        logger.warning(f'STREAM2 block version {version} != {STREAM2_VERSION}, ignoring')
+        return None
+    try:
+        (flags, block_counter, first_index, fs, reserved,
+         t_start_cyc, t_cb_cyc, mark_cyc, dropped_blocks,
+         target_type, _res3, target_a, target_b, target_t0_cyc,
+         target_first, target_last, hclk_hz) = struct.unpack(
+            '<BIIHHIIIIB3sffIffI', data[3:60])
+    except struct.error as e:
+        logger.error(f'STREAM2 block header parse failed: {e} (raw: {_hex(data[:60])})')
+        return None
+    try:
+        samples = list(struct.unpack('<256H', data[60:572]))
+    except struct.error as e:
+        logger.error(f'STREAM2 block samples parse failed: {e}')
+        return None
+    return {
+        'version': version,
+        'flags': flags,
+        'block_counter': block_counter,
+        'first_index': first_index,
+        'fs': fs,
+        'reserved': reserved,
+        't_start_cyc': t_start_cyc,
+        't_cb_cyc': t_cb_cyc,
+        'mark_cyc': mark_cyc,
+        'dropped_blocks': dropped_blocks,
+        'target_type': target_type,
+        'target_a': target_a,
+        'target_b': target_b,
+        'target_t0_cyc': target_t0_cyc,
+        'target_first': target_first,
+        'target_last': target_last,
+        'hclk_hz': hclk_hz,
+        'samples': samples,
+    }
+
+
 def _parse_response(data: bytes) -> Optional[dict]:
     '''Parse MCU response packet and return Bode measurement data.
 
@@ -189,6 +302,15 @@ class SerialManager:
         self._on_stream_record: Optional[Callable[[dict], None]] = None
         self._buffer = bytearray()
 
+        # STREAM2 (DMA block capture) state
+        self._stream2_mode = False
+        self._stream2_buffer = bytearray()
+        self._on_stream2_block: Optional[Callable[[dict], None]] = None
+        self._stream2_crc_errors = 0
+        self._stream2_block_gaps = 0
+        self._stream2_dropped_blocks = 0
+        self._stream2_last_block_counter = None
+
     @property
     def is_connected(self) -> bool:
         return self._port is not None and self._port.is_open
@@ -205,6 +327,10 @@ class SerialManager:
         '''Set callback for incoming debug stream records (0xCC).'''
         self._on_stream_record = callback
 
+    def set_stream2_callback(self, callback: Optional[Callable[[dict], None]]):
+        '''Set callback for incoming STREAM2 blocks (0xDD 0xAD).'''
+        self._on_stream2_block = callback
+
     def connect(self, port: str, baud: int = 115200) -> bool:
         '''Open serial connection to the specified port.'''
         self.disconnect()
@@ -220,6 +346,8 @@ class SerialManager:
             )
             self._running = True
             self._buffer.clear()
+            self._stream2_buffer.clear()
+            self._stream2_mode = False
             self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._read_thread.start()
             logger.info(f'Serial connected to {port} @ {baud} baud')
@@ -243,6 +371,8 @@ class SerialManager:
                     pass
             self._port = None
         self._buffer.clear()
+        self._stream2_buffer.clear()
+        self._stream2_mode = False
         logger.info('Serial disconnected')
 
     def _write_packet(self, packet: Optional[bytes]) -> bool:
@@ -356,6 +486,64 @@ class SerialManager:
             return False
         return self._send_named('stream_stop', _pack_command('stream_stop'))
 
+    def send_stream2_start(self, fs_hz: int) -> bool:
+        '''Start STREAM2 block capture at fs_hz samples/second.'''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot start STREAM2')
+            return False
+        packet = _pack_stream2_start(fs_hz)
+        ok = self._write_packet(packet)
+        if ok:
+            self._stream2_mode = True
+            self._stream2_buffer.clear()
+            logger.info(f'Serial sent: type=stream2_start fs={fs_hz} (raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=stream2_start (raw: {_hex(packet)})')
+        return ok
+
+    def send_stream2_stop(self) -> bool:
+        '''Stop STREAM2 block capture.'''
+        if not self.is_connected:
+            return False
+        packet = _pack_stream2_stop()
+        ok = self._write_packet(packet)
+        if ok:
+            self._stream2_mode = False
+            self._stream2_buffer.clear()
+            logger.info(f'Serial sent: type=stream2_stop (raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=stream2_stop (raw: {_hex(packet)})')
+        return ok
+
+    def send_target_sine(self, freq_hz: float, amplitude_s16: int) -> bool:
+        '''Set the firmware target reference (TARGET_SINE 0x0F).'''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot send TARGET_SINE')
+            return False
+        packet = _pack_target_sine(freq_hz, amplitude_s16)
+        ok = self._write_packet(packet)
+        if ok:
+            logger.info(f'Serial sent: type=target_sine freq={freq_hz} amp={amplitude_s16} '
+                        f'(raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=target_sine (raw: {_hex(packet)})')
+        return ok
+
+    def reset_stream2_stats(self):
+        '''Clear STREAM2 integrity counters (per capture run).'''
+        self._stream2_crc_errors = 0
+        self._stream2_block_gaps = 0
+        self._stream2_dropped_blocks = 0
+        self._stream2_last_block_counter = None
+
+    def get_stream2_stats(self) -> dict:
+        '''Return STREAM2 integrity counters for the current capture run.'''
+        return {
+            'crc_errors': int(self._stream2_crc_errors),
+            'block_gaps': int(self._stream2_block_gaps),
+            'dropped_blocks': int(self._stream2_dropped_blocks),
+        }
+
     def send_mark(self) -> bool:
         # Send MARK (0x0C): latch current timestamp into t_marker. No
         # response is expected; writes immediately with no sleeps.
@@ -376,8 +564,12 @@ class SerialManager:
             try:
                 if self._port and self._port.is_open and self._port.in_waiting > 0:
                     data = self._port.read(self._port.in_waiting)
-                    self._buffer.extend(data)
-                    self._process_buffer()
+                    if self._stream2_mode:
+                        self._stream2_buffer.extend(data)
+                        self._process_stream2_buffer()
+                    else:
+                        self._buffer.extend(data)
+                        self._process_buffer()
                 else:
                     time.sleep(0.005)
             except Exception as e:
@@ -445,6 +637,56 @@ class SerialManager:
         else:
             logger.debug(f'Stream record: adc={rec["adc"]} theta={rec["theta"]:.4f} '
                          f't_us={rec["t_us"]}')
+
+    def _process_stream2_buffer(self):
+        '''Extract complete 574-byte STREAM2 blocks, resyncing on 0xDD 0xAD.'''
+        while True:
+            idx = self._stream2_buffer.find(STREAM2_SYNC)
+            if idx == -1:
+                if len(self._stream2_buffer) > 1:
+                    self._stream2_buffer = self._stream2_buffer[-1:]
+                break
+            if idx > 0:
+                del self._stream2_buffer[:idx]
+            if len(self._stream2_buffer) < STREAM2_BLOCK_LEN:
+                break
+            block = bytes(self._stream2_buffer[:STREAM2_BLOCK_LEN])
+            crc_calc = _crc16_ccitt_false(block[:STREAM2_BLOCK_LEN - 2])
+            crc_recv = struct.unpack('<H', block[STREAM2_BLOCK_LEN - 2:STREAM2_BLOCK_LEN])[0]
+            if crc_calc != crc_recv:
+                self._stream2_crc_errors += 1
+                logger.warning(f'STREAM2: bad CRC (calc=0x{crc_calc:04X} recv=0x{crc_recv:04X}), resyncing')
+                del self._stream2_buffer[:1]
+                continue
+            parsed = _parse_stream2_block(block)
+            if parsed is None:
+                del self._stream2_buffer[:1]
+                continue
+            self._track_stream2_block(parsed)
+            self._dispatch_stream2_block(parsed)
+            del self._stream2_buffer[:STREAM2_BLOCK_LEN]
+
+    def _track_stream2_block(self, block: dict):
+        '''Update integrity counters: block-counter gaps and dropped blocks.'''
+        bc = int(block.get('block_counter', 0))
+        if self._stream2_last_block_counter is not None:
+            expected = (self._stream2_last_block_counter + 1) & 0xFFFFFFFF
+            if bc != expected:
+                self._stream2_block_gaps += 1
+        self._stream2_last_block_counter = bc
+        dropped = int(block.get('dropped_blocks', 0))
+        if dropped > self._stream2_dropped_blocks:
+            self._stream2_dropped_blocks = dropped
+
+    def _dispatch_stream2_block(self, block: dict):
+        if self._on_stream2_block:
+            try:
+                self._on_stream2_block(block)
+            except Exception as e:
+                logger.error(f'STREAM2 block callback error: {e}')
+        else:
+            logger.debug(f'STREAM2 block: counter={block["block_counter"]} '
+                         f'first_index={block["first_index"]} t0={block["target_t0_cyc"]}')
 
 
 # Global singleton instance
