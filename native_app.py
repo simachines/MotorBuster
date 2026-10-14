@@ -1564,12 +1564,25 @@ class MotorBusterNativeApp:
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_text("Step magnitudes (%):")
-                dpg.add_input_text(tag="step_magnitudes", width=300, default_value="14,33,50,66,83",
+                dpg.add_input_text(tag="step_magnitudes", width=300, default_value="14,33,50,66,83,100",
                                    hint="comma-separated %")
             with dpg.group(horizontal=True):
                 dpg.add_text("Repeats per magnitude:")
-                dpg.add_input_int(tag="step_repeats", default_value=5, width=70, min_value=1, max_value=100)
+                dpg.add_input_int(tag="step_repeats", default_value=10, width=60, min_value=1, max_value=100)
                 dpg.add_spacer(width=10)
+                dpg.add_text("Overrides (mag:repeats):")
+                dpg.add_input_text(tag="step_repeat_overrides", width=170, default_value="83:5,100:5",
+                                   hint="e.g. 83:5,100:5")
+            with dpg.group(horizontal=True):
+                dpg.add_text("Baseline time (ms):")
+                dpg.add_input_int(tag="step_baseline_ms", default_value=150, width=70, min_value=100, max_value=2000)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Hold time (ms):")
+                dpg.add_input_int(tag="step_hold_ms", default_value=500, width=70, min_value=100, max_value=5000)
+                dpg.add_spacer(width=10)
+                dpg.add_text("Rest between captures (s):")
+                dpg.add_input_float(tag="step_rest", default_value=1.0, width=70, min_value=0.0, max_value=60.0, step=0)
+            with dpg.group(horizontal=True):
                 dpg.add_text("STREAM2 rate (kHz):")
                 dpg.add_combo(tag="step_stream2_rate", width=60, items=["5", "10", "20"], default_value="10")
             with dpg.group(horizontal=True):
@@ -3005,6 +3018,23 @@ class MotorBusterNativeApp:
                 continue
         return mags
 
+    @staticmethod
+    def _step_parse_overrides(text):
+        overrides = {}
+        for part in (text or '').split(','):
+            part = part.strip()
+            if not part or ':' not in part:
+                continue
+            mag_s, rep_s = part.split(':', 1)
+            try:
+                mag = float(mag_s.strip())
+                rep = int(rep_s.strip())
+                if 0.0 < mag <= 100.0 and rep >= 1:
+                    overrides[round(mag, 6)] = rep
+            except ValueError:
+                continue
+        return overrides
+
     def _step_run(self, sender=None, app_data=None):
         if not self.serial_connected:
             self.log('Step response test requires a serial connection')
@@ -3020,10 +3050,17 @@ class MotorBusterNativeApp:
 
         mags = self._step_parse_magnitudes(dpg.get_value('step_magnitudes') if dpg.does_item_exist('step_magnitudes') else '')
         if not mags:
-            mags = [14.0, 33.0, 50.0, 66.0, 83.0]
-        repeats = int(dpg.get_value('step_repeats') if dpg.does_item_exist('step_repeats') else 5)
+            mags = [14.0, 33.0, 50.0, 66.0, 83.0, 100.0]
+        repeats = int(dpg.get_value('step_repeats') if dpg.does_item_exist('step_repeats') else 10)
+        overrides = self._step_parse_overrides(dpg.get_value('step_repeat_overrides') if dpg.does_item_exist('step_repeat_overrides') else '')
+        baseline_ms = int(dpg.get_value('step_baseline_ms') if dpg.does_item_exist('step_baseline_ms') else 150)
+        hold_ms = int(dpg.get_value('step_hold_ms') if dpg.does_item_exist('step_hold_ms') else 500)
+        rest_s = float(dpg.get_value('step_rest') if dpg.does_item_exist('step_rest') else 1.0)
         rate_khz = dpg.get_value('step_stream2_rate') if dpg.does_item_exist('step_stream2_rate') else '10'
         repeats = max(1, min(100, int(repeats)))
+        baseline_ms = max(100, min(2000, int(baseline_ms)))
+        hold_ms = max(100, min(5000, int(hold_ms)))
+        rest_s = max(0.0, float(rest_s))
         fs_hz = int(float(str(rate_khz))) * 1000
 
         self.step_running = True
@@ -3035,7 +3072,9 @@ class MotorBusterNativeApp:
         if dpg.does_item_exist('step_progress'):
             dpg.set_value('step_progress', 0.0)
         self._step_set_status('Status: starting...')
-        threading.Thread(target=self._step_worker, args=(mags, repeats, fs_hz), daemon=True).start()
+        threading.Thread(target=self._step_worker,
+                         args=(mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz),
+                         daemon=True).start()
 
     def _step_stop(self, sender=None, app_data=None):
         self.step_stop = True
@@ -3049,7 +3088,12 @@ class MotorBusterNativeApp:
         if dpg.does_item_exist('step_progress'):
             dpg.set_value('step_progress', min(1.0, max(0.0, frac)))
 
-    def _step_worker(self, mags, repeats, fs_hz):
+    def _step_rest(self, seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not self.step_stop:
+            time.sleep(0.02)
+
+    def _step_worker(self, mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz):
         base = os.path.dirname(os.path.abspath(__file__))
         folder = os.path.join(base, 'phase_runs')
         try:
@@ -3060,7 +3104,7 @@ class MotorBusterNativeApp:
         results_path = os.path.join(folder, f'results_step_{ts}.csv')
         summary_path = os.path.join(folder, f'results_step_{ts}_summary.csv')
 
-        total = len(mags) * repeats * len(self._STEP_DIRECTIONS)
+        total = sum(max(1, min(100, int(overrides.get(round(m, 6), repeats)))) * len(self._STEP_DIRECTIONS) for m in mags)
         rows = []
         done = 0
         try:
@@ -3072,15 +3116,17 @@ class MotorBusterNativeApp:
         try:
             for mag_pct in mags:
                 di_mag = self._s16_to_di(int(32767 * mag_pct / 100.0))
-                for rep in range(1, repeats + 1):
+                n_rep = max(1, min(100, int(overrides.get(round(mag_pct, 6), repeats))))
+                for rep in range(1, n_rep + 1):
                     for label, bsign, ssign in self._STEP_DIRECTIONS:
                         if self.step_stop:
                             break
                         baseline_di = int(round(bsign * di_mag))
                         step_di = int(round(ssign * di_mag))
-                        self._step_set_status(f'{mag_pct:g}% {label} rep {rep}/{repeats}...')
+                        self._step_set_status(f'{mag_pct:g}% {label} rep {rep}/{n_rep}...')
                         try:
-                            row = self._step_run_once(mag_pct, label, baseline_di, step_di, ts, folder, fs_hz)
+                            row = self._step_run_once(mag_pct, label, baseline_di, step_di, ts, folder, fs_hz,
+                                                      baseline_ms, hold_ms)
                         except Exception as e:
                             import traceback
                             self.log(f'Step {mag_pct:g}% {label} rep {rep} failed: {e}')
@@ -3090,6 +3136,8 @@ class MotorBusterNativeApp:
                         self._step_append_result(results_path, row)
                         done += 1
                         self._step_set_progress(done / max(1, total))
+                        if not self.step_stop:
+                            self._step_rest(rest_s)
                     if self.step_stop:
                         break
                 if self.step_stop:
@@ -3127,9 +3175,12 @@ class MotorBusterNativeApp:
         except Exception as e:
             self.log(f'Step test: could not append result row: {e}')
 
-    def _step_run_once(self, mag_pct, direction, baseline_di, step_di, ts, folder, fs_hz):
+    def _step_run_once(self, mag_pct, direction, baseline_di, step_di, ts, folder, fs_hz,
+                       baseline_ms=150, hold_ms=500):
         t_a = t_b = 0.0
-        duration_us = int(1_500_000)
+        baseline_s = baseline_ms / 1000.0
+        hold_s = hold_ms / 1000.0
+        duration_us = int((baseline_s + hold_s + 0.3) * 1e6)
         try:
             try:
                 engine.stop_effect()
@@ -3141,7 +3192,7 @@ class MotorBusterNativeApp:
             serial_manager.send_stream2_start(int(fs_hz))
             engine.play_descriptor({'type': 'constant', 'magnitude': baseline_di,
                                     'length_us': duration_us, 'magnitude_unit': 'di'})
-            time.sleep(0.15)
+            time.sleep(baseline_s)
             serial_manager.send_target_value_begin(int(baseline_di))
             t_a = time.perf_counter()
             serial_manager.send_mark()  # MARK1
@@ -3149,7 +3200,7 @@ class MotorBusterNativeApp:
                                     'length_us': duration_us, 'magnitude_unit': 'di'})  # the edge
             serial_manager.send_mark()  # MARK2 (phase-0 reference)
             t_b = time.perf_counter()
-            time.sleep(0.30)
+            time.sleep(hold_s)
         finally:
             try:
                 engine.stop_effect()
@@ -3172,7 +3223,7 @@ class MotorBusterNativeApp:
 
         self._step_save_raw(built, mag_pct, direction, ts, folder)
         fs_actual = int(built.get('fs') or fs_hz)
-        m = self._step_analyse(built['tau'], built['adc'], fs_actual)
+        m = self._step_analyse(built['tau'], built['adc'], fs_actual, hold_s=hold_s)
         row = {
             'magnitude_pct': mag_pct, 'direction': direction,
             'baseline_counts': m.get('baseline_counts'),
@@ -3235,7 +3286,7 @@ class MotorBusterNativeApp:
                 'fs': fs, 'hclk_hz': hclk, 'target_t0_cyc': t0_cyc}
 
     @staticmethod
-    def _step_analyse(tau, adc, fs):
+    def _step_analyse(tau, adc, fs, hold_s=0.5):
         tau = np.asarray(tau, dtype=float)
         adc = np.asarray(adc, dtype=float)
         out = {'baseline_counts': None, 'final_counts': None, 'baseline_noise_rms': None,
@@ -3257,9 +3308,9 @@ class MotorBusterNativeApp:
         out['baseline_counts'] = baseline
         out['baseline_noise_rms'] = noise_rms
 
-        fmask = (tau >= 0.200) & (tau <= 0.300)
+        fmask = (tau >= (hold_s - 0.100)) & (tau <= hold_s)
         if int(np.count_nonzero(fmask)) < 5:
-            fmask = tau >= 0.200
+            fmask = tau >= (hold_s - 0.100)
         if int(np.count_nonzero(fmask)) < 5:
             return out
         final = float(np.mean(adc[fmask]))
@@ -3278,7 +3329,18 @@ class MotorBusterNativeApp:
             idx0 = int(np.searchsorted(tau, 0.0))
             for i in range(idx0, tau.size - n_persist + 1):
                 if side[i] > 0 and np.all(side[i:i + n_persist] > 0):
-                    return float(tau[i])
+                    # First sample of a run that stays past for >=1 ms. Persistence
+                    # only validates the crossing; report the threshold crossing
+                    # interpolated between sample i-1 and i.
+                    if i <= 0:
+                        return float(tau[i])
+                    v0 = float(adc_smooth[i - 1])
+                    v1 = float(adc_smooth[i])
+                    if v1 == v0:
+                        return float(tau[i])
+                    frac = (thresh - v0) / (v1 - v0)
+                    frac = max(0.0, min(1.0, frac))
+                    return float(tau[i - 1] + frac * (tau[i] - tau[i - 1]))
             return None
 
         t10 = crossing_time(0.10)

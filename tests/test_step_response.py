@@ -45,9 +45,9 @@ class TestStepAnalysis(unittest.TestCase):
         return t10, rise
 
     def test_dead_time_and_rise_time_clean(self):
-        tau = np.arange(-0.15, 0.30, DT)
+        tau = np.arange(-0.15, 0.50, DT)
         adc = _first_order_step(tau, 2000.0, 500.0, self.DEAD_TIME, self.TAU_RC, 1.0)
-        m = App._step_analyse(tau, adc, int(FS))
+        m = App._step_analyse(tau, adc, int(FS), hold_s=0.5)
         self.assertIsNotNone(m['dead_time_ms'])
         self.assertIsNotNone(m['rise_time_10_90_ms'])
         t10, rise = self._expected()
@@ -59,11 +59,11 @@ class TestStepAnalysis(unittest.TestCase):
         # floor and the first-order 90% crossing has very low slope, so the
         # threshold crossings are inherently noisier than the clean case; the
         # tolerances below reflect that (~1 sigma, fixed noise seed).
-        tau = np.arange(-0.15, 0.30, DT)
+        tau = np.arange(-0.15, 0.50, DT)
         noise_rms = 20.0
         step = 7.0 * noise_rms
         adc = _first_order_step(tau, 2000.0, step, self.DEAD_TIME, self.TAU_RC, noise_rms, seed=4)
-        m = App._step_analyse(tau, adc, int(FS))
+        m = App._step_analyse(tau, adc, int(FS), hold_s=0.5)
         self.assertIsNotNone(m['dead_time_ms'])
         self.assertIsNotNone(m['rise_time_10_90_ms'])
         self.assertAlmostEqual(m['baseline_noise_rms'], noise_rms, delta=5.0)
