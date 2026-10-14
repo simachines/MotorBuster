@@ -46,6 +46,8 @@ CMD_MARK = 0x0C           # latch current timestamp into t_marker; no response
 CMD_STREAM2_START = 0x0D  # start STREAM2 block capture; fs (u32) in freqHz field
 CMD_STREAM2_STOP  = 0x0E  # stop STREAM2 block capture
 CMD_TARGET_SINE   = 0x0F  # set firmware target: freqHz = float32 bits, mag = int16 DI
+CMD_TARGET_VALUE        = 0x10  # step target value: mag = int16 DI value (does not reset mark count)
+CMD_TARGET_VALUE_BEGIN  = 0x11  # step target value; resets mark count (MARK2 phase-0 latch)
 
 # Debug stream record framing
 STREAM_SYNC = 0xCC        # stream record sync marker
@@ -176,6 +178,16 @@ def _pack_target_sine(freq_hz: float, amplitude_s16: int) -> bytes:
     '''TARGET_SINE (0x0F): freqHz field = float32 bit pattern, mag = int16 DI.'''
     freq_bits = struct.unpack('<I', struct.pack('<f', float(freq_hz)))[0]
     return _pack_command_raw(CMD_TARGET_SINE, freq_u32=freq_bits, mag_s16=int(amplitude_s16))
+
+
+def _pack_target_value(value: int) -> bytes:
+    '''TARGET_VALUE (0x10): mag = int16 step value (does not reset mark count).'''
+    return _pack_command_raw(CMD_TARGET_VALUE, mag_s16=int(value))
+
+
+def _pack_target_value_begin(value: int) -> bytes:
+    '''TARGET_VALUE_BEGIN (0x11): mag = int16 step value; resets mark count.'''
+    return _pack_command_raw(CMD_TARGET_VALUE_BEGIN, mag_s16=int(value))
 
 
 def _parse_stream2_block(data: bytes) -> Optional[dict]:
@@ -532,6 +544,32 @@ class SerialManager:
                         f'(raw: {_hex(packet)})')
         else:
             logger.error(f'Serial send FAILED: type=target_sine (raw: {_hex(packet)})')
+        return ok
+
+    def send_target_value(self, value: int) -> bool:
+        '''Set the firmware step target value (TARGET_VALUE 0x10).'''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot send TARGET_VALUE')
+            return False
+        packet = _pack_target_value(value)
+        ok = self._write_packet(packet)
+        if ok:
+            logger.info(f'Serial sent: type=target_value value={value} (raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=target_value (raw: {_hex(packet)})')
+        return ok
+
+    def send_target_value_begin(self, value: int) -> bool:
+        '''Set the firmware step target value and reset mark count (TARGET_VALUE_BEGIN 0x11).'''
+        if not self.is_connected:
+            logger.warning('Serial not connected, cannot send TARGET_VALUE_BEGIN')
+            return False
+        packet = _pack_target_value_begin(value)
+        ok = self._write_packet(packet)
+        if ok:
+            logger.info(f'Serial sent: type=target_value_begin value={value} (raw: {_hex(packet)})')
+        else:
+            logger.error(f'Serial send FAILED: type=target_value_begin (raw: {_hex(packet)})')
         return ok
 
     def reset_stream2_stats(self):

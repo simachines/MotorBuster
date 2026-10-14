@@ -529,6 +529,8 @@ class MotorBusterNativeApp:
         self.phase_repeat_stop = False
         self.phase_sweep_running = False
         self.phase_sweep_stop = False
+        self.step_running = False
+        self.step_stop = False
         
         # Diagnostic state (still referenced by UI)
         self.freeze_test_active = False
@@ -1553,6 +1555,28 @@ class MotorBusterNativeApp:
                 dpg.add_button(label="Stop phase sweep", tag="btn_phase_sweep_stop", width=140, enabled=False, callback=self._phase_sweep_stop)
             dpg.add_progress_bar(tag="phase_sweep_progress", width=-1, default_value=0.0)
             dpg.add_text("Status: Ready", tag="txt_phase_sweep_status", wrap=600, color=(200, 200, 200))
+
+            dpg.add_spacer(height=8)
+            dpg.add_separator()
+
+            # --- Step response test ---
+            dpg.add_text("Step response test", color=(200, 200, 255))
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_text("Step magnitudes (%):")
+                dpg.add_input_text(tag="step_magnitudes", width=300, default_value="14,33,50,66,83",
+                                   hint="comma-separated %")
+            with dpg.group(horizontal=True):
+                dpg.add_text("Repeats per magnitude:")
+                dpg.add_input_int(tag="step_repeats", default_value=5, width=70, min_value=1, max_value=100)
+                dpg.add_spacer(width=10)
+                dpg.add_text("STREAM2 rate (kHz):")
+                dpg.add_combo(tag="step_stream2_rate", width=60, items=["5", "10", "20"], default_value="10")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Run step test", tag="btn_step_run", width=130, callback=self._step_run)
+                dpg.add_button(label="Stop step test", tag="btn_step_stop", width=130, enabled=False, callback=self._step_stop)
+            dpg.add_progress_bar(tag="step_progress", width=-1, default_value=0.0)
+            dpg.add_text("Status: Ready", tag="txt_step_status", wrap=600, color=(200, 200, 200))
 
             dpg.add_spacer(height=8)
             dpg.add_separator()
@@ -2949,6 +2973,400 @@ class MotorBusterNativeApp:
     def _phase_sweep_set_progress(self, frac):
         if dpg.does_item_exist('phase_sweep_progress'):
             dpg.set_value('phase_sweep_progress', min(1.0, max(0.0, frac)))
+
+    # --- Step response test ---
+    _STEP_RESULT_COLUMNS = (
+        'magnitude_pct', 'direction', 'baseline_counts', 'final_counts',
+        'baseline_noise_rms', 'dead_time_ms', 't50_ms', 't90_ms',
+        'rise_time_10_90_ms', 'max_slope_counts_per_ms', 'max_slope_smooth_counts_per_ms',
+        'overshoot_pct', 'settling_time_2pct_ms', 'settling_band_used',
+        'crc_errors', 'block_gaps', 'dropped_blocks', 'host_pulse_ms',
+    )
+
+    _STEP_DIRECTIONS = (
+        ('0→+', 0.0, 1.0),
+        ('+→0', 1.0, 0.0),
+        ('0→−', 0.0, -1.0),
+        ('−→0', -1.0, 0.0),
+    )
+
+    @staticmethod
+    def _step_parse_magnitudes(text):
+        mags = []
+        for part in (text or '').split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                v = float(part)
+                if 0.0 < v <= 100.0:
+                    mags.append(v)
+            except ValueError:
+                continue
+        return mags
+
+    def _step_run(self, sender=None, app_data=None):
+        if not self.serial_connected:
+            self.log('Step response test requires a serial connection')
+            self._step_set_status('Status: serial not connected')
+            return
+        if sweep_engine.is_running or getattr(self, 'phase_repeat_running', False) or getattr(self, 'phase_sweep_running', False):
+            self.log('Cannot run step test while another test is running')
+            self._step_set_status('Status: another test in progress')
+            return
+        if getattr(self, 'step_running', False):
+            self.log('Step test already running')
+            return
+
+        mags = self._step_parse_magnitudes(dpg.get_value('step_magnitudes') if dpg.does_item_exist('step_magnitudes') else '')
+        if not mags:
+            mags = [14.0, 33.0, 50.0, 66.0, 83.0]
+        repeats = int(dpg.get_value('step_repeats') if dpg.does_item_exist('step_repeats') else 5)
+        rate_khz = dpg.get_value('step_stream2_rate') if dpg.does_item_exist('step_stream2_rate') else '10'
+        repeats = max(1, min(100, int(repeats)))
+        fs_hz = int(float(str(rate_khz))) * 1000
+
+        self.step_running = True
+        self.step_stop = False
+        if dpg.does_item_exist('btn_step_run'):
+            dpg.configure_item('btn_step_run', enabled=False)
+        if dpg.does_item_exist('btn_step_stop'):
+            dpg.configure_item('btn_step_stop', enabled=True)
+        if dpg.does_item_exist('step_progress'):
+            dpg.set_value('step_progress', 0.0)
+        self._step_set_status('Status: starting...')
+        threading.Thread(target=self._step_worker, args=(mags, repeats, fs_hz), daemon=True).start()
+
+    def _step_stop(self, sender=None, app_data=None):
+        self.step_stop = True
+        self._step_set_status('Status: stopping after current capture...')
+
+    def _step_set_status(self, msg):
+        if dpg.does_item_exist('txt_step_status'):
+            dpg.set_value('txt_step_status', msg)
+
+    def _step_set_progress(self, frac):
+        if dpg.does_item_exist('step_progress'):
+            dpg.set_value('step_progress', min(1.0, max(0.0, frac)))
+
+    def _step_worker(self, mags, repeats, fs_hz):
+        base = os.path.dirname(os.path.abspath(__file__))
+        folder = os.path.join(base, 'phase_runs')
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception as e:
+            self.log(f'Step test: could not create {folder}: {e}')
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        results_path = os.path.join(folder, f'results_step_{ts}.csv')
+        summary_path = os.path.join(folder, f'results_step_{ts}_summary.csv')
+
+        total = len(mags) * repeats * len(self._STEP_DIRECTIONS)
+        rows = []
+        done = 0
+        try:
+            with open(results_path, 'w', newline='') as rf:
+                rf.write(','.join(self._STEP_RESULT_COLUMNS) + '\n')
+        except Exception as e:
+            self.log(f'Step test: could not write results header: {e}')
+
+        try:
+            for mag_pct in mags:
+                di_mag = self._s16_to_di(int(32767 * mag_pct / 100.0))
+                for rep in range(1, repeats + 1):
+                    for label, bsign, ssign in self._STEP_DIRECTIONS:
+                        if self.step_stop:
+                            break
+                        baseline_di = int(round(bsign * di_mag))
+                        step_di = int(round(ssign * di_mag))
+                        self._step_set_status(f'{mag_pct:g}% {label} rep {rep}/{repeats}...')
+                        try:
+                            row = self._step_run_once(mag_pct, label, baseline_di, step_di, ts, folder, fs_hz)
+                        except Exception as e:
+                            import traceback
+                            self.log(f'Step {mag_pct:g}% {label} rep {rep} failed: {e}')
+                            self.log(traceback.format_exc())
+                            row = {'magnitude_pct': mag_pct, 'direction': label}
+                        rows.append(row)
+                        self._step_append_result(results_path, row)
+                        done += 1
+                        self._step_set_progress(done / max(1, total))
+                    if self.step_stop:
+                        break
+                if self.step_stop:
+                    break
+        except Exception as e:
+            self.log(f'Step worker error: {e}')
+        finally:
+            self.step_running = False
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+            if dpg.does_item_exist('btn_step_run'):
+                dpg.configure_item('btn_step_run', enabled=True)
+            if dpg.does_item_exist('btn_step_stop'):
+                dpg.configure_item('btn_step_stop', enabled=False)
+
+        self._step_write_summary(summary_path, rows)
+        self._step_set_status(f'Step test done: {len(rows)} captures')
+        self.log(f'[Step test] complete: {results_path}, {summary_path}')
+
+    def _step_append_result(self, path, row):
+        def _fmt(v):
+            if v is None:
+                return ''
+            if isinstance(v, bool):
+                return 'True' if v else 'False'
+            if isinstance(v, float):
+                return f'{v:.6f}'
+            return str(v)
+        line = ','.join(_fmt(row.get(k)) for k in self._STEP_RESULT_COLUMNS) + '\n'
+        try:
+            with open(path, 'a', newline='') as rf:
+                rf.write(line)
+        except Exception as e:
+            self.log(f'Step test: could not append result row: {e}')
+
+    def _step_run_once(self, mag_pct, direction, baseline_di, step_di, ts, folder, fs_hz):
+        t_a = t_b = 0.0
+        duration_us = int(1_500_000)
+        try:
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+            self.stream2_blocks = []
+            serial_manager.reset_stream2_stats()
+            serial_manager.set_stream2_callback(self._on_stream2_block)
+            serial_manager.send_stream2_start(int(fs_hz))
+            engine.play_descriptor({'type': 'constant', 'magnitude': baseline_di,
+                                    'length_us': duration_us, 'magnitude_unit': 'di'})
+            time.sleep(0.15)
+            serial_manager.send_target_value_begin(int(baseline_di))
+            t_a = time.perf_counter()
+            serial_manager.send_mark()  # MARK1
+            engine.play_descriptor({'type': 'constant', 'magnitude': step_di,
+                                    'length_us': duration_us, 'magnitude_unit': 'di'})  # the edge
+            serial_manager.send_mark()  # MARK2 (phase-0 reference)
+            t_b = time.perf_counter()
+            time.sleep(0.30)
+        finally:
+            try:
+                engine.stop_effect()
+            except Exception:
+                pass
+            serial_manager.send_stream2_stop()
+            serial_manager.set_stream2_callback(None)
+            time.sleep(0.2)
+
+        blocks = list(self.stream2_blocks)
+        stats = serial_manager.get_stream2_stats()
+        built = self._step_build_samples(blocks, baseline_di, step_di)
+        if built is None:
+            self.log(f'Step {mag_pct:g}% {direction}: no valid MARK2 reference, invalid')
+            return {'magnitude_pct': mag_pct, 'direction': direction,
+                    'crc_errors': stats.get('crc_errors', 0),
+                    'block_gaps': stats.get('block_gaps', 0),
+                    'dropped_blocks': stats.get('dropped_blocks', 0),
+                    'host_pulse_ms': (t_b - t_a) * 1e3}
+
+        self._step_save_raw(built, mag_pct, direction, ts, folder)
+        fs_actual = int(built.get('fs') or fs_hz)
+        m = self._step_analyse(built['tau'], built['adc'], fs_actual)
+        row = {
+            'magnitude_pct': mag_pct, 'direction': direction,
+            'baseline_counts': m.get('baseline_counts'),
+            'final_counts': m.get('final_counts'),
+            'baseline_noise_rms': m.get('baseline_noise_rms'),
+            'dead_time_ms': m.get('dead_time_ms'), 't50_ms': m.get('t50_ms'),
+            't90_ms': m.get('t90_ms'), 'rise_time_10_90_ms': m.get('rise_time_10_90_ms'),
+            'max_slope_counts_per_ms': m.get('max_slope_counts_per_ms'),
+            'max_slope_smooth_counts_per_ms': m.get('max_slope_smooth_counts_per_ms'),
+            'overshoot_pct': m.get('overshoot_pct'),
+            'settling_time_2pct_ms': m.get('settling_time_2pct_ms'),
+            'settling_band_used': m.get('settling_band_used'),
+            'crc_errors': stats.get('crc_errors', 0),
+            'block_gaps': stats.get('block_gaps', 0),
+            'dropped_blocks': stats.get('dropped_blocks', 0),
+            'host_pulse_ms': (t_b - t_a) * 1e3,
+        }
+        logger.info(
+            f'Step run {mag_pct:g}% {direction}: blocks={len(blocks)}, '
+            f'crc_errors={stats.get("crc_errors", 0)}, block_gaps={stats.get("block_gaps", 0)}, '
+            f'dropped_blocks={stats.get("dropped_blocks", 0)}, '
+            f'dead_time_ms={m.get("dead_time_ms")}, t50_ms={m.get("t50_ms")}, '
+            f'rise_time_ms={m.get("rise_time_10_90_ms")}, overshoot_pct={m.get("overshoot_pct")}'
+        )
+        return row
+
+    def _step_build_samples(self, blocks, baseline_di, step_di):
+        if not blocks:
+            return None
+        MASK = 0xFFFFFFFF
+        t0_cyc = None
+        hclk = None
+        fs = None
+        for blk in blocks:
+            if int(blk.get('target_t0_cyc', 0)) != 0:
+                t0_cyc = int(blk['target_t0_cyc'])
+                hclk = int(blk.get('hclk_hz', 0))
+                fs = int(blk.get('fs', 0))
+                break
+        if t0_cyc is None or not hclk:
+            return None
+        tau_list = []
+        adc_list = []
+        target_list = []
+        for blk in blocks:
+            t_start = int(blk.get('t_start_cyc', 0))
+            first_index = int(blk.get('first_index', 0))
+            blk_hclk = int(blk.get('hclk_hz', hclk))
+            blk_fs = int(blk.get('fs', fs))
+            cps = (blk_hclk // blk_fs) if (blk_hclk and blk_fs) else 0
+            for k, adc in enumerate(blk.get('samples', [])):
+                t_cyc = (t_start + (first_index + k) * cps) & MASK
+                d = ((t_cyc - t0_cyc + 0x80000000) % 0x100000000) - 0x80000000
+                tau = d / hclk
+                target = step_di if tau >= 0.0 else baseline_di
+                tau_list.append(tau)
+                adc_list.append(adc)
+                target_list.append(target)
+        return {'tau': tau_list, 'adc': adc_list, 'target': target_list,
+                'fs': fs, 'hclk_hz': hclk, 'target_t0_cyc': t0_cyc}
+
+    @staticmethod
+    def _step_analyse(tau, adc, fs):
+        tau = np.asarray(tau, dtype=float)
+        adc = np.asarray(adc, dtype=float)
+        out = {'baseline_counts': None, 'final_counts': None, 'baseline_noise_rms': None,
+               'dead_time_ms': None, 't50_ms': None, 't90_ms': None,
+               'rise_time_10_90_ms': None, 'max_slope_counts_per_ms': None,
+               'max_slope_smooth_counts_per_ms': None, 'overshoot_pct': None,
+               'settling_time_2pct_ms': None, 'settling_band_used': None}
+        if tau.size < 40:
+            return out
+
+        win = max(3, int(round(fs * 0.0005)) | 1)
+        adc_smooth = np.convolve(adc, np.ones(win) / float(win), mode='same')
+
+        bmask = (tau >= -0.060) & (tau <= -0.010)
+        if int(np.count_nonzero(bmask)) < 5:
+            return out
+        baseline = float(np.mean(adc[bmask]))
+        noise_rms = float(np.std(adc[bmask]))
+        out['baseline_counts'] = baseline
+        out['baseline_noise_rms'] = noise_rms
+
+        fmask = (tau >= 0.200) & (tau <= 0.300)
+        if int(np.count_nonzero(fmask)) < 5:
+            fmask = tau >= 0.200
+        if int(np.count_nonzero(fmask)) < 5:
+            return out
+        final = float(np.mean(adc[fmask]))
+        out['final_counts'] = final
+
+        step = final - baseline
+        step_mag = abs(step)
+        if step_mag < 1e-9:
+            return out
+        sign = 1.0 if step > 0 else -1.0
+
+        def crossing_time(thresh_frac):
+            thresh = baseline + thresh_frac * step
+            side = (adc_smooth - thresh) * sign
+            n_persist = max(1, int(round(fs * 0.001)))
+            idx0 = int(np.searchsorted(tau, 0.0))
+            for i in range(idx0, tau.size - n_persist + 1):
+                if side[i] > 0 and np.all(side[i:i + n_persist] > 0):
+                    return float(tau[i])
+            return None
+
+        t10 = crossing_time(0.10)
+        t50 = crossing_time(0.50)
+        t90 = crossing_time(0.90)
+        out['dead_time_ms'] = t10 * 1e3 if t10 is not None else None
+        out['t50_ms'] = t50 * 1e3 if t50 is not None else None
+        out['t90_ms'] = t90 * 1e3 if t90 is not None else None
+        if t10 is not None and t90 is not None:
+            out['rise_time_10_90_ms'] = (t90 - t10) * 1e3
+
+        dt = np.diff(tau)
+        if dt.size > 0 and np.all(dt > 0):
+            pmask = tau[1:] >= 0.0
+            sl_u = np.abs(np.diff(adc) / dt) / 1000.0
+            sl_s = np.abs(np.diff(adc_smooth) / dt) / 1000.0
+            if np.any(pmask):
+                out['max_slope_counts_per_ms'] = float(np.max(sl_u[pmask]))
+                out['max_slope_smooth_counts_per_ms'] = float(np.max(sl_s[pmask]))
+
+        post = tau >= 0.0
+        post_adc = adc[post]
+        if post_adc.size > 0:
+            if sign > 0:
+                out['overshoot_pct'] = (float(np.max(post_adc)) - final) / step_mag * 100.0
+            else:
+                out['overshoot_pct'] = (final - float(np.min(post_adc))) / step_mag * 100.0
+
+        band_2pct = 0.02 * step_mag
+        band_noise = 3.0 * noise_rms
+        settling_band = max(band_2pct, band_noise)
+        out['settling_band_used'] = '2%' if band_2pct >= band_noise else '3*noise'
+        dev = np.abs(adc - final)
+        viol = np.where(post & (dev > settling_band))[0]
+        out['settling_time_2pct_ms'] = float(tau[viol[-1]]) * 1e3 if viol.size else 0.0
+
+        return out
+
+    def _step_save_raw(self, built, mag_pct, direction, ts, folder):
+        tau = built['tau']
+        adc = built['adc']
+        target = built['target']
+        safe = direction.replace('→', '_').replace('−', 'm')
+        path = os.path.join(folder, f'{ts}_step_{mag_pct:g}pct_{safe}.csv')
+        try:
+            with open(path, 'w', newline='') as f:
+                f.write('sample_index,tau_s,adc,target\n')
+                for i in range(len(adc)):
+                    f.write(f'{i},{tau[i]:.9f},{adc[i]},{target[i]:.6f}\n')
+            self.log(f'Step {mag_pct:g}% {direction}: raw saved to {path} ({len(adc)} samples)')
+        except Exception as e:
+            self.log(f'Step {mag_pct:g}% {direction}: raw save failed: {e}')
+        return path
+
+    def _step_write_summary(self, path, rows):
+        numeric_cols = ['baseline_counts', 'final_counts', 'baseline_noise_rms',
+                        'dead_time_ms', 't50_ms', 't90_ms', 'rise_time_10_90_ms',
+                        'max_slope_counts_per_ms', 'max_slope_smooth_counts_per_ms',
+                        'overshoot_pct', 'settling_time_2pct_ms']
+        groups = {}
+        for r in rows:
+            groups.setdefault((r.get('magnitude_pct'), r.get('direction')), []).append(r)
+        header = ['magnitude_pct', 'direction', 'n']
+        for c in numeric_cols:
+            header.append(c + '_mean')
+            header.append(c + '_std')
+        try:
+            with open(path, 'w', newline='') as f:
+                f.write(','.join(header) + '\n')
+                for key in sorted(groups, key=lambda k: (k[0] if k[0] is not None else -1, str(k[1]))):
+                    mag, direction = key
+                    grp = groups[key]
+                    line = [str(mag), str(direction), str(len(grp))]
+                    for c in numeric_cols:
+                        vs = [r.get(c) for r in grp if r.get(c) is not None]
+                        if len(vs) >= 2:
+                            line.append(f'{float(np.mean(vs)):.6f}')
+                            line.append(f'{float(np.std(vs)):.6f}')
+                        elif len(vs) == 1:
+                            line.append(f'{vs[0]:.6f}')
+                            line.append('')
+                        else:
+                            line.append('')
+                            line.append('')
+                    f.write(','.join(line) + '\n')
+            self.log(f'Step test: summary written to {path}')
+        except Exception as e:
+            self.log(f'Step test: could not write summary: {e}')
 
     def _sweep_engine_send_effect(self, effect_type: str, freq_hz: float, magnitude: int,
                                   settle_periods: int = 2, ramp_periods: int = 1,
