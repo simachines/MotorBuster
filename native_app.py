@@ -35,6 +35,8 @@ from server.sweep_engine import sweep_engine, SweepConfig, SweepData
 
 import logging
 
+logger = logging.getLogger('Phase_Test')
+
 
 class SystemLogHandler(logging.Handler):
     """Forward logging records (errors/warnings) to the app's system log panel."""
@@ -2133,6 +2135,14 @@ class MotorBusterNativeApp:
         blocks = list(self.stream2_blocks)
         stats = serial_manager.get_stream2_stats()
         built = self._stream2_build_samples(blocks, freq)
+        crosscheck = built.get('crosscheck_max_diff') if built else None
+        logger.info(
+            f'STREAM2 run {run_idx}: blocks={len(blocks)}, '
+            f'crc_errors={stats.get("crc_errors", 0)}, '
+            f'block_gaps={stats.get("block_gaps", 0)}, '
+            f'dropped_blocks={stats.get("dropped_blocks", 0)}, '
+            f'target_crosscheck_max_diff={crosscheck if crosscheck is None else f"{crosscheck:.6f}"}'
+        )
         n_records = 0
         if built is None:
             self.log(f'Phase repeat run {run_idx} (STREAM2): no valid MARK2 reference, run invalid')

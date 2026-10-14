@@ -55,6 +55,7 @@ STREAM_RECORD_LEN = 15    # [0xCC][adc:2B][theta:4B][t_us:4B][t_marker:4B] littl
 STREAM2_SYNC = b'\xDD\xAD'  # block sync marker
 STREAM2_BLOCK_LEN = 574     # 60-byte header + 512-byte samples + 2-byte CRC
 STREAM2_VERSION = 2
+STREAM2_DRAIN_SECONDS = 0.3  # after STREAM2_STOP, discard in-flight STREAM2 bytes for this long
 
 # Map effect type names to command bytes
 EFFECT_CMD_MAP = {
@@ -304,6 +305,7 @@ class SerialManager:
 
         # STREAM2 (DMA block capture) state
         self._stream2_mode = False
+        self._stream2_drain_until = 0.0
         self._stream2_buffer = bytearray()
         self._on_stream2_block: Optional[Callable[[dict], None]] = None
         self._stream2_crc_errors = 0
@@ -348,6 +350,7 @@ class SerialManager:
             self._buffer.clear()
             self._stream2_buffer.clear()
             self._stream2_mode = False
+            self._stream2_drain_until = 0.0
             self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._read_thread.start()
             logger.info(f'Serial connected to {port} @ {baud} baud')
@@ -373,6 +376,7 @@ class SerialManager:
         self._buffer.clear()
         self._stream2_buffer.clear()
         self._stream2_mode = False
+        self._stream2_drain_until = 0.0
         logger.info('Serial disconnected')
 
     def _write_packet(self, packet: Optional[bytes]) -> bool:
@@ -509,6 +513,7 @@ class SerialManager:
         ok = self._write_packet(packet)
         if ok:
             self._stream2_mode = False
+            self._stream2_drain_until = time.monotonic() + STREAM2_DRAIN_SECONDS
             self._stream2_buffer.clear()
             logger.info(f'Serial sent: type=stream2_stop (raw: {_hex(packet)})')
         else:
@@ -567,6 +572,11 @@ class SerialManager:
                     if self._stream2_mode:
                         self._stream2_buffer.extend(data)
                         self._process_stream2_buffer()
+                    elif time.monotonic() < self._stream2_drain_until:
+                        # Drain window: discard leftover STREAM2 bytes arriving just
+                        # after stop so the legacy 0xBB/0xCC parser never sees them
+                        # (ADC sample data can contain 0xBB/0xCC byte values).
+                        pass
                     else:
                         self._buffer.extend(data)
                         self._process_buffer()
