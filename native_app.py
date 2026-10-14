@@ -1475,14 +1475,14 @@ class MotorBusterNativeApp:
                 dpg.add_input_float(tag="phase_repeat_capture", default_value=4.0, width=70, min_value=1.0, max_value=60.0, step=0)
             with dpg.group(horizontal=True):
                 dpg.add_text("Repeats:")
-                dpg.add_input_int(tag="phase_repeat_repeats", default_value=20, width=70, min_value=1, max_value=100)
+                dpg.add_input_int(tag="phase_repeat_repeats", default_value=20, width=self._num_input_width(5), min_value=1, max_value=100)
                 dpg.add_spacer(width=10)
                 dpg.add_text("Rest between runs (s):")
                 dpg.add_input_float(tag="phase_repeat_rest", default_value=2.0, width=70, min_value=0.0, max_value=60.0, step=0)
             with dpg.group(horizontal=True):
                 dpg.add_text("Magnitude (%):")
                 dpg.add_slider_int(tag="phase_repeat_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
-                dpg.add_input_int(tag="phase_repeat_magnitude_num", default_value=25, width=60, min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
+                dpg.add_input_int(tag="phase_repeat_magnitude_num", default_value=25, width=self._num_input_width(5), min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
             with dpg.group(horizontal=True):
                 dpg.add_text("Effect:")
                 dpg.add_combo(tag="phase_repeat_effect", width=220,
@@ -1520,7 +1520,7 @@ class MotorBusterNativeApp:
                 dpg.add_input_float(tag="phase_sweep_step", default_value=5.0, width=70, min_value=0.1, max_value=500.0, step=0)
             with dpg.group(horizontal=True):
                 dpg.add_text("Repeats per frequency:")
-                dpg.add_input_int(tag="phase_sweep_repeats", default_value=20, width=70, min_value=1, max_value=100)
+                dpg.add_input_int(tag="phase_sweep_repeats", default_value=20, width=self._num_input_width(5), min_value=1, max_value=100)
                 dpg.add_spacer(width=10)
                 dpg.add_text("Capture seconds:")
                 dpg.add_input_float(tag="phase_sweep_capture", default_value=3.0, width=70, min_value=1.0, max_value=60.0, step=0)
@@ -1549,7 +1549,7 @@ class MotorBusterNativeApp:
             with dpg.group(horizontal=True):
                 dpg.add_text("Magnitude (%):")
                 dpg.add_slider_int(tag="phase_sweep_magnitude", default_value=25, min_value=0, max_value=100, width=180, callback=self._phase_magnitude_slider_changed)
-                dpg.add_input_int(tag="phase_sweep_magnitude_num", default_value=25, width=60, min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
+                dpg.add_input_int(tag="phase_sweep_magnitude_num", default_value=25, width=self._num_input_width(5), min_value=0, max_value=100, callback=self._phase_magnitude_num_changed)
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Run phase sweep", tag="btn_phase_sweep_run", width=140, callback=self._phase_sweep_run)
                 dpg.add_button(label="Stop phase sweep", tag="btn_phase_sweep_stop", width=140, enabled=False, callback=self._phase_sweep_stop)
@@ -1568,17 +1568,17 @@ class MotorBusterNativeApp:
                                    hint="comma-separated %")
             with dpg.group(horizontal=True):
                 dpg.add_text("Repeats per magnitude:")
-                dpg.add_input_int(tag="step_repeats", default_value=10, width=60, min_value=1, max_value=100)
+                dpg.add_input_int(tag="step_repeats", default_value=10, width=self._num_input_width(5), min_value=1, max_value=100)
                 dpg.add_spacer(width=10)
                 dpg.add_text("Overrides (mag:repeats):")
                 dpg.add_input_text(tag="step_repeat_overrides", width=170, default_value="83:5,100:5",
                                    hint="e.g. 83:5,100:5")
             with dpg.group(horizontal=True):
                 dpg.add_text("Baseline time (ms):")
-                dpg.add_input_int(tag="step_baseline_ms", default_value=150, width=70, min_value=100, max_value=2000)
+                dpg.add_input_int(tag="step_baseline_ms", default_value=150, width=self._num_input_width(5), min_value=100, max_value=2000)
                 dpg.add_spacer(width=10)
                 dpg.add_text("Hold time (ms):")
-                dpg.add_input_int(tag="step_hold_ms", default_value=500, width=70, min_value=100, max_value=5000)
+                dpg.add_input_int(tag="step_hold_ms", default_value=500, width=self._num_input_width(5), min_value=100, max_value=5000)
                 dpg.add_spacer(width=10)
                 dpg.add_text("Rest between captures (s):")
                 dpg.add_input_float(tag="step_rest", default_value=1.0, width=70, min_value=0.0, max_value=60.0, step=0)
@@ -1607,7 +1607,7 @@ class MotorBusterNativeApp:
                     dpg.add_input_float(tag="sweep_freq_max", default_value=500.0, width=100, step=0)
                     dpg.add_spacer(width=15)
                     dpg.add_text("Points:")
-                    dpg.add_input_int(tag="sweep_num_freq", default_value=20, width=80, min_value=2, max_value=200)
+                    dpg.add_input_int(tag="sweep_num_freq", default_value=20, width=self._num_input_width(5), min_value=2, max_value=200)
                 with dpg.group(horizontal=True):
                     dpg.add_text("Max Torque (Nm):")
                     dpg.add_input_float(tag="sweep_max_torque", default_value=25.0, width=100, min_value=0.1, max_value=100.0, step=0)
@@ -1618,10 +1618,10 @@ class MotorBusterNativeApp:
                     dpg.add_text("10% (2.5 Nm)", tag="txt_sweep_torque_readout", color=(180, 220, 180))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Settle periods:")
-                    dpg.add_input_int(tag="sweep_settling", default_value=2, width=70, min_value=0, max_value=4)
+                    dpg.add_input_int(tag="sweep_settling", default_value=2, width=self._num_input_width(5), min_value=0, max_value=4)
                     dpg.add_spacer(width=15)
                     dpg.add_text("Ramp periods:")
-                    dpg.add_input_int(tag="sweep_ramp", default_value=1, width=70, min_value=0, max_value=1)
+                    dpg.add_input_int(tag="sweep_ramp", default_value=1, width=self._num_input_width(5), min_value=0, max_value=1)
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="Preview", width=80, callback=self._sweep_preview_freqs)
                     dpg.add_button(label="Run", tag="btn_sweep_run", width=90, callback=self._sweep_run)
@@ -5688,6 +5688,7 @@ class MotorBusterNativeApp:
             if used_path and os.path.exists(used_path):
                 try:
                     self.font_regular = dpg.add_font(used_path, 18)
+                    self._regular_font_size = 18
                     add_custom_chars(self.font_regular)
                     if not hasattr(self, 'font_large_icons'): # Fallback if bold failed or didn't exist
                          self.font_large_icons = dpg.add_font(used_path, 28)
@@ -5700,6 +5701,12 @@ class MotorBusterNativeApp:
             else:
                 # Fallback to default
                 dpg.bind_font(dpg.mvFont_Default)
+
+    def _num_input_width(self, n_chars=5):
+        """Pixel width for a numeric input with +/- spinner buttons so n_chars
+        digits stay visible, scaled with the current UI font size."""
+        font_size = getattr(self, '_regular_font_size', 13)
+        return int(round(font_size * (0.62 * n_chars + 2.4)))
 
     def apply_theme(self, mode="Dark Mode"):
         self.current_theme_mode = mode
