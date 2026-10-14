@@ -72,5 +72,42 @@ class TestStepAnalysis(unittest.TestCase):
         self.assertAlmostEqual(m['rise_time_10_90_ms'], rise * 1e3, delta=3.0)
 
 
+class TestStepResultsIO(unittest.TestCase):
+    def test_step_result_and_summary_roundtrip(self):
+        import tempfile
+        app = object.__new__(App)
+        app.log = lambda msg: None  # stub UI log for headless IO test
+        row = {
+            'magnitude_pct': 50.0, 'direction': '0_to_pos',
+            'baseline_counts': 2000.0, 'final_counts': 2500.0,
+            'baseline_noise_rms': 1.5, 'dead_time_ms': 8.0, 't50_ms': 15.0,
+            't90_ms': 25.0, 'rise_time_10_90_ms': 17.0,
+            'max_slope_counts_per_ms': 60.0, 'max_slope_smooth_counts_per_ms': 55.0,
+            'overshoot_pct': 2.5, 'settling_time_2pct_ms': 40.0,
+            'settling_band_used': '2%', 'crc_errors': 0, 'block_gaps': 0,
+            'dropped_blocks': 0, 'host_pulse_ms': 0.1,
+        }
+        with tempfile.TemporaryDirectory() as d:
+            results_path = os.path.join(d, 'results_step.csv')
+            summary_path = os.path.join(d, 'results_step_summary.csv')
+            with open(results_path, 'w', encoding='utf-8', newline='') as f:
+                f.write(','.join(app._STEP_RESULT_COLUMNS) + '\n')
+            app._step_append_result(results_path, row)
+            app._step_write_summary(summary_path, [row])
+
+            with open(results_path, 'r', encoding='utf-8', newline='') as f:
+                lines = f.read().splitlines()
+            self.assertEqual(len(lines), 2)
+            cols = dict(zip(app._STEP_RESULT_COLUMNS, lines[1].split(',')))
+            self.assertEqual(cols['direction'], '0_to_pos')
+            self.assertAlmostEqual(float(cols['dead_time_ms']), 8.0)
+            self.assertAlmostEqual(float(cols['rise_time_10_90_ms']), 17.0)
+
+            with open(summary_path, 'r', encoding='utf-8', newline='') as f:
+                summary = f.read()
+            self.assertIn('0_to_pos', summary)
+            self.assertIn('dead_time_ms_mean', summary)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -1872,7 +1872,7 @@ class MotorBusterNativeApp:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             f'motorbuster_phase_{ts}.csv')
         try:
-            with open(path, 'w', newline='') as f:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write('index,adc,theta_rad,cos_theta,sin_theta,t_us,t_marker\n')
                 for i, r in enumerate(records):
                     th = r['theta']
@@ -1955,18 +1955,19 @@ class MotorBusterNativeApp:
     def _phase_repeat_worker(self, freq, capture_s, repeats, rest_s, magnitude_pct, effect_mode='sine',
                              acquisition_mode='legacy', fs_hz=10000):
         base = os.path.dirname(os.path.abspath(__file__))
-        folder = os.path.join(base, 'phase_runs')
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        folder = os.path.join(base, 'phase_runs', 'phase_repeatability', ts)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
             self.log(f'Phase repeat: could not create {folder}: {e}')
+        self.log(f'Phase repeatability session folder: {folder}')
 
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        results_path = os.path.join(folder, f'results_{freq:g}Hz_{ts}.csv')
+        results_path = os.path.join(folder, f'results_{freq:g}Hz.csv')
         results = []
 
         try:
-            with open(results_path, 'w', newline='') as rf:
+            with open(results_path, 'w', encoding='utf-8', newline='') as rf:
                 rf.write(','.join(self._PHASE_RESULT_COLUMNS) + '\n')
         except Exception as e:
             self.log(f'Phase repeat: could not write results header {results_path}: {e}')
@@ -1978,7 +1979,7 @@ class MotorBusterNativeApp:
                 self._phase_repeat_set_status(f'Run {run_idx}/{repeats}...')
                 self._phase_repeat_set_progress((run_idx - 1) / max(1, repeats))
                 try:
-                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode,
+                    row = self._phase_repeat_run_once(freq, capture_s, run_idx, magnitude_pct, folder, effect_mode,
                                                       acquisition_mode, fs_hz)
                     results.append(row)
                     self._phase_repeat_append_result(results_path, row)
@@ -1999,7 +2000,7 @@ class MotorBusterNativeApp:
             text, csv_line = self._phase_repeat_summary(results)
             self._phase_repeat_set_status(text)
             self.log(f'[Phase repeat] {text}')
-            with open(results_path, 'a', newline='') as rf:
+            with open(results_path, 'a', encoding='utf-8', newline='') as rf:
                 rf.write(csv_line + '\n')
         except Exception as e:
             self.log(f'Phase repeat: could not write summary: {e}')
@@ -2011,10 +2012,10 @@ class MotorBusterNativeApp:
             if dpg.does_item_exist('btn_phase_sweep_run'):
                 dpg.configure_item('btn_phase_sweep_run', enabled=True)
 
-    def _phase_repeat_run_once(self, freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode='sine',
+    def _phase_repeat_run_once(self, freq, capture_s, run_idx, magnitude_pct, folder, effect_mode='sine',
                                acquisition_mode='legacy', fs_hz=10000):
         if acquisition_mode == 'stream2':
-            return self._phase_repeat_run_once_stream2(freq, capture_s, run_idx, magnitude_pct, ts, folder,
+            return self._phase_repeat_run_once_stream2(freq, capture_s, run_idx, magnitude_pct, folder,
                                                        effect_mode, fs_hz)
         t_a = t_b = t_c = 0.0
         updates = []
@@ -2082,9 +2083,9 @@ class MotorBusterNativeApp:
         else:
             marker_value = 0
             marker_changed = False
-        self._phase_repeat_save_raw(records, freq, run_idx, ts, folder)
+        self._phase_repeat_save_raw(records, freq, run_idx, folder)
         if effect_mode == 'constant':
-            self._phase_save_update_csv(updates, freq, run_idx, ts, folder)
+            self._phase_save_update_csv(updates, freq, run_idx, folder)
         analysis = self._phase_repeat_analyse(records, freq)
         update_stats = self._phase_update_stats(updates)
 
@@ -2116,7 +2117,7 @@ class MotorBusterNativeApp:
             'dropped_blocks': None,
         }
 
-    def _phase_repeat_run_once_stream2(self, freq, capture_s, run_idx, magnitude_pct, ts, folder, effect_mode, fs_hz):
+    def _phase_repeat_run_once_stream2(self, freq, capture_s, run_idx, magnitude_pct, folder, effect_mode, fs_hz):
         """One STREAM2 acquisition run.
 
         Sequence: STREAM2_START -> wait 0.3 s -> TARGET_SINE -> MARK1 ->
@@ -2187,7 +2188,7 @@ class MotorBusterNativeApp:
                         'resid_rms_counts': None, 'n_records': 0}
         else:
             n_records = len(built['adc'])
-            self._phase_repeat_save_raw_stream2(built, freq, run_idx, ts, folder)
+            self._phase_repeat_save_raw_stream2(built, freq, run_idx, folder)
             if built.get('crosscheck_max_diff') is not None:
                 self.log(f'Phase repeat run {run_idx} (STREAM2): target cross-check '
                          f'max |recon - fw| = {built["crosscheck_max_diff"]:.6f}')
@@ -2310,13 +2311,13 @@ class MotorBusterNativeApp:
             'crosscheck_max_diff': max_diff,
         }
 
-    def _phase_repeat_save_raw_stream2(self, built, freq, run_idx, ts, folder):
+    def _phase_repeat_save_raw_stream2(self, built, freq, run_idx, folder):
         tau = built['tau']
         adc = built['adc']
         target = built['target']
-        path = os.path.join(folder, f'{ts}_{freq:g}Hz_run{run_idx:02d}_stream2.csv')
+        path = os.path.join(folder, f'{freq:g}Hz_run{run_idx:02d}_stream2.csv')
         try:
-            with open(path, 'w', newline='') as f:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write('sample_index,tau_s,adc,target\n')
                 for i in range(len(adc)):
                     f.write(f'{i},{tau[i]:.9f},{adc[i]},{target[i]:.6f}\n')
@@ -2387,10 +2388,10 @@ class MotorBusterNativeApp:
             'interval_ms_max': float(np.max(intervals)) * 1e3,
         }
 
-    def _phase_save_update_csv(self, updates, freq, run_idx, ts, folder):
-        path = os.path.join(folder, f'{ts}_{freq:g}Hz_run{run_idx:02d}_updates.csv')
+    def _phase_save_update_csv(self, updates, freq, run_idx, folder):
+        path = os.path.join(folder, f'{freq:g}Hz_run{run_idx:02d}_updates.csv')
         try:
-            with open(path, 'w', newline='') as f:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write('t_s,value\n')
                 for t_s, value in updates:
                     f.write(f'{t_s:.6f},{value}\n')
@@ -2399,10 +2400,10 @@ class MotorBusterNativeApp:
             self.log(f'Phase repeat run {run_idx}: update save failed: {e}')
         return path
 
-    def _phase_repeat_save_raw(self, records, freq, run_idx, ts, folder):
-        path = os.path.join(folder, f'{ts}_{freq:g}Hz_run{run_idx:02d}.csv')
+    def _phase_repeat_save_raw(self, records, freq, run_idx, folder):
+        path = os.path.join(folder, f'{freq:g}Hz_run{run_idx:02d}.csv')
         try:
-            with open(path, 'w', newline='') as f:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write('index,adc,theta_rad,cos_theta,sin_theta,t_us,t_marker\n')
                 for i, r in enumerate(records):
                     th = r['theta']
@@ -2625,7 +2626,7 @@ class MotorBusterNativeApp:
             return str(v)
         line = ','.join(_fmt(row.get(k)) for k in self._PHASE_RESULT_COLUMNS) + '\n'
         try:
-            with open(path, 'a', newline='') as rf:
+            with open(path, 'a', encoding='utf-8', newline='') as rf:
                 rf.write(line)
         except Exception as e:
             self.log(f'Phase repeat: could not append result row: {e}')
@@ -2781,14 +2782,15 @@ class MotorBusterNativeApp:
     def _phase_sweep_worker(self, freqs, repeats, capture_s, rest_s, magnitude_pct, effect_mode='sine',
                             acquisition_mode='legacy', fs_hz=10000):
         base = os.path.dirname(os.path.abspath(__file__))
-        folder = os.path.join(base, 'phase_runs')
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        folder = os.path.join(base, 'phase_runs', 'phase_sweep', ts)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
             self.log(f'Phase sweep: could not create {folder}: {e}')
+        self.log(f'Phase sweep session folder: {folder}')
 
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        results_path = os.path.join(folder, f'results_sweep_{ts}.csv')
+        results_path = os.path.join(folder, 'results_sweep.csv')
 
         total_freqs = len(freqs)
         start_time = time.time()
@@ -2813,7 +2815,7 @@ class MotorBusterNativeApp:
                         f'Freq {freq:g} Hz, run {run_idx}/{repeats}, '
                         f'elapsed {time.time() - start_time:.0f}s...')
                     try:
-                        row = self._phase_repeat_run_once(freq, cap, run_idx, magnitude_pct, ts, folder, effect_mode,
+                        row = self._phase_repeat_run_once(freq, cap, run_idx, magnitude_pct, folder, effect_mode,
                                                           acquisition_mode, fs_hz)
                         run_results.append(row)
                     except Exception as e:
@@ -2971,7 +2973,7 @@ class MotorBusterNativeApp:
                 return f'{v:.6f}'
             return str(v)
         try:
-            with open(path, 'w', newline='') as rf:
+            with open(path, 'w', encoding='utf-8', newline='') as rf:
                 rf.write(','.join(self._PHASE_SWEEP_COLUMNS) + '\n')
                 for row in sweep_rows:
                     rf.write(','.join(_fmt(row.get(k)) for k in self._PHASE_SWEEP_COLUMNS) + '\n')
@@ -2997,10 +2999,10 @@ class MotorBusterNativeApp:
     )
 
     _STEP_DIRECTIONS = (
-        ('0→+', 0.0, 1.0),
-        ('+→0', 1.0, 0.0),
-        ('0→−', 0.0, -1.0),
-        ('−→0', -1.0, 0.0),
+        ('0_to_pos', 0.0, 1.0),
+        ('pos_to_0', 1.0, 0.0),
+        ('0_to_neg', 0.0, -1.0),
+        ('neg_to_0', -1.0, 0.0),
     )
 
     @staticmethod
@@ -3095,20 +3097,21 @@ class MotorBusterNativeApp:
 
     def _step_worker(self, mags, repeats, overrides, baseline_ms, hold_ms, rest_s, fs_hz):
         base = os.path.dirname(os.path.abspath(__file__))
-        folder = os.path.join(base, 'phase_runs')
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        folder = os.path.join(base, 'phase_runs', 'step_response', ts)
         try:
             os.makedirs(folder, exist_ok=True)
         except Exception as e:
             self.log(f'Step test: could not create {folder}: {e}')
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        results_path = os.path.join(folder, f'results_step_{ts}.csv')
-        summary_path = os.path.join(folder, f'results_step_{ts}_summary.csv')
+        self.log(f'Step response session folder: {folder}')
+        results_path = os.path.join(folder, 'results_step.csv')
+        summary_path = os.path.join(folder, 'results_step_summary.csv')
 
         total = sum(max(1, min(100, int(overrides.get(round(m, 6), repeats)))) * len(self._STEP_DIRECTIONS) for m in mags)
         rows = []
         done = 0
         try:
-            with open(results_path, 'w', newline='') as rf:
+            with open(results_path, 'w', encoding='utf-8', newline='') as rf:
                 rf.write(','.join(self._STEP_RESULT_COLUMNS) + '\n')
         except Exception as e:
             self.log(f'Step test: could not write results header: {e}')
@@ -3125,7 +3128,7 @@ class MotorBusterNativeApp:
                         step_di = int(round(ssign * di_mag))
                         self._step_set_status(f'{mag_pct:g}% {label} rep {rep}/{n_rep}...')
                         try:
-                            row = self._step_run_once(mag_pct, label, baseline_di, step_di, ts, folder, fs_hz,
+                            row = self._step_run_once(mag_pct, label, baseline_di, step_di, folder, fs_hz,
                                                       baseline_ms, hold_ms)
                         except Exception as e:
                             import traceback
@@ -3170,12 +3173,12 @@ class MotorBusterNativeApp:
             return str(v)
         line = ','.join(_fmt(row.get(k)) for k in self._STEP_RESULT_COLUMNS) + '\n'
         try:
-            with open(path, 'a', newline='') as rf:
+            with open(path, 'a', encoding='utf-8', newline='') as rf:
                 rf.write(line)
         except Exception as e:
             self.log(f'Step test: could not append result row: {e}')
 
-    def _step_run_once(self, mag_pct, direction, baseline_di, step_di, ts, folder, fs_hz,
+    def _step_run_once(self, mag_pct, direction, baseline_di, step_di, folder, fs_hz,
                        baseline_ms=150, hold_ms=500):
         t_a = t_b = 0.0
         baseline_s = baseline_ms / 1000.0
@@ -3221,7 +3224,7 @@ class MotorBusterNativeApp:
                     'dropped_blocks': stats.get('dropped_blocks', 0),
                     'host_pulse_ms': (t_b - t_a) * 1e3}
 
-        self._step_save_raw(built, mag_pct, direction, ts, folder)
+        self._step_save_raw(built, mag_pct, direction, folder)
         fs_actual = int(built.get('fs') or fs_hz)
         m = self._step_analyse(built['tau'], built['adc'], fs_actual, hold_s=hold_s)
         row = {
@@ -3379,14 +3382,13 @@ class MotorBusterNativeApp:
 
         return out
 
-    def _step_save_raw(self, built, mag_pct, direction, ts, folder):
+    def _step_save_raw(self, built, mag_pct, direction, folder):
         tau = built['tau']
         adc = built['adc']
         target = built['target']
-        safe = direction.replace('→', '_').replace('−', 'm')
-        path = os.path.join(folder, f'{ts}_step_{mag_pct:g}pct_{safe}.csv')
+        path = os.path.join(folder, f'step_{mag_pct:g}pct_{direction}.csv')
         try:
-            with open(path, 'w', newline='') as f:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write('sample_index,tau_s,adc,target\n')
                 for i in range(len(adc)):
                     f.write(f'{i},{tau[i]:.9f},{adc[i]},{target[i]:.6f}\n')
@@ -3408,7 +3410,7 @@ class MotorBusterNativeApp:
             header.append(c + '_mean')
             header.append(c + '_std')
         try:
-            with open(path, 'w', newline='') as f:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write(','.join(header) + '\n')
                 for key in sorted(groups, key=lambda k: (k[0] if k[0] is not None else -1, str(k[1]))):
                     mag, direction = key
